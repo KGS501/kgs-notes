@@ -1,0 +1,40 @@
+# Android and Gradle
+.gradle/
+.kotlin/
+**/build/
+local.properties
+.idea/
+*.iml
+.externalNativeBuild/
+.cxx/
+captures/
+
+# Local Android tooling and device state
+.android-sdk/
+.device-debug/
+*.apk
+*.aab
+*.apks
+*.hprof
+
+# JavaScript editor tooling
+**/node_modules/
+**/.vite/
+**/dist/
+
+# Signing and credentials
+keystore.properties
+*.jks
+*.keystore
+*.pem
+*.p12
+
+# Local agent artifacts
+.codex-remote-attachments/
+.worktrees/
+tmp/
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+*.swp

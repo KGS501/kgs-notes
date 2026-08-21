@@ -1,0 +1,3 @@
+# Test at deep module seams
+
+Development will follow red-green test-driven cycles through the public interfaces of `NotesEngine`, `Source`, and `MarkdownEditor`, plus user-observable Compose semantics for critical workflows. Every released file and database schema becomes a migration-test fixture, and upgrades must preserve canonical content without destructive fallback. Tests should not couple themselves to Room tables, filesystem internals, HTTP call choreography, private helpers, or Hilt wiring; connector tests use controlled external adapters, and one behavior is implemented per vertical test slice.
