@@ -12,8 +12,18 @@ enum class NoteState {
     TRASHED,
 }
 
+enum class NoteSyncState {
+    LOCAL_SOURCE,
+    SAVED_LOCALLY,
+    SYNCING,
+    SYNCED,
+    NEEDS_ATTENTION,
+}
+
 data class Note(
     val id: NoteId,
+    val sourceId: SourceId,
+    val syncState: NoteSyncState,
     val title: String,
     val markdown: String,
     val category: String,
@@ -26,10 +36,13 @@ data class Note(
 
 data class NoteSummary(
     val id: NoteId,
+    val sourceId: SourceId,
+    val syncState: NoteSyncState,
     val title: String,
     val snippet: String,
     val category: String,
     val favorite: Boolean,
+    val createdAt: Instant,
     val updatedAt: Instant,
 )
 

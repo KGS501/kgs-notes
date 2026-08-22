@@ -6,6 +6,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import com.kgs.notes.design.KgsNotesTheme
+import com.kgs.notes.editor.warmUpKgsMarkdownEditor
 
 class MainActivity : ComponentActivity() {
     private val notesViewModel: NotesViewModel by viewModels()
@@ -18,6 +19,7 @@ class MainActivity : ComponentActivity() {
                 KgsNotesApp(notesViewModel)
             }
         }
+        warmUpKgsMarkdownEditor(applicationContext)
     }
 
     override fun onStop() {

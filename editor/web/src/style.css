@@ -10,36 +10,8 @@ html, body { min-height: 100%; }
 body { margin: 0; background: #ffffff; }
 button { font: inherit; }
 main { min-height: 100vh; }
-.toolbar {
-  position: sticky;
-  top: 0;
-  z-index: 4;
-  display: flex;
-  gap: 6px;
-  align-items: center;
-  overflow-x: auto;
-  padding: 8px 14px;
-  border-bottom: 1px solid #e4ebf3;
-  background: rgba(255, 255, 255, .97);
-  scrollbar-width: none;
-}
-.toolbar::-webkit-scrollbar { display: none; }
-.toolbar button {
-  flex: 0 0 auto;
-  min-width: 42px;
-  min-height: 40px;
-  border: 0;
-  border-radius: 12px;
-  padding: 0 11px;
-  color: #283646;
-  background: transparent;
-  white-space: nowrap;
-}
-.toolbar button:active { background: #dcebff; transform: scale(.96); }
-.toolbar button:focus-visible { outline: 3px solid #8ab8ed; outline-offset: -2px; }
-.toolbar-spacer { flex: 1; min-width: 10px; }
-.paper { min-height: calc(100vh - 57px); padding: 24px 22px 80px; background: #ffffff; }
-.rich-editor { min-height: calc(100vh - 165px); outline: none; font-size: 1.0625rem; line-height: 1.68; }
+.paper { min-height: 100vh; padding: 20px 20px 72px; background: #ffffff; }
+.rich-editor { min-height: calc(100vh - 92px); outline: none; font-size: 1.0625rem; line-height: 1.68; }
 .rich-editor p:first-child:last-child:has(> br.ProseMirror-trailingBreak)::before {
   float: left;
   height: 0;
@@ -73,9 +45,6 @@ main { min-height: 100vh; }
 
 :root.dark { color: #e6eef7; background: #172230; }
 .dark body, .dark .paper { background: #172230; }
-.dark .toolbar { border-color: #293c4e; background: rgba(23, 34, 48, .97); }
-.dark .toolbar button { color: #e6eef7; }
-.dark .toolbar button:active { background: #1f4a75; }
 .dark .rich-editor a { color: #9bcaff; }
 .dark .rich-editor p:first-child:last-child:has(> br.ProseMirror-trailingBreak)::before { color: #93a3b5; }
 .dark .rich-editor blockquote { border-color: #6da8df; color: #cedae8; }
@@ -85,7 +54,3 @@ main { min-height: 100vh; }
 .dark .attachment-card { border-color: #41566b; background: #223243; }
 .dark .attachment-card small { color: #cedae8; }
 .dark .attachment-icon { background: #1f4a75; color: #9bcaff; }
-
-@media (prefers-reduced-motion: no-preference) {
-  button { transition: transform 120ms ease, background-color 180ms ease; }
-}

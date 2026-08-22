@@ -14,6 +14,7 @@ declare global {
       load(markdown: string): void
       markdown(): string
       setDarkMode(enabled: boolean): void
+      run(command: string): void
     }
   }
 }
@@ -99,15 +100,14 @@ function setDarkMode(enabled: boolean) {
   document.documentElement.classList.toggle('dark', enabled)
 }
 
-document.querySelector('.toolbar')?.addEventListener('click', (event) => {
-  const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-command]')
-  if (!button) return
+function run(command: string) {
   const chain = editor.chain().focus()
-  switch (button.dataset.command) {
+  switch (command) {
     case 'bold': chain.toggleBold().run(); break
     case 'italic': chain.toggleItalic().run(); break
     case 'heading': chain.toggleHeading({ level: 2 }).run(); break
     case 'bullet': chain.toggleBulletList().run(); break
+    case 'numbered': chain.toggleOrderedList().run(); break
     case 'task': chain.toggleTaskList().run(); break
     case 'quote': chain.toggleBlockquote().run(); break
     case 'code': chain.toggleCodeBlock().run(); break
@@ -115,7 +115,7 @@ document.querySelector('.toolbar')?.addEventListener('click', (event) => {
     case 'undo': chain.undo().run(); break
     case 'redo': chain.redo().run(); break
   }
-})
+}
 
-window.kgsEditor = { load, markdown: exactMarkdown, setDarkMode }
+window.kgsEditor = { load, markdown: exactMarkdown, setDarkMode, run }
 post({ type: 'ready' })

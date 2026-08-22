@@ -378,6 +378,8 @@ private data class StoredNote(
 ) {
     fun toPublic(): Note = Note(
         id = id,
+        sourceId = LocalSourceId,
+        syncState = NoteSyncState.LOCAL_SOURCE,
         title = title,
         markdown = markdown,
         category = category,
@@ -390,6 +392,8 @@ private data class StoredNote(
 
     fun toSummary(): NoteSummary = NoteSummary(
         id = id,
+        sourceId = LocalSourceId,
+        syncState = NoteSyncState.LOCAL_SOURCE,
         title = title,
         snippet = markdown
             .lineSequence()
@@ -401,6 +405,7 @@ private data class StoredNote(
             .orEmpty(),
         category = category,
         favorite = favorite,
+        createdAt = createdAt,
         updatedAt = updatedAt,
     )
 }

@@ -93,4 +93,24 @@ class LocalNotesEngineTest {
         }
         assertEquals(listOf("Reading list (2).md", "Reading list.md"), markdownFiles)
     }
+
+    @Test
+    fun `Local Source notes expose their Source and local-only synchronization state`() = runBlocking {
+        val createdAt = Instant.parse("2026-08-22T08:00:00Z")
+        val engine = LocalNotesEngine.open(
+            root,
+            Clock.fixed(createdAt, ZoneOffset.UTC),
+        )
+        val noteId = engine.createDraft()
+        engine.updateContent(noteId, "# On this device")
+
+        val note = assertNotNull(engine.note(noteId))
+        val summary = engine.library.value.active.single()
+
+        assertEquals(LocalSourceId, note.sourceId)
+        assertEquals(NoteSyncState.LOCAL_SOURCE, note.syncState)
+        assertEquals(createdAt, summary.createdAt)
+        assertEquals(LocalSourceId, summary.sourceId)
+        assertEquals(NoteSyncState.LOCAL_SOURCE, summary.syncState)
+    }
 }

@@ -3,6 +3,8 @@ package com.kgs.notes.engine
 @JvmInline
 value class SourceId(val value: String)
 
+val LocalSourceId = SourceId("local")
+
 data class SourceCapabilities(
     val markdown: Boolean,
     val categories: Boolean,
