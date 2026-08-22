@@ -5,3 +5,7 @@
 *.jpeg binary
 *.webp binary
 *.jar binary
+
+# Reproducibly generated editor bundles can contain dependency string data that
+# resembles trailing whitespace to Git's patch checker.
+editor/src/main/assets/** -whitespace linguist-generated=true

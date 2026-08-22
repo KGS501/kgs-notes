@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' data: blob:; style-src 'self'; style-src-attr 'none'; script-src 'self'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <title>KGS Notes editor</title>
+  </head>
+  <body>
+    <main>
+      <nav class="toolbar" aria-label="Formatting">
+        <button data-command="bold" aria-label="Bold"><strong>B</strong></button>
+        <button data-command="italic" aria-label="Italic"><em>I</em></button>
+        <button data-command="heading" aria-label="Heading level 2">H2</button>
+        <button data-command="bullet" aria-label="Bulleted list">•</button>
+        <button data-command="task" aria-label="Checklist">☑</button>
+        <button data-command="quote" aria-label="Quote">“</button>
+        <button data-command="code" aria-label="Code block">&lt;/&gt;</button>
+        <button data-command="table" aria-label="Insert table">▦</button>
+        <span class="toolbar-spacer"></span>
+        <button data-command="undo" aria-label="Undo">↶</button>
+        <button data-command="redo" aria-label="Redo">↷</button>
+      </nav>
+      <section class="paper" aria-label="Note editor">
+        <div id="editor"></div>
+      </section>
+    </main>
+    <script type="module" src="/src/editor.ts"></script>
+  </body>
+</html>

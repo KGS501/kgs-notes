@@ -20,6 +20,10 @@
 - Run Gradle tasks sequentially; parallel Gradle invocations can contend for daemons and caches.
 - `local.properties` is machine-local and must not be committed.
 - On this machine, the shared SDK is `/home/agent/Projects/kgs-calendar/.android-sdk`.
+- Use `tools/android-emulator.sh create` once, then `start`, `install <apk>`,
+  `launch`, `screenshot <png>`, `ui [xml]`, and `logs` for device work. The
+  wrapper waits for both Android boot completion and a responsive package
+  manager; do not race installation against boot.
 - Do not print, edit, or commit signing material, credentials, private certificates, note content, or server URLs.
 
 ## Testing
