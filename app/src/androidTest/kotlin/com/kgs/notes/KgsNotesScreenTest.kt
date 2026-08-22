@@ -3,6 +3,7 @@ package com.kgs.notes
 import android.app.Application
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
@@ -10,7 +11,12 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.down
+import androidx.compose.ui.test.up
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.toPixelMap
 import androidx.test.core.app.ApplicationProvider
 import com.kgs.notes.design.KgsNotesTheme
 import com.kgs.notes.engine.LocalNotesEngine
@@ -24,6 +30,7 @@ import com.kgs.notes.engine.NoteSyncState
 import com.kgs.notes.engine.NotesEngine
 import com.kgs.notes.engine.SourceId
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 import kotlinx.coroutines.runBlocking
@@ -70,6 +77,7 @@ class KgsNotesScreenTest {
 
     @Test
     fun editorHeaderUsesCompactStatusCategoryAndRoundedActionMenus() {
+        var category = ""
         compose.setContent {
             KgsNotesTheme {
                 KgsNotesScreen(
@@ -77,7 +85,7 @@ class KgsNotesScreenTest {
                         selectedNote = sampleNote(category = "Trips/Forest"),
                         categories = listOf("Trips/Forest", "Work"),
                     ),
-                    actions = NotesActions(),
+                    actions = NotesActions(onCategoryChange = { category = it }),
                 )
             }
         }
@@ -88,10 +96,28 @@ class KgsNotesScreenTest {
         compose.onNodeWithText("Trips/Forest").assertIsDisplayed()
         compose.onNodeWithText("Work").assertIsDisplayed()
         compose.onNodeWithText("New Category").assertIsDisplayed()
+        compose.onNodeWithText("Work").performClick()
+        assertEquals("Work", category)
 
         compose.onNodeWithContentDescription("More note actions").performClick()
-        compose.onNodeWithText("Add to Favorites").assertIsDisplayed()
-        compose.onNodeWithText("Move to Trash").assertIsDisplayed()
+        compose.onNodeWithText("Favourite").assertIsDisplayed()
+        compose.onNodeWithText("Delete").assertIsDisplayed()
+    }
+
+    @Test
+    fun saveStatusOpensSourceDestinationDialog() {
+        compose.setContent {
+            KgsNotesTheme {
+                KgsNotesScreen(
+                    state = NotesUiState(selectedNote = sampleNote()),
+                    actions = NotesActions(),
+                )
+            }
+        }
+
+        compose.onNodeWithContentDescription("Saved locally").performClick()
+        compose.onNodeWithText("Save Note to").assertIsDisplayed()
+        compose.onNodeWithText("Local Source").assertIsDisplayed()
     }
 
     @Test
@@ -151,6 +177,43 @@ class KgsNotesScreenTest {
         compose.onNodeWithText("Home Cloud").assertIsDisplayed()
         compose.onNodeWithText("Trash").assertIsDisplayed()
         compose.onNodeWithText("Settings").assertIsDisplayed()
+    }
+
+    @Test
+    fun noteCardPressFeedbackStaysInsideItsRoundedShape() {
+        compose.mainClock.autoAdvance = false
+        compose.setContent {
+            KgsNotesTheme {
+                KgsNotesScreen(
+                    state = NotesUiState(notes = listOf(sampleSummary(LocalSourceId, NoteSyncState.LOCAL_SOURCE))),
+                    actions = NotesActions(),
+                )
+            }
+        }
+        compose.mainClock.advanceTimeBy(500)
+        val card = compose.onNodeWithTag("note-card-waiting-for-cloud")
+        val before = card.captureToImage().toPixelMap()[4, 4]
+
+        card.performTouchInput { down(Offset(4f, 4f)) }
+        compose.mainClock.advanceTimeBy(120)
+        val pressed = card.captureToImage().toPixelMap()[4, 4]
+        card.performTouchInput { up() }
+
+        assertEquals("Press feedback escaped the rounded card corner", before, pressed)
+    }
+
+    @Test
+    fun settingsHasAnExplicitBackToNotesAction() {
+        compose.setContent {
+            KgsNotesTheme {
+                KgsNotesScreen(
+                    state = NotesUiState(destination = LibraryDestination.SETTINGS),
+                    actions = NotesActions(),
+                )
+            }
+        }
+
+        compose.onNodeWithContentDescription("Back to Notes").assertIsDisplayed()
     }
 
     @Test

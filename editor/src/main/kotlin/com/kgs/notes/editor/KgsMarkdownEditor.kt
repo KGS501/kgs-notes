@@ -18,9 +18,9 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
@@ -34,6 +34,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.DropdownMenu
@@ -57,20 +58,21 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextRange
-import androidx.compose.ui.text.font.FontStyle
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.PopupProperties
+import com.kgs.notes.design.kgsClickable
 import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
@@ -357,117 +359,106 @@ private fun EditorToolbar(
 ) {
     var listMenuOpen by remember { mutableStateOf(false) }
     Surface(
-        color = MaterialTheme.colorScheme.surfaceContainer,
-        tonalElevation = 2.dp,
+        color = MaterialTheme.colorScheme.surfaceContainerLowest,
+        tonalElevation = 0.dp,
         modifier = Modifier
             .fillMaxWidth()
-            .height(48.dp)
             .testTag("editor-toolbar"),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            ToolbarButton(
-                description = if (mode == EditorMode.RICH) "Switch to Source Mode" else "Switch to Rich Mode",
-                onClick = {
-                    onModeChange(if (mode == EditorMode.RICH) EditorMode.SOURCE else EditorMode.RICH)
-                },
-            ) {
-                AnimatedContent(
-                    targetState = mode,
-                    transitionSpec = {
-                        (fadeIn(tween(180)) + scaleIn(tween(180), initialScale = .78f)) togetherWith
-                            (fadeOut(tween(140)) + scaleOut(tween(140), targetScale = .78f))
-                    },
-                    label = "mode icon",
-                ) { current ->
-                    Text(
-                        text = if (current == EditorMode.RICH) "Aa" else "</>",
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = if (current == EditorMode.RICH) 16.sp else 12.sp,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                }
-            }
-            VerticalToolbarDivider()
+        Column {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(1.dp),
-                modifier = Modifier
-                    .weight(1f)
-                    .horizontalScroll(androidx.compose.foundation.rememberScrollState()),
+                modifier = Modifier.height(46.dp),
             ) {
-                ToolbarTextButton("B", "Bold", fontWeight = FontWeight.Bold) {
-                    onCommand(MarkdownCommand.BOLD)
-                }
-                ToolbarTextButton("I", "Italic", fontStyle = FontStyle.Italic) {
-                    onCommand(MarkdownCommand.ITALIC)
-                }
-                ToolbarTextButton("H2", "Heading level 2", fontSize = 12.sp) {
-                    onCommand(MarkdownCommand.HEADING_2)
-                }
-                Box {
-                    ToolbarButton(description = "Lists", onClick = { listMenuOpen = true }) {
-                        ListGlyph(MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    DropdownMenu(
-                        expanded = listMenuOpen,
-                        onDismissRequest = { listMenuOpen = false },
-                        shape = RoundedCornerShape(16.dp),
-                        properties = PopupProperties(focusable = false),
-                    ) {
-                        ListMenuItem("Bulleted list", "•") {
-                            onCommand(MarkdownCommand.BULLET_LIST)
-                            listMenuOpen = false
-                        }
-                        ListMenuItem("Checklist", "☑") {
-                            onCommand(MarkdownCommand.TASK_LIST)
-                            listMenuOpen = false
-                        }
-                        ListMenuItem("Numbered list", "1.") {
-                            onCommand(MarkdownCommand.NUMBERED_LIST)
-                            listMenuOpen = false
-                        }
+                ToolbarButton(
+                    description = if (mode == EditorMode.RICH) "Switch to Source Mode" else "Switch to Rich Mode",
+                    selected = true,
+                    onClick = {
+                        onModeChange(if (mode == EditorMode.RICH) EditorMode.SOURCE else EditorMode.RICH)
+                    },
+                ) {
+                    AnimatedContent(
+                        targetState = mode,
+                        transitionSpec = {
+                            (fadeIn(spring(dampingRatio = .72f, stiffness = 500f)) +
+                                scaleIn(spring(dampingRatio = .62f, stiffness = 420f), initialScale = .72f)) togetherWith
+                                (fadeOut(tween(90)) + scaleOut(tween(110), targetScale = .72f))
+                        },
+                        label = "mode icon",
+                    ) { current ->
+                        ToolbarGlyph(
+                            type = if (current == EditorMode.RICH) ToolbarGlyphType.RICH else ToolbarGlyphType.SOURCE,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
                     }
                 }
-                ToolbarTextButton("“", "Quote") { onCommand(MarkdownCommand.BLOCKQUOTE) }
-                ToolbarTextButton("</>", "Code block", fontSize = 11.sp) {
-                    onCommand(MarkdownCommand.CODE_BLOCK)
+                Spacer(Modifier.width(7.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(0.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .horizontalScroll(androidx.compose.foundation.rememberScrollState()),
+                ) {
+                    ToolbarIconButton(ToolbarGlyphType.BOLD, "Bold") { onCommand(MarkdownCommand.BOLD) }
+                    ToolbarIconButton(ToolbarGlyphType.ITALIC, "Italic") { onCommand(MarkdownCommand.ITALIC) }
+                    ToolbarIconButton(ToolbarGlyphType.HEADING, "Heading level 2") { onCommand(MarkdownCommand.HEADING_2) }
+                    Box {
+                        ToolbarButton(description = "Lists", onClick = { listMenuOpen = true }) {
+                            ToolbarGlyph(ToolbarGlyphType.LIST, MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        DropdownMenu(
+                            expanded = listMenuOpen,
+                            onDismissRequest = { listMenuOpen = false },
+                            shape = RoundedCornerShape(18.dp),
+                            containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                            properties = PopupProperties(focusable = false),
+                        ) {
+                            ListMenuItem("Bulleted list", ToolbarGlyphType.LIST) {
+                                onCommand(MarkdownCommand.BULLET_LIST)
+                                listMenuOpen = false
+                            }
+                            ListMenuItem("Checklist", ToolbarGlyphType.CHECKLIST) {
+                                onCommand(MarkdownCommand.TASK_LIST)
+                                listMenuOpen = false
+                            }
+                            ListMenuItem("Numbered list", ToolbarGlyphType.NUMBERED_LIST) {
+                                onCommand(MarkdownCommand.NUMBERED_LIST)
+                                listMenuOpen = false
+                            }
+                        }
+                    }
+                    ToolbarIconButton(ToolbarGlyphType.QUOTE, "Quote") { onCommand(MarkdownCommand.BLOCKQUOTE) }
+                    ToolbarIconButton(ToolbarGlyphType.CODE, "Code block") { onCommand(MarkdownCommand.CODE_BLOCK) }
+                    ToolbarIconButton(ToolbarGlyphType.TABLE, "Insert table") { onCommand(MarkdownCommand.TABLE) }
                 }
-                ToolbarTextButton("▦", "Insert table") { onCommand(MarkdownCommand.TABLE) }
+                Spacer(Modifier.width(4.dp))
+                ToolbarIconButton(ToolbarGlyphType.UNDO, "Undo") { onCommand(MarkdownCommand.UNDO) }
+                ToolbarIconButton(ToolbarGlyphType.REDO, "Redo") { onCommand(MarkdownCommand.REDO) }
+                Spacer(Modifier.width(2.dp))
             }
-            VerticalToolbarDivider()
-            ToolbarTextButton("↶", "Undo", fontSize = 20.sp) { onCommand(MarkdownCommand.UNDO) }
-            ToolbarTextButton("↷", "Redo", fontSize = 20.sp) { onCommand(MarkdownCommand.REDO) }
-            Spacer(Modifier.width(2.dp))
+            Spacer(Modifier.navigationBarsPadding())
         }
     }
 }
 
 @Composable
-private fun ListMenuItem(label: String, glyph: String, onClick: () -> Unit) {
+private fun ListMenuItem(label: String, glyph: ToolbarGlyphType, onClick: () -> Unit) {
     DropdownMenuItem(
         text = { Text(label) },
-        leadingIcon = { Text(glyph, fontWeight = FontWeight.SemiBold) },
+        leadingIcon = { ToolbarGlyph(glyph, MaterialTheme.colorScheme.onSurfaceVariant) },
         onClick = onClick,
     )
 }
 
 @Composable
-private fun ToolbarTextButton(
-    text: String,
+private fun ToolbarIconButton(
+    glyph: ToolbarGlyphType,
     description: String,
-    fontWeight: FontWeight? = null,
-    fontStyle: FontStyle? = null,
-    fontSize: androidx.compose.ui.unit.TextUnit = 16.sp,
     onClick: () -> Unit,
 ) {
     ToolbarButton(description, onClick) {
-        Text(
-            text = text,
-            fontWeight = fontWeight,
-            fontStyle = fontStyle,
-            fontSize = fontSize,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        ToolbarGlyph(glyph, MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
@@ -475,43 +466,110 @@ private fun ToolbarTextButton(
 private fun ToolbarButton(
     description: String,
     onClick: () -> Unit,
+    selected: Boolean = false,
     content: @Composable () -> Unit,
 ) {
+    val shape = RoundedCornerShape(10.dp)
     Box(
         contentAlignment = Alignment.Center,
         modifier = Modifier
-            .size(40.dp)
-            .padding(2.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .clickable(onClick = onClick)
+            .padding(start = if (selected) 3.dp else 0.dp)
+            .size(38.dp)
+            .background(
+                color = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+                shape = shape,
+            )
+            .kgsClickable(onClick, shape)
             .semantics { contentDescription = description },
     ) { content() }
 }
 
-@Composable
-private fun VerticalToolbarDivider() {
-    Box(
-        Modifier
-            .padding(horizontal = 2.dp, vertical = 9.dp)
-            .width(1.dp)
-            .height(30.dp)
-            .background(MaterialTheme.colorScheme.outlineVariant),
-    )
+private enum class ToolbarGlyphType {
+    RICH, SOURCE, BOLD, ITALIC, HEADING, LIST, CHECKLIST, NUMBERED_LIST, QUOTE, CODE, TABLE, UNDO, REDO,
 }
 
 @Composable
-private fun ListGlyph(color: Color) {
-    Canvas(Modifier.size(21.dp)) {
-        val stroke = size.minDimension * .09f
-        listOf(.3f, .52f, .74f).forEach { y ->
-            drawCircle(color, radius = stroke * .7f, center = Offset(size.width * .16f, size.height * y))
-            drawLine(
-                color,
-                start = Offset(size.width * .33f, size.height * y),
-                end = Offset(size.width * .86f, size.height * y),
-                strokeWidth = stroke,
-                cap = StrokeCap.Round,
-            )
+private fun ToolbarGlyph(type: ToolbarGlyphType, color: Color) {
+    Canvas(Modifier.size(22.dp)) {
+        val stroke = size.minDimension * .105f
+        val line = Stroke(width = stroke, cap = StrokeCap.Round, join = StrokeJoin.Round)
+        fun horizontal(y: Float, start: Float = .2f, end: Float = .8f) =
+            drawLine(color, Offset(size.width * start, size.height * y), Offset(size.width * end, size.height * y), stroke, StrokeCap.Round)
+        when (type) {
+            ToolbarGlyphType.RICH -> {
+                horizontal(.28f, .16f, .62f)
+                horizontal(.5f, .16f, .84f)
+                horizontal(.72f, .16f, .7f)
+                drawCircle(color, stroke * .54f, Offset(size.width * .8f, size.height * .24f))
+            }
+            ToolbarGlyphType.SOURCE, ToolbarGlyphType.CODE -> {
+                drawLine(color, Offset(size.width * .36f, size.height * .28f), Offset(size.width * .16f, size.height * .5f), stroke, StrokeCap.Round)
+                drawLine(color, Offset(size.width * .16f, size.height * .5f), Offset(size.width * .36f, size.height * .72f), stroke, StrokeCap.Round)
+                drawLine(color, Offset(size.width * .64f, size.height * .28f), Offset(size.width * .84f, size.height * .5f), stroke, StrokeCap.Round)
+                drawLine(color, Offset(size.width * .84f, size.height * .5f), Offset(size.width * .64f, size.height * .72f), stroke, StrokeCap.Round)
+                drawLine(color, Offset(size.width * .57f, size.height * .19f), Offset(size.width * .43f, size.height * .81f), stroke * .8f, StrokeCap.Round)
+            }
+            ToolbarGlyphType.BOLD -> {
+                val path = Path().apply {
+                    moveTo(size.width * .28f, size.height * .18f)
+                    lineTo(size.width * .28f, size.height * .82f)
+                    moveTo(size.width * .28f, size.height * .2f)
+                    cubicTo(size.width * .73f, size.height * .16f, size.width * .75f, size.height * .49f, size.width * .3f, size.height * .5f)
+                    cubicTo(size.width * .8f, size.height * .49f, size.width * .8f, size.height * .84f, size.width * .28f, size.height * .8f)
+                }
+                drawPath(path, color, style = line)
+            }
+            ToolbarGlyphType.ITALIC -> {
+                horizontal(.2f, .42f, .78f)
+                horizontal(.8f, .22f, .58f)
+                drawLine(color, Offset(size.width * .62f, size.height * .2f), Offset(size.width * .38f, size.height * .8f), stroke, StrokeCap.Round)
+            }
+            ToolbarGlyphType.HEADING -> {
+                drawLine(color, Offset(size.width * .18f, size.height * .2f), Offset(size.width * .18f, size.height * .8f), stroke, StrokeCap.Round)
+                drawLine(color, Offset(size.width * .58f, size.height * .2f), Offset(size.width * .58f, size.height * .8f), stroke, StrokeCap.Round)
+                horizontal(.5f, .18f, .58f)
+                horizontal(.7f, .7f, .88f)
+                horizontal(.82f, .7f, .88f)
+            }
+            ToolbarGlyphType.LIST, ToolbarGlyphType.CHECKLIST, ToolbarGlyphType.NUMBERED_LIST -> {
+                listOf(.28f, .5f, .72f).forEachIndexed { index, y ->
+                    if (type == ToolbarGlyphType.CHECKLIST) {
+                        drawRoundRect(color, Offset(size.width * .1f, size.height * (y - .065f)), androidx.compose.ui.geometry.Size(size.width * .13f, size.height * .13f), style = Stroke(stroke * .62f))
+                        if (index == 0) {
+                            drawLine(color, Offset(size.width * .12f, size.height * y), Offset(size.width * .16f, size.height * (y + .035f)), stroke * .55f, StrokeCap.Round)
+                            drawLine(color, Offset(size.width * .16f, size.height * (y + .035f)), Offset(size.width * .22f, size.height * (y - .04f)), stroke * .55f, StrokeCap.Round)
+                        }
+                    } else if (type == ToolbarGlyphType.NUMBERED_LIST) {
+                        horizontal(y, .1f, if (index == 0) .15f else .2f)
+                    } else {
+                        drawCircle(color, stroke * .48f, Offset(size.width * .16f, size.height * y))
+                    }
+                    horizontal(y, .34f, .86f)
+                }
+            }
+            ToolbarGlyphType.QUOTE -> {
+                listOf(.3f, .62f).forEach { x ->
+                    val path = Path().apply {
+                        moveTo(size.width * x, size.height * .3f)
+                        cubicTo(size.width * (x - .14f), size.height * .42f, size.width * (x - .13f), size.height * .7f, size.width * (x + .02f), size.height * .71f)
+                        lineTo(size.width * (x + .08f), size.height * .55f)
+                    }
+                    drawPath(path, color, style = line)
+                }
+            }
+            ToolbarGlyphType.TABLE -> {
+                drawRoundRect(color, Offset(size.width * .14f, size.height * .19f), androidx.compose.ui.geometry.Size(size.width * .72f, size.height * .62f), style = Stroke(stroke * .8f))
+                horizontal(.42f, .14f, .86f)
+                horizontal(.62f, .14f, .86f)
+                drawLine(color, Offset(size.width * .5f, size.height * .19f), Offset(size.width * .5f, size.height * .81f), stroke * .8f, StrokeCap.Round)
+            }
+            ToolbarGlyphType.UNDO, ToolbarGlyphType.REDO -> {
+                val mirror = if (type == ToolbarGlyphType.UNDO) 1f else -1f
+                drawArc(color, if (mirror > 0) 195f else -15f, 235f * mirror, false, style = Stroke(stroke, cap = StrokeCap.Round))
+                val x = if (type == ToolbarGlyphType.UNDO) .18f else .82f
+                drawLine(color, Offset(size.width * x, size.height * .42f), Offset(size.width * (x + .12f * mirror), size.height * .23f), stroke, StrokeCap.Round)
+                drawLine(color, Offset(size.width * x, size.height * .42f), Offset(size.width * (x + .18f * mirror), size.height * .48f), stroke, StrokeCap.Round)
+            }
         }
     }
 }

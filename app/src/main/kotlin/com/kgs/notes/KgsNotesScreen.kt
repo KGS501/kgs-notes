@@ -2,7 +2,6 @@ package com.kgs.notes
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloat
@@ -16,9 +15,9 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -30,8 +29,13 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -51,18 +55,14 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExtendedFloatingActionButton
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -70,28 +70,38 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import com.kgs.notes.design.LocalKgsMotion
+import com.kgs.notes.design.kgsClickable
 import com.kgs.notes.editor.EditorMode
 import com.kgs.notes.editor.KgsMarkdownEditor
 import com.kgs.notes.engine.Note
@@ -103,6 +113,7 @@ import com.kgs.notes.engine.LocalSourceId
 import com.kgs.notes.engine.SourceId
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import kotlin.math.roundToInt
 
 data class NotesActions(
     val onCreate: () -> Unit = {},
@@ -111,6 +122,7 @@ data class NotesActions(
     val onRename: (String) -> Unit = {},
     val onToggleFavorite: () -> Unit = {},
     val onCategoryChange: (String) -> Unit = {},
+    val onSourceChange: (SourceId) -> Unit = {},
     val onCloseEditor: () -> Unit = {},
     val onMoveToTrash: () -> Unit = {},
     val onRestore: () -> Unit = {},
@@ -161,12 +173,14 @@ fun KgsNotesScreen(
     var drawerOpen by rememberSaveable { mutableStateOf(false) }
     BackHandler(enabled = state.selectedNote != null, onBack = actions.onCloseEditor)
     BackHandler(enabled = drawerOpen) { drawerOpen = false }
+    BackHandler(
+        enabled = state.selectedNote == null && !drawerOpen && state.destination != LibraryDestination.NOTES,
+    ) { actions.onDestinationChange(LibraryDestination.NOTES) }
 
     BoxWithConstraints(
         modifier = modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-            .safeDrawingPadding(),
+            .background(MaterialTheme.colorScheme.background),
     ) {
         val twoPane = maxWidth >= 760.dp
         if (twoPane) {
@@ -179,12 +193,6 @@ fun KgsNotesScreen(
                     modifier = Modifier
                         .widthIn(min = 330.dp, max = 410.dp)
                         .fillMaxHeight(),
-                )
-                Box(
-                    Modifier
-                        .width(1.dp)
-                        .fillMaxHeight()
-                        .background(MaterialTheme.colorScheme.outlineVariant),
                 )
                 AnimatedContent(
                     targetState = state.selectedNote,
@@ -259,9 +267,11 @@ private fun LibraryPane(
     modifier: Modifier,
 ) {
     var sortMenuOpen by remember { mutableStateOf(false) }
+    val navigationBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
     Scaffold(
         modifier = modifier.testTag("library-pane"),
         containerColor = MaterialTheme.colorScheme.background,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         floatingActionButton = {
             if (state.destination == LibraryDestination.NOTES) {
                 ExtendedFloatingActionButton(
@@ -269,6 +279,7 @@ private fun LibraryPane(
                     icon = { Icon(Icons.Default.Add, contentDescription = "New note") },
                     text = { Text("New note") },
                     shape = RoundedCornerShape(18.dp),
+                    modifier = Modifier.padding(bottom = navigationBottom),
                 )
             }
         },
@@ -279,20 +290,30 @@ private fun LibraryPane(
                 .padding(padding)
                 .padding(horizontal = 18.dp),
         ) {
-            LibraryHeader(state.destination, onOpenDrawer)
-            Spacer(Modifier.height(18.dp))
+            LibraryHeader(
+                destination = state.destination,
+                onOpenDrawer = onOpenDrawer,
+                onBackToNotes = { actions.onDestinationChange(LibraryDestination.NOTES) },
+            )
+            Spacer(Modifier.height(10.dp))
             if (state.destination == LibraryDestination.SETTINGS) {
                 SettingsPane(Modifier.fillMaxSize())
                 return@Column
             }
             if (state.destination == LibraryDestination.NOTES) {
-                OutlinedTextField(
+                TextField(
                     value = state.query,
                     onValueChange = actions.onQueryChange,
                     placeholder = { Text("Search notes") },
                     leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
                     singleLine = true,
-                    shape = RoundedCornerShape(16.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = TextFieldDefaults.colors(
+                        focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                        focusedIndicatorColor = Color.Transparent,
+                        unfocusedIndicatorColor = Color.Transparent,
+                    ),
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Spacer(Modifier.height(10.dp))
@@ -310,25 +331,40 @@ private fun LibraryPane(
                         Spacer(Modifier.width(3.dp))
                     }
                     Spacer(Modifier.weight(1f))
+                    val sortStartShape = RoundedCornerShape(
+                        topStart = 12.dp,
+                        bottomStart = 12.dp,
+                        topEnd = 3.dp,
+                        bottomEnd = 3.dp,
+                    )
                     Surface(
-                        color = MaterialTheme.colorScheme.surfaceContainer,
-                        shape = RoundedCornerShape(topStart = 14.dp, bottomStart = 14.dp),
-                    ) {
-                        IconButton(
-                            onClick = actions.onToggleSortDirection,
-                            modifier = Modifier.semantics {
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        shape = sortStartShape,
+                        modifier = Modifier
+                            .size(44.dp)
+                            .kgsClickable(actions.onToggleSortDirection, sortStartShape)
+                            .semantics {
                                 contentDescription = if (state.ascending) "Ascending" else "Descending"
                             },
-                        ) {
-                            SortDirectionGlyph(ascending = state.ascending)
-                        }
+                    ) {
+                        Box(contentAlignment = Alignment.Center) { SortDirectionGlyph(ascending = state.ascending) }
                     }
+                    Spacer(Modifier.width(2.dp))
                     Box {
+                        val sortEndShape = RoundedCornerShape(
+                            topEnd = 12.dp,
+                            bottomEnd = 12.dp,
+                            topStart = 3.dp,
+                            bottomStart = 3.dp,
+                        )
                         Surface(
-                            color = MaterialTheme.colorScheme.surfaceContainer,
-                            shape = RoundedCornerShape(topEnd = 14.dp, bottomEnd = 14.dp),
+                            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                            shape = sortEndShape,
+                            modifier = Modifier
+                                .size(44.dp)
+                                .kgsClickable({ sortMenuOpen = true }, sortEndShape),
                         ) {
-                            IconButton(onClick = { sortMenuOpen = true }) {
+                            Box(contentAlignment = Alignment.Center) {
                                 SortGlyph(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     modifier = Modifier.semantics { contentDescription = "Sort notes" },
@@ -338,7 +374,8 @@ private fun LibraryPane(
                         DropdownMenu(
                             expanded = sortMenuOpen,
                             onDismissRequest = { sortMenuOpen = false },
-                            shape = RoundedCornerShape(18.dp),
+                            shape = RoundedCornerShape(20.dp),
+                            containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
                         ) {
                             LibrarySort.entries.forEach { sort ->
                                 DropdownMenuItem(
@@ -382,10 +419,15 @@ private fun LibraryPane(
                             note = note,
                             selected = note.id == selectedId,
                             onClick = { actions.onSelect(note.id) },
-                            modifier = Modifier.animateItem(),
+                            modifier = Modifier.animateItem(
+                                placementSpec = androidx.compose.animation.core.spring(
+                                    dampingRatio = .72f,
+                                    stiffness = 420f,
+                                ),
+                            ),
                         )
                     }
-                    item { Spacer(Modifier.height(92.dp)) }
+                    item { Spacer(Modifier.height(92.dp + navigationBottom)) }
                 }
             }
         }
@@ -393,25 +435,36 @@ private fun LibraryPane(
 }
 
 @Composable
-private fun LibraryHeader(destination: LibraryDestination, onOpenDrawer: () -> Unit) {
+private fun LibraryHeader(
+    destination: LibraryDestination,
+    onOpenDrawer: () -> Unit,
+    onBackToNotes: () -> Unit,
+) {
+    val statusTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         modifier = Modifier
             .fillMaxWidth()
-            .padding(top = 14.dp),
+            .padding(top = statusTop + 5.dp),
     ) {
-        IconButton(onClick = onOpenDrawer) {
-            Icon(Icons.Default.Menu, contentDescription = "Open menu")
+        ExpressiveIconButton(
+            onClick = if (destination == LibraryDestination.NOTES) onOpenDrawer else onBackToNotes,
+        ) {
+            if (destination == LibraryDestination.NOTES) {
+                Icon(Icons.Default.Menu, contentDescription = "Open menu")
+            } else {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to Notes")
+            }
         }
         Surface(
             color = MaterialTheme.colorScheme.primary,
             contentColor = MaterialTheme.colorScheme.onPrimary,
             shape = MaterialTheme.shapes.medium,
-            modifier = Modifier.size(50.dp),
+            modifier = Modifier.size(40.dp),
         ) {
             Box(contentAlignment = Alignment.Center) {
-                Text("K", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
+                Text("K", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black)
             }
         }
         Column {
@@ -421,15 +474,23 @@ private fun LibraryHeader(destination: LibraryDestination, onOpenDrawer: () -> U
                     LibraryDestination.TRASH -> "Trash"
                     LibraryDestination.SETTINGS -> "Settings"
                 },
-                style = MaterialTheme.typography.headlineMedium,
-            )
-            Text(
-                if (destination == LibraryDestination.NOTES) "Your selected Sources" else "KGS Notes",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.titleLarge,
             )
         }
     }
+}
+
+@Composable
+private fun ExpressiveIconButton(
+    onClick: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier
+            .size(40.dp)
+            .kgsClickable(onClick, CircleShape),
+    ) { content() }
 }
 
 @Composable
@@ -449,31 +510,36 @@ private fun LibraryFilterButton(
         }
         LibraryFilter.SERVER -> "Server notes"
     }
+    val iconColor = if (selected) {
+        MaterialTheme.colorScheme.onPrimary
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    val buttonShape = RoundedCornerShape(11.dp)
     Box {
         Surface(
             color = if (selected) {
-                MaterialTheme.colorScheme.primaryContainer
+                MaterialTheme.colorScheme.primary
             } else {
-                MaterialTheme.colorScheme.surfaceContainer
+                MaterialTheme.colorScheme.surfaceContainerHigh
             },
             contentColor = if (selected) {
-                MaterialTheme.colorScheme.onPrimaryContainer
+                MaterialTheme.colorScheme.onPrimary
             } else {
                 MaterialTheme.colorScheme.onSurfaceVariant
             },
-            shape = RoundedCornerShape(13.dp),
+            shape = buttonShape,
             modifier = Modifier
                 .size(44.dp)
-                .clip(RoundedCornerShape(13.dp))
-                .clickable(onClick = onClick)
+                .kgsClickable(onClick, buttonShape)
                 .semantics { contentDescription = description },
         ) {
             Box(contentAlignment = Alignment.Center) {
                 when (filter) {
-                    LibraryFilter.ALL -> AllNotesGlyph(MaterialTheme.colorScheme.onSurfaceVariant)
-                    LibraryFilter.FAVORITES -> Icon(Icons.Default.FavoriteBorder, contentDescription = null)
-                    LibraryFilter.LOCAL -> LocalNotesGlyph(MaterialTheme.colorScheme.onSurfaceVariant)
-                    LibraryFilter.SERVER -> CloudGlyph(MaterialTheme.colorScheme.onSurfaceVariant)
+                    LibraryFilter.ALL -> AllNotesGlyph(iconColor)
+                    LibraryFilter.FAVORITES -> Icon(Icons.Default.FavoriteBorder, contentDescription = null, tint = iconColor)
+                    LibraryFilter.LOCAL -> LocalNotesGlyph(iconColor)
+                    LibraryFilter.SERVER -> CloudGlyph(iconColor)
                 }
             }
         }
@@ -578,37 +644,71 @@ private fun NotesDrawer(
     onDestination: (LibraryDestination) -> Unit,
 ) {
     val motion = LocalKgsMotion.current
-    AnimatedVisibility(
-        visible = visible,
-        enter = fadeIn(tween(motion.shortMillis)),
-        exit = fadeOut(tween(motion.shortMillis)),
-        modifier = Modifier.fillMaxSize(),
-    ) {
-        Box(Modifier.fillMaxSize()) {
+    val progress by animateFloatAsState(
+        targetValue = if (visible) 1f else 0f,
+        animationSpec = tween(
+            durationMillis = if (visible) 150 else 125,
+            easing = if (visible) motion.standard else motion.accelerate,
+        ),
+        label = "drawer slide",
+    )
+    var dragOffset by remember { mutableFloatStateOf(0f) }
+    val drawerWidth = 292.dp
+    val drawerWidthPx = with(LocalDensity.current) { drawerWidth.toPx() }
+    val effectiveProgress = (progress + dragOffset / drawerWidthPx).coerceIn(0f, 1f)
+    val statusTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+    val navigationBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+
+    Box(Modifier.fillMaxSize()) {
+        if (effectiveProgress > .01f) {
             Box(
                 Modifier
                     .fillMaxSize()
-                    .background(Color.Black.copy(alpha = .34f))
+                    .background(Color.Black.copy(alpha = .34f * effectiveProgress))
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
                         onClick = onDismiss,
                     ),
             )
-            AnimatedVisibility(
-                visible = visible,
-                enter = slideInHorizontally(tween(motion.mediumMillis, easing = motion.emphasized)) { -it },
-                exit = slideOutHorizontally(tween(motion.shortMillis, easing = motion.accelerate)) { -it },
+        }
+        if (effectiveProgress > .001f) {
+            Surface(
+                color = MaterialTheme.colorScheme.surface,
+                shape = RoundedCornerShape(topEnd = 18.dp, bottomEnd = 18.dp),
+                shadowElevation = 0.dp,
+                modifier = Modifier
+                    .width(drawerWidth)
+                    .fillMaxHeight()
+                    .offset {
+                        IntOffset(
+                            x = (-drawerWidthPx * (1f - effectiveProgress)).roundToInt(),
+                            y = 0,
+                        )
+                    }
+                    .pointerInput(visible) {
+                        detectHorizontalDragGestures(
+                            onDragCancel = { dragOffset = 0f },
+                            onDragEnd = {
+                                if (effectiveProgress < .72f) onDismiss()
+                                dragOffset = 0f
+                            },
+                        ) { change, amount ->
+                            change.consume()
+                            dragOffset = (dragOffset + amount).coerceIn(-drawerWidthPx, 0f)
+                        }
+                    },
             ) {
-                Surface(
-                    color = MaterialTheme.colorScheme.surface,
-                    shape = RoundedCornerShape(topEnd = 28.dp, bottomEnd = 28.dp),
-                    shadowElevation = 12.dp,
-                    modifier = Modifier
-                        .width(292.dp)
-                        .fillMaxHeight(),
+                Column(
+                    Modifier
+                        .fillMaxSize()
+                        .padding(
+                            start = 18.dp,
+                            top = statusTop + 18.dp,
+                            end = 18.dp,
+                            bottom = navigationBottom + 14.dp,
+                        ),
                 ) {
-                    Column(Modifier.padding(horizontal = 18.dp, vertical = 20.dp)) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -632,7 +732,7 @@ private fun NotesDrawer(
                                 )
                             }
                         }
-                        Spacer(Modifier.height(28.dp))
+                        Spacer(Modifier.height(24.dp))
                         Text(
                             "Sources",
                             style = MaterialTheme.typography.labelLarge,
@@ -667,7 +767,6 @@ private fun NotesDrawer(
                             onClick = { onDestination(LibraryDestination.SETTINGS) },
                             icon = { Icon(Icons.Default.Settings, contentDescription = null) },
                         )
-                    }
                 }
             }
         }
@@ -681,14 +780,14 @@ private fun DrawerRow(
     onClick: () -> Unit,
     icon: @Composable () -> Unit,
 ) {
+    val shape = RoundedCornerShape(14.dp)
     Surface(
         color = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
         contentColor = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
-        shape = RoundedCornerShape(14.dp),
+        shape = shape,
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .clickable(onClick = onClick),
+            .kgsClickable(onClick, shape),
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -720,8 +819,7 @@ private fun SettingsPane(modifier: Modifier) {
 private fun SettingsCard(title: String, value: String) {
     Surface(
         color = MaterialTheme.colorScheme.surface,
-        shape = RoundedCornerShape(16.dp),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        shape = RoundedCornerShape(14.dp),
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(Modifier.padding(16.dp)) {
@@ -743,17 +841,14 @@ private fun NoteCard(
     } else {
         MaterialTheme.colorScheme.surface
     }
-    Card(
-        colors = CardDefaults.cardColors(containerColor = container),
-        border = BorderStroke(
-            1.dp,
-            if (selected) MaterialTheme.colorScheme.primary.copy(alpha = .35f)
-            else MaterialTheme.colorScheme.outlineVariant,
-        ),
-        shape = RoundedCornerShape(18.dp),
+    val shape = RoundedCornerShape(14.dp)
+    Surface(
+        color = container,
+        shape = shape,
         modifier = modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick),
+            .testTag("note-card-${note.id.value}")
+            .kgsClickable(onClick, shape),
     ) {
         Column(
             verticalArrangement = Arrangement.spacedBy(7.dp),
@@ -882,7 +977,6 @@ private fun EditorPane(
             .testTag("note-editor"),
     ) {
         EditorHeader(state, note, actions, showBack)
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         if (note.state == NoteState.TRASHED) {
             TrashedNote(note, actions, Modifier.fillMaxSize())
         } else {
@@ -904,21 +998,21 @@ private fun EditorHeader(
     actions: NotesActions,
     showBack: Boolean,
 ) {
-    var categoryMenuOpen by remember { mutableStateOf(false) }
+    var categoryDialogOpen by remember { mutableStateOf(false) }
+    var sourceDialogOpen by remember { mutableStateOf(false) }
     var actionsMenuOpen by remember { mutableStateOf(false) }
-    var creatingCategory by remember { mutableStateOf(false) }
-    var newCategory by remember { mutableStateOf("") }
+    val statusTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
 
-    Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
+    Column(modifier = Modifier.padding(start = 6.dp, top = statusTop + 2.dp, end = 6.dp, bottom = 2.dp)) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(2.dp),
+            horizontalArrangement = Arrangement.spacedBy(1.dp),
         ) {
             if (showBack) {
-                IconButton(onClick = actions.onCloseEditor) {
+                ExpressiveIconButton(onClick = actions.onCloseEditor) {
                     Icon(
                         Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Back to notes",
+                        contentDescription = "Back to Notes",
                         tint = MaterialTheme.colorScheme.onSurface,
                     )
                 }
@@ -931,7 +1025,23 @@ private fun EditorHeader(
                     color = MaterialTheme.colorScheme.onSurface,
                 ),
                 cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                modifier = Modifier.weight(1f),
+                modifier = Modifier
+                    .weight(1f)
+                    .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+                    .drawWithContent {
+                        drawContent()
+                        val fadeWidth = 30.dp.toPx()
+                        drawRect(
+                            brush = Brush.horizontalGradient(
+                                colorStops = arrayOf(
+                                    0f to Color.White,
+                                    ((size.width - fadeWidth) / size.width).coerceIn(0f, 1f) to Color.White,
+                                    1f to Color.Transparent,
+                                ),
+                            ),
+                            blendMode = BlendMode.DstIn,
+                        )
+                    },
             )
             SaveStatusIndicator(
                 status = when {
@@ -940,77 +1050,34 @@ private fun EditorHeader(
                     note.syncState == NoteSyncState.SYNCED -> EditorSaveStatus.SYNCED
                     else -> EditorSaveStatus.SAVED_LOCALLY
                 },
+                onClick = { sourceDialogOpen = true },
             )
             if (note.state != NoteState.TRASHED) {
-                Box {
-                    IconButton(
-                        onClick = { categoryMenuOpen = true },
-                        modifier = Modifier.semantics {
+                val categoryShape = RoundedCornerShape(12.dp)
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .size(40.dp)
+                        .kgsClickable({ categoryDialogOpen = true }, categoryShape)
+                        .semantics {
                             contentDescription = if (note.category.isBlank()) {
                                 "Choose Category"
                             } else {
                                 "Choose Category: ${note.category}"
                             }
                         },
-                    ) {
-                        CategoryIcon(
-                            filled = note.category.isNotBlank(),
-                            color = if (note.category.isNotBlank()) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                            },
-                        )
-                    }
-                    DropdownMenu(
-                        expanded = categoryMenuOpen,
-                        onDismissRequest = { categoryMenuOpen = false },
-                        shape = RoundedCornerShape(18.dp),
-                    ) {
-                        DropdownMenuItem(
-                            text = { Text("No Category") },
-                            leadingIcon = {
-                                CategoryIcon(
-                                    filled = false,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            },
-                            onClick = {
-                                actions.onCategoryChange("")
-                                categoryMenuOpen = false
-                            },
-                        )
-                        state.categories.forEach { category ->
-                            DropdownMenuItem(
-                                text = { Text(category) },
-                                leadingIcon = {
-                                    CategoryIcon(
-                                        filled = category == note.category,
-                                        color = if (category == note.category) {
-                                            MaterialTheme.colorScheme.primary
-                                        } else {
-                                            MaterialTheme.colorScheme.onSurfaceVariant
-                                        },
-                                    )
-                                },
-                                onClick = {
-                                    actions.onCategoryChange(category)
-                                    categoryMenuOpen = false
-                                },
-                            )
-                        }
-                        DropdownMenuItem(
-                            text = { Text("New Category") },
-                            leadingIcon = { Icon(Icons.Default.Add, contentDescription = null) },
-                            onClick = {
-                                categoryMenuOpen = false
-                                creatingCategory = true
-                            },
-                        )
-                    }
+                ) {
+                    CategoryIcon(
+                        filled = note.category.isNotBlank(),
+                        color = if (note.category.isNotBlank()) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
                 }
                 Box {
-                    IconButton(onClick = { actionsMenuOpen = true }) {
+                    ExpressiveIconButton(onClick = { actionsMenuOpen = true }) {
                         Icon(
                             Icons.Default.MoreVert,
                             contentDescription = "More note actions",
@@ -1020,11 +1087,12 @@ private fun EditorHeader(
                     DropdownMenu(
                         expanded = actionsMenuOpen,
                         onDismissRequest = { actionsMenuOpen = false },
-                        shape = RoundedCornerShape(18.dp),
+                        shape = RoundedCornerShape(20.dp),
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
                     ) {
                         DropdownMenuItem(
                             text = {
-                                Text(if (note.favorite) "Remove from Favorites" else "Add to Favorites")
+                                Text(if (note.favorite) "Unfavourite" else "Favourite")
                             },
                             leadingIcon = {
                                 Icon(
@@ -1038,7 +1106,7 @@ private fun EditorHeader(
                             },
                         )
                         DropdownMenuItem(
-                            text = { Text("Move to Trash") },
+                            text = { Text("Delete") },
                             leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null) },
                             onClick = {
                                 actions.onMoveToTrash()
@@ -1051,35 +1119,188 @@ private fun EditorHeader(
         }
     }
 
-    if (creatingCategory) {
-        AlertDialog(
-            onDismissRequest = { creatingCategory = false },
-            title = { Text("New Category") },
-            text = {
-                OutlinedTextField(
-                    value = newCategory,
-                    onValueChange = { newCategory = it },
-                    label = { Text("Category name") },
-                    singleLine = true,
-                )
+    if (categoryDialogOpen) {
+        CategoryDialog(
+            current = note.category,
+            categories = state.categories,
+            onSelect = {
+                actions.onCategoryChange(it)
+                categoryDialogOpen = false
             },
-            confirmButton = {
-                Button(
-                    enabled = newCategory.trim().isNotEmpty(),
-                    onClick = {
-                        actions.onCategoryChange(newCategory.trim())
-                        newCategory = ""
-                        creatingCategory = false
-                    },
-                ) { Text("Create") }
+            onDismiss = { categoryDialogOpen = false },
+        )
+    }
+    if (sourceDialogOpen) {
+        SourceDialog(
+            current = note.sourceId,
+            sources = state.sources,
+            onSelect = {
+                actions.onSourceChange(it)
+                sourceDialogOpen = false
             },
-            dismissButton = {
-                Button(onClick = { creatingCategory = false }) { Text("Cancel") }
-            },
-            shape = RoundedCornerShape(24.dp),
+            onDismiss = { sourceDialogOpen = false },
         )
     }
 }
+
+@Composable
+private fun CategoryDialog(
+    current: String,
+    categories: List<String>,
+    onSelect: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var query by rememberSaveable { mutableStateOf("") }
+    val candidate = query.trim()
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceContainerLow,
+            shape = RoundedCornerShape(26.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.padding(20.dp),
+            ) {
+                Text("Choose Category", style = MaterialTheme.typography.titleLarge)
+                TextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    placeholder = { Text("Search Categories") },
+                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                    singleLine = true,
+                    shape = RoundedCornerShape(13.dp),
+                    colors = flatTextFieldColors(),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                LazyColumn(
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier.heightIn(max = 320.dp),
+                ) {
+                    item {
+                        ModalChoiceRow(
+                            label = "No Category",
+                            selected = current.isBlank(),
+                            onClick = { onSelect("") },
+                            icon = {
+                                CategoryIcon(false, MaterialTheme.colorScheme.onSurfaceVariant)
+                            },
+                        )
+                    }
+                    items(
+                        items = categories.filter { it.contains(candidate, ignoreCase = true) },
+                        key = { it },
+                    ) { category ->
+                        ModalChoiceRow(
+                            label = category,
+                            selected = category == current,
+                            onClick = { onSelect(category) },
+                            icon = {
+                                CategoryIcon(
+                                    filled = category == current,
+                                    color = if (category == current) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    },
+                                )
+                            },
+                        )
+                    }
+                }
+                Button(
+                    enabled = candidate.isNotEmpty() && categories.none { it.equals(candidate, ignoreCase = true) },
+                    onClick = { onSelect(candidate) },
+                    shape = RoundedCornerShape(13.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Icon(Icons.Default.Add, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text(if (candidate.isBlank()) "New Category" else "Create “$candidate”")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SourceDialog(
+    current: SourceId,
+    sources: List<SourceChoice>,
+    onSelect: (SourceId) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceContainerLow,
+            shape = RoundedCornerShape(26.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.padding(20.dp),
+            ) {
+                Text("Save Note to", style = MaterialTheme.typography.titleLarge)
+                Text(
+                    "The Working Copy stays available offline.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(4.dp))
+                sources.forEach { source ->
+                    ModalChoiceRow(
+                        label = source.name,
+                        selected = source.id == current,
+                        onClick = { onSelect(source.id) },
+                        icon = {
+                            if (source.id == LocalSourceId) {
+                                LocalNotesGlyph(MaterialTheme.colorScheme.onSurfaceVariant)
+                            } else {
+                                CloudGlyph(MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ModalChoiceRow(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    icon: @Composable () -> Unit,
+) {
+    val shape = RoundedCornerShape(14.dp)
+    Surface(
+        color = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+        contentColor = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
+        shape = shape,
+        modifier = Modifier
+            .fillMaxWidth()
+            .kgsClickable(onClick, shape),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            modifier = Modifier.padding(horizontal = 13.dp, vertical = 11.dp),
+        ) {
+            Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) { icon() }
+            Text(label, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+            if (selected) Text("✓", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+        }
+    }
+}
+
+@Composable
+private fun flatTextFieldColors() = TextFieldDefaults.colors(
+    focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+    focusedIndicatorColor = Color.Transparent,
+    unfocusedIndicatorColor = Color.Transparent,
+)
 
 private enum class EditorSaveStatus(val description: String) {
     SAVING("Saving"),
@@ -1089,7 +1310,7 @@ private enum class EditorSaveStatus(val description: String) {
 }
 
 @Composable
-private fun SaveStatusIndicator(status: EditorSaveStatus) {
+private fun SaveStatusIndicator(status: EditorSaveStatus, onClick: () -> Unit) {
     val blue = Color(0xFF2878D0)
     val orange = Color(0xFFF28C28)
     val green = Color(0xFF2E9B62)
@@ -1102,10 +1323,10 @@ private fun SaveStatusIndicator(status: EditorSaveStatus) {
         animationSpec = tween(260),
         label = "save status color",
     )
-    val fill by animateFloatAsState(
-        targetValue = if (status == EditorSaveStatus.SAVED_LOCALLY || status == EditorSaveStatus.SYNCED) 1f else 0f,
-        animationSpec = tween(260),
-        label = "save status fill",
+    val glyphProgress by animateFloatAsState(
+        targetValue = if (status == EditorSaveStatus.SAVING) 0f else 1f,
+        animationSpec = androidx.compose.animation.core.spring(dampingRatio = .68f, stiffness = 430f),
+        label = "save status glyph",
     )
     val sweep by animateFloatAsState(
         targetValue = if (status == EditorSaveStatus.SAVING) 270f else 360f,
@@ -1120,15 +1341,16 @@ private fun SaveStatusIndicator(status: EditorSaveStatus) {
         label = "saving rotation",
     )
 
+    val shape = CircleShape
     Canvas(
         modifier = Modifier
-            .size(34.dp)
+            .size(38.dp)
+            .kgsClickable(onClick, shape)
             .semantics { contentDescription = status.description }
-            .padding(6.dp),
+            .padding(7.dp),
     ) {
-        val stroke = size.minDimension * .12f
+        val stroke = size.minDimension * .105f
         val inset = stroke / 2
-        if (fill > 0f) drawCircle(color = color.copy(alpha = fill))
         rotate(if (status == EditorSaveStatus.SAVING) rotation else 0f) {
             drawArc(
                 color = color,
@@ -1143,9 +1365,18 @@ private fun SaveStatusIndicator(status: EditorSaveStatus) {
         when (status) {
             EditorSaveStatus.SAVING -> Unit
             EditorSaveStatus.SAVED_LOCALLY -> {
-                val glyph = Color.White.copy(alpha = fill)
-                drawLine(glyph, Offset(size.width * .26f, size.height * .52f), Offset(size.width * .44f, size.height * .69f), stroke, StrokeCap.Round)
-                drawLine(glyph, Offset(size.width * .44f, size.height * .69f), Offset(size.width * .75f, size.height * .34f), stroke, StrokeCap.Round)
+                val glyph = blue.copy(alpha = glyphProgress.coerceIn(0f, 1f))
+                val scale = .72f + .28f * glyphProgress
+                val left = size.width * (.5f - .19f * scale)
+                val top = size.height * (.5f - .27f * scale)
+                drawRoundRect(
+                    glyph,
+                    topLeft = Offset(left, top),
+                    size = Size(size.width * .38f * scale, size.height * .54f * scale),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(size.width * .07f),
+                    style = Stroke(stroke * .78f),
+                )
+                drawCircle(glyph, stroke * .32f, Offset(size.width * .5f, size.height * (.5f + .19f * scale)))
             }
             EditorSaveStatus.SYNCING -> {
                 drawLine(orange, Offset(size.width * .5f, size.height * .72f), Offset(size.width * .5f, size.height * .3f), stroke, StrokeCap.Round)
@@ -1153,11 +1384,14 @@ private fun SaveStatusIndicator(status: EditorSaveStatus) {
                 drawLine(orange, Offset(size.width * .5f, size.height * .3f), Offset(size.width * .68f, size.height * .48f), stroke, StrokeCap.Round)
             }
             EditorSaveStatus.SYNCED -> {
-                val glyph = Color.White.copy(alpha = fill)
-                drawCircle(glyph, size.width * .17f, Offset(size.width * .38f, size.height * .56f))
-                drawCircle(glyph, size.width * .21f, Offset(size.width * .55f, size.height * .47f))
-                drawCircle(glyph, size.width * .14f, Offset(size.width * .7f, size.height * .58f))
-                drawRect(glyph, Offset(size.width * .29f, size.height * .55f), Size(size.width * .5f, size.height * .17f))
+                val glyph = green.copy(alpha = glyphProgress.coerceIn(0f, 1f))
+                val path = androidx.compose.ui.graphics.Path().apply {
+                    moveTo(size.width * .27f, size.height * .64f)
+                    cubicTo(size.width * .13f, size.height * .64f, size.width * .13f, size.height * .44f, size.width * .3f, size.height * .43f)
+                    cubicTo(size.width * .36f, size.height * .22f, size.width * .66f, size.height * .24f, size.width * .7f, size.height * .46f)
+                    cubicTo(size.width * .86f, size.height * .47f, size.width * .86f, size.height * .65f, size.width * .72f, size.height * .65f)
+                }
+                drawPath(path, glyph, style = Stroke(stroke * .78f, cap = StrokeCap.Round))
             }
         }
     }
@@ -1167,18 +1401,31 @@ private fun SaveStatusIndicator(status: EditorSaveStatus) {
 private fun CategoryIcon(filled: Boolean, color: Color) {
     Canvas(Modifier.size(24.dp).padding(2.dp)) {
         val path = androidx.compose.ui.graphics.Path().apply {
-            moveTo(size.width * .08f, size.height * .23f)
-            lineTo(size.width * .4f, size.height * .23f)
-            lineTo(size.width * .5f, size.height * .36f)
-            lineTo(size.width * .92f, size.height * .36f)
-            lineTo(size.width * .92f, size.height * .82f)
-            lineTo(size.width * .08f, size.height * .82f)
+            moveTo(size.width * .1f, size.height * .31f)
+            quadraticTo(size.width * .1f, size.height * .2f, size.width * .22f, size.height * .2f)
+            lineTo(size.width * .4f, size.height * .2f)
+            quadraticTo(size.width * .47f, size.height * .2f, size.width * .52f, size.height * .28f)
+            lineTo(size.width * .58f, size.height * .36f)
+            lineTo(size.width * .82f, size.height * .36f)
+            quadraticTo(size.width * .9f, size.height * .36f, size.width * .9f, size.height * .46f)
+            lineTo(size.width * .9f, size.height * .75f)
+            quadraticTo(size.width * .9f, size.height * .84f, size.width * .8f, size.height * .84f)
+            lineTo(size.width * .2f, size.height * .84f)
+            quadraticTo(size.width * .1f, size.height * .84f, size.width * .1f, size.height * .74f)
             close()
         }
         if (filled) {
             drawPath(path, color)
         } else {
-            drawPath(path, color, style = Stroke(width = size.minDimension * .09f, cap = StrokeCap.Round))
+            drawPath(
+                path,
+                color,
+                style = Stroke(
+                    width = size.minDimension * .1f,
+                    cap = StrokeCap.Round,
+                    join = androidx.compose.ui.graphics.StrokeJoin.Round,
+                ),
+            )
         }
     }
 }
@@ -1200,10 +1447,11 @@ private fun TrashedNote(note: Note, actions: NotesActions, modifier: Modifier) {
             )
         }
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            val restoreShape = MaterialTheme.shapes.medium
             Surface(
                 color = MaterialTheme.colorScheme.primaryContainer,
-                shape = MaterialTheme.shapes.medium,
-                modifier = Modifier.clickable(onClick = actions.onRestore),
+                shape = restoreShape,
+                modifier = Modifier.kgsClickable(actions.onRestore, restoreShape),
             ) {
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1213,11 +1461,12 @@ private fun TrashedNote(note: Note, actions: NotesActions, modifier: Modifier) {
                     Text("Restore", style = MaterialTheme.typography.labelLarge)
                 }
             }
+            val deleteShape = MaterialTheme.shapes.medium
             Surface(
                 color = MaterialTheme.colorScheme.errorContainer,
                 contentColor = MaterialTheme.colorScheme.onErrorContainer,
-                shape = MaterialTheme.shapes.medium,
-                modifier = Modifier.clickable(onClick = actions.onDeletePermanently),
+                shape = deleteShape,
+                modifier = Modifier.kgsClickable(actions.onDeletePermanently, deleteShape),
             ) {
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),

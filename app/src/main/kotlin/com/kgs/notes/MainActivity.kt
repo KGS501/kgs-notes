@@ -11,8 +11,8 @@ class MainActivity : ComponentActivity() {
     private val notesViewModel: NotesViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        super.onCreate(savedInstanceState)
         setContent {
             KgsNotesTheme {
                 KgsNotesApp(notesViewModel)
