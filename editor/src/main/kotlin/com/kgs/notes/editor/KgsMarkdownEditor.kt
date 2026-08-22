@@ -11,7 +11,6 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.content.Context
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -75,57 +74,11 @@ import androidx.compose.ui.window.PopupProperties
 import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
-import androidx.webkit.WebViewOutcomeReceiver
-import androidx.webkit.WebViewStartUpConfig
-import androidx.webkit.WebViewStartUpResult
-import androidx.webkit.WebViewStartupException
-import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicBoolean
 import org.json.JSONObject
 
 enum class EditorMode {
     RICH,
     SOURCE,
-}
-
-/** Starts Chromium's expensive native initialization before the first Note opens. */
-@androidx.annotation.OptIn(markerClass = [WebViewCompat.ExperimentalAsyncStartUp::class])
-fun warmUpKgsMarkdownEditor(context: Context) {
-    if (!webViewWarmUpStarted.compareAndSet(false, true)) return
-
-    val executor = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "kgs-editor-warmup").apply { isDaemon = true }
-    }
-    val config = WebViewStartUpConfig.Builder(executor).apply {
-        if (
-            WebViewFeature.isStartupFeatureSupported(
-                context,
-                WebViewFeature.STARTUP_FEATURE_SET_UI_THREAD_STARTUP_MODE_V2,
-            )
-        ) {
-            setShouldRunUiThreadStartUpTasks(false)
-        }
-    }.build()
-
-    runCatching {
-        WebViewCompat.startUpWebView(
-            context.applicationContext,
-            config,
-            object : WebViewOutcomeReceiver<WebViewStartUpResult, WebViewStartupException> {
-                override fun onResult(result: WebViewStartUpResult) {
-                    executor.shutdown()
-                }
-
-                override fun onError(error: WebViewStartupException) {
-                    executor.shutdown()
-                    webViewWarmUpStarted.set(false)
-                }
-            },
-        )
-    }.onFailure {
-        executor.shutdown()
-        webViewWarmUpStarted.set(false)
-    }
 }
 
 @Composable
@@ -594,4 +547,3 @@ private fun WebView.runCommand(command: MarkdownCommand) {
 private const val ASSET_HOST = "appassets.androidplatform.net"
 private const val ASSET_ORIGIN = "https://$ASSET_HOST"
 private const val BRIDGE_NAME = "KgsNotesEditor"
-private val webViewWarmUpStarted = AtomicBoolean(false)
