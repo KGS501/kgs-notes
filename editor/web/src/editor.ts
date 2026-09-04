@@ -14,7 +14,7 @@ declare global {
       load(markdown: string): void
       markdown(): string
       setDarkMode(enabled: boolean): void
-      run(command: string): void
+      run(command: string): string[]
     }
   }
 }
@@ -23,14 +23,127 @@ const IMAGE_EXTENSIONS = /\.(avif|gif|jpe?g|png|svg|webp)(?:[?#].*)?$/i
 
 const attachmentImage = Image.extend({
   addNodeView() {
-    return ({ node }) => {
+    return ({ node, editor: currentEditor }) => {
       const source = String(node.attrs.src ?? '')
       if (IMAGE_EXTENSIONS.test(source)) {
         const image = document.createElement('img')
         image.src = source
         image.alt = String(node.attrs.alt ?? '')
         image.className = 'inline-image'
-        return { dom: image }
+        image.draggable = false
+
+        let holdTimer: number | undefined
+        let dragging = false
+        let pointerId: number | undefined
+        let startX = 0
+        let startY = 0
+        let targetBlock: Element | null = null
+        let targetAfter = false
+
+        const editorRoot = () => image.closest('.rich-editor')
+        const sourceBlock = () => image.closest('.rich-editor > *')
+
+        const clearTarget = () => {
+          targetBlock?.classList.remove('image-drop-target-before', 'image-drop-target-after')
+          targetBlock = null
+        }
+
+        const finish = () => {
+          if (holdTimer !== undefined) window.clearTimeout(holdTimer)
+          holdTimer = undefined
+          clearTarget()
+          image.classList.remove('inline-image--dragging')
+          dragging = false
+          pointerId = undefined
+        }
+
+        const updateTarget = (event: PointerEvent) => {
+          const root = editorRoot()
+          const sourceLine = sourceBlock()
+          const pointed = document.elementFromPoint(event.clientX, event.clientY)
+            ?.closest('.rich-editor > *')
+          if (!root || !sourceLine || !pointed || pointed === sourceLine || pointed.parentElement !== root) {
+            clearTarget()
+            return
+          }
+          clearTarget()
+          targetBlock = pointed
+          const rect = pointed.getBoundingClientRect()
+          targetAfter = event.clientY >= rect.top + rect.height / 2
+          pointed.classList.add(targetAfter ? 'image-drop-target-after' : 'image-drop-target-before')
+        }
+
+        const moveLine = () => {
+          const sourceLine = sourceBlock()
+          const destination = targetBlock
+          if (!sourceLine || !destination) return
+          const view = currentEditor.view
+          const sourcePosition = view.posAtDOM(sourceLine, 0)
+          const destinationPosition = view.posAtDOM(destination, 0)
+          const sourceNode = currentEditor.state.doc.nodeAt(sourcePosition)
+          const destinationNode = currentEditor.state.doc.nodeAt(destinationPosition)
+          if (!sourceNode || !destinationNode) return
+
+          let insertionPosition = destinationPosition + (targetAfter ? destinationNode.nodeSize : 0)
+          if (insertionPosition > sourcePosition) insertionPosition -= sourceNode.nodeSize
+          if (insertionPosition === sourcePosition) return
+
+          currentEditor.view.dispatch(
+            currentEditor.state.tr
+              .delete(sourcePosition, sourcePosition + sourceNode.nodeSize)
+              .insert(insertionPosition, sourceNode)
+              .scrollIntoView(),
+          )
+        }
+
+        const onPointerDown = (event: PointerEvent) => {
+          if (!event.isPrimary || event.button !== 0) return
+          pointerId = event.pointerId
+          startX = event.clientX
+          startY = event.clientY
+          holdTimer = window.setTimeout(() => {
+            dragging = true
+            image.classList.add('inline-image--dragging')
+          }, 420)
+        }
+
+        const onPointerMove = (event: PointerEvent) => {
+          if (event.pointerId !== pointerId) return
+          if (!dragging) {
+            if (Math.hypot(event.clientX - startX, event.clientY - startY) > 10) finish()
+            return
+          }
+          event.preventDefault()
+          updateTarget(event)
+        }
+
+        const onPointerUp = (event: PointerEvent) => {
+          if (event.pointerId !== pointerId) return
+          if (dragging) {
+            event.preventDefault()
+            moveLine()
+          }
+          finish()
+        }
+
+        const onContextMenu = (event: Event) => event.preventDefault()
+        image.addEventListener('pointerdown', onPointerDown)
+        image.addEventListener('contextmenu', onContextMenu)
+        document.addEventListener('pointermove', onPointerMove)
+        document.addEventListener('pointerup', onPointerUp)
+        document.addEventListener('pointercancel', onPointerUp)
+
+        return {
+          dom: image,
+          destroy() {
+            finish()
+            image.removeEventListener('pointerdown', onPointerDown)
+            image.removeEventListener('contextmenu', onContextMenu)
+            document.removeEventListener('pointermove', onPointerMove)
+            document.removeEventListener('pointerup', onPointerUp)
+            document.removeEventListener('pointercancel', onPointerUp)
+          },
+        }
       }
 
       const card = document.createElement('div')
@@ -77,6 +190,7 @@ const editor = new Editor({
     dirty = true
     post({ type: 'changed', markdown: editor.getMarkdown() })
   },
+  onTransaction: ({ editor: currentEditor }) => postActiveFormatting(currentEditor),
 })
 
 function post(payload: Record<string, unknown>) {
@@ -87,6 +201,24 @@ function exactMarkdown() {
   return dirty ? editor.getMarkdown() : originalMarkdown
 }
 
+function postActiveFormatting(currentEditor: Editor = editor) {
+  post({ type: 'formatting', commands: activeFormatting(currentEditor) })
+}
+
+function activeFormatting(currentEditor: Editor = editor) {
+  return [
+    { command: 'bold', active: currentEditor.isActive('bold') },
+    { command: 'italic', active: currentEditor.isActive('italic') },
+    { command: 'heading', active: currentEditor.isActive('heading', { level: 2 }) },
+    { command: 'bullet', active: currentEditor.isActive('bulletList') },
+    { command: 'numbered', active: currentEditor.isActive('orderedList') },
+    { command: 'task', active: currentEditor.isActive('taskList') },
+    { command: 'quote', active: currentEditor.isActive('blockquote') },
+    { command: 'code', active: currentEditor.isActive('codeBlock') },
+    { command: 'table', active: currentEditor.isActive('table') },
+  ].filter(({ active }) => active).map(({ command }) => command)
+}
+
 function load(markdown: string) {
   if (markdown === exactMarkdown()) return
   originalMarkdown = markdown
@@ -94,14 +226,15 @@ function load(markdown: string) {
   suppressUpdates = true
   editor.commands.setContent(markdown, { contentType: 'markdown', emitUpdate: false })
   suppressUpdates = false
+  postActiveFormatting()
 }
 
 function setDarkMode(enabled: boolean) {
   document.documentElement.classList.toggle('dark', enabled)
 }
 
-function run(command: string) {
-  const chain = editor.chain().focus()
+function execute(command: string) {
+  const chain = editor.chain()
   switch (command) {
     case 'bold': chain.toggleBold().run(); break
     case 'italic': chain.toggleItalic().run(); break
@@ -115,6 +248,18 @@ function run(command: string) {
     case 'undo': chain.undo().run(); break
     case 'redo': chain.redo().run(); break
   }
+  const active = activeFormatting()
+  post({ type: 'formatting', commands: active })
+  return active
+}
+
+function run(command: string) {
+  // A native toolbar click moves Android focus away from the WebView. Tiptap's
+  // focus command completes on the next frame; applying a stored mark before
+  // that frame lets the later focus transaction clear it again.
+  editor.commands.focus()
+  window.requestAnimationFrame(() => execute(command))
+  return activeFormatting()
 }
 
 window.kgsEditor = { load, markdown: exactMarkdown, setDarkMode, run }

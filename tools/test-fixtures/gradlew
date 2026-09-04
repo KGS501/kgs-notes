@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+expected_serial="${EXPECTED_ANDROID_SERIAL:-emulator-5556}"
+if [[ "${ANDROID_SERIAL:-}" != "$expected_serial" ]]; then
+    printf 'Expected ANDROID_SERIAL=%s, got: %s\n' "$expected_serial" "${ANDROID_SERIAL:-<unset>}" >&2
+    exit 65
+fi
+
+if [[ "${1:-}" != ":app:connectedDebugAndroidTest" ]]; then
+    printf 'Expected connected test task first, got: %s\n' "$*" >&2
+    exit 66
+fi
+
+printf 'targeted-gradle:%s:%s\n' "$ANDROID_SERIAL" "$*"

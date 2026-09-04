@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf 'Unexpected fake emulator invocation: %s\n' "$*" >&2
+exit 64

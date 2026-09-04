@@ -8,6 +8,7 @@ import java.time.ZoneOffset
 import kotlin.io.path.extension
 import kotlin.io.path.readText
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
@@ -112,5 +113,65 @@ class LocalNotesEngineTest {
         assertEquals(createdAt, summary.createdAt)
         assertEquals(LocalSourceId, summary.sourceId)
         assertEquals(NoteSyncState.LOCAL_SOURCE, summary.syncState)
+    }
+
+    @Test
+    fun `a Managed Attachment remains readable with its portable reference after restart`() = runBlocking {
+        val imageBytes = "not-real-jpeg-content".encodeToByteArray()
+        val engine = LocalNotesEngine.open(root)
+        val noteId = engine.createDraft(category = "Trips/Forest")
+        engine.updateContent(noteId, "# Ridge walk")
+
+        val imported = engine.importManagedAttachment(
+            noteId = noteId,
+            attachment = AttachmentImport(
+                displayName = "ridge photo.jpg",
+                mediaType = "image/jpeg",
+                openContent = { imageBytes.inputStream() },
+            ),
+        )
+
+        assertEquals("ridge photo.jpg", imported.displayName)
+        assertEquals("image/jpeg", imported.mediaType)
+        assertTrue(
+            imported.markdownTarget.matches(
+                Regex("\\.\\./\\.\\./\\.kgs-notes-attachments/${noteId.value}/[a-f0-9-]+\\.jpg"),
+            ),
+        )
+
+        val reopened = LocalNotesEngine.open(root)
+        val restored = reopened.managedAttachments(noteId).single()
+        assertEquals(imported, restored)
+        val restoredBytes = assertNotNull(reopened.openManagedAttachment(restored.id)).use { it.readBytes() }
+        assertContentEquals(imageBytes, restoredBytes)
+    }
+
+    @Test
+    fun `moving a Note rewrites its Managed Attachment reference for the new Category`() = runBlocking {
+        val engine = LocalNotesEngine.open(root)
+        val noteId = engine.createDraft(category = "Trips/Forest")
+        engine.updateContent(noteId, "# Ridge walk")
+        val attachment = engine.importManagedAttachment(
+            noteId = noteId,
+            attachment = AttachmentImport(
+                displayName = "ridge.jpg",
+                mediaType = "image/jpeg",
+                openContent = { byteArrayOf(1, 2, 3).inputStream() },
+            ),
+        )
+        engine.updateContent(
+            noteId,
+            "# Ridge walk\n\n![Ridge](${attachment.markdownTarget})",
+        )
+
+        engine.setCategory(noteId, "Archive")
+
+        val moved = assertNotNull(engine.note(noteId))
+        val movedAttachment = engine.managedAttachments(noteId).single()
+        assertTrue(movedAttachment.markdownTarget.startsWith("../.kgs-notes-attachments/"))
+        assertEquals(
+            "# Ridge walk\n\n![Ridge](${movedAttachment.markdownTarget})",
+            moved.markdown,
+        )
     }
 }

@@ -4,6 +4,9 @@ import com.kgs.notes.engine.Source
 import com.kgs.notes.engine.SourceCapabilities
 import com.kgs.notes.engine.SourceDescriptor
 import com.kgs.notes.engine.SourceId
+import com.kgs.notes.engine.SourceConflictException
+import com.kgs.notes.engine.SourceNote
+import com.kgs.notes.engine.SourceNoteDraft
 import java.time.Instant
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -11,6 +14,10 @@ import kotlinx.coroutines.flow.asStateFlow
 
 data class NotesCapabilities(
     val apiVersion: String,
+)
+
+data class NotesSettings(
+    val fileSuffix: String,
 )
 
 data class RemoteNote(
@@ -28,7 +35,25 @@ interface NextcloudNotesApi {
     suspend fun capabilities(): NotesCapabilities
 
     suspend fun notes(): List<RemoteNote>
+
+    suspend fun note(id: Long): RemoteNote
+
+    suspend fun create(note: RemoteNoteDraft): RemoteNote
+
+    suspend fun update(id: Long, expectedEtag: String, note: RemoteNoteDraft): RemoteNote
+
+    suspend fun delete(id: Long)
+
+    suspend fun updateSettings(fileSuffix: String): NotesSettings
 }
+
+data class RemoteNoteDraft(
+    val title: String,
+    val markdown: String,
+    val category: String,
+    val favorite: Boolean,
+    val modifiedAt: Instant,
+)
 
 class UnsupportedNotesApi(
     val actualVersion: String,
@@ -56,6 +81,8 @@ class NextcloudNotesSource(
 
     private val mutableRemoteNotes = MutableStateFlow<List<RemoteNote>>(emptyList())
     val remoteNotes: StateFlow<List<RemoteNote>> = mutableRemoteNotes.asStateFlow()
+    private val mutableNotes = MutableStateFlow<List<SourceNote>>(emptyList())
+    override val notes: StateFlow<List<SourceNote>> = mutableNotes.asStateFlow()
 
     override suspend fun refresh() {
         val capabilities = api.capabilities()
@@ -65,8 +92,83 @@ class NextcloudNotesSource(
                 minimumVersion = MINIMUM_API_VERSION.toString(),
             )
         }
-        mutableRemoteNotes.value = api.notes()
+        val remote = api.notes()
+        mutableRemoteNotes.value = remote
+        mutableNotes.value = remote.map { it.toSourceNote() }
     }
+
+    override suspend fun createNote(note: SourceNoteDraft): SourceNote {
+        val created = api.create(
+            RemoteNoteDraft(
+                title = note.title,
+                markdown = note.markdown,
+                category = note.category,
+                favorite = note.favorite,
+                modifiedAt = note.modifiedAt,
+            ),
+        )
+        mutableRemoteNotes.value = mutableRemoteNotes.value + created
+        val published = created.toSourceNote()
+        mutableNotes.value = mutableNotes.value + published
+        return published
+    }
+
+    override suspend fun updateNote(
+        remoteId: String,
+        expectedRevision: String,
+        note: SourceNoteDraft,
+    ): SourceNote {
+        val id = remoteId.toLongOrNull()
+            ?: throw IllegalArgumentException("Invalid Nextcloud Note identity")
+        val updated = try {
+            api.update(
+                id = id,
+                expectedEtag = expectedRevision,
+                note = RemoteNoteDraft(
+                    title = note.title,
+                    markdown = note.markdown,
+                    category = note.category,
+                    favorite = note.favorite,
+                    modifiedAt = note.modifiedAt,
+                ),
+            )
+        } catch (failure: NextcloudApiException) {
+            if (failure.statusCode == 412) throw SourceConflictException()
+            throw failure
+        }
+        mutableRemoteNotes.value = mutableRemoteNotes.value
+            .filterNot { it.id == updated.id } + updated
+        val published = updated.toSourceNote()
+        mutableNotes.value = mutableNotes.value
+            .filterNot { it.remoteId == published.remoteId } + published
+        return published
+    }
+
+    override suspend fun deleteNote(remoteId: String, expectedRevision: String) {
+        val id = remoteId.toLongOrNull()
+            ?: throw IllegalArgumentException("Invalid Nextcloud Note identity")
+        val current = api.note(id)
+        if (current.etag != expectedRevision) throw SourceConflictException()
+        api.delete(id)
+        mutableRemoteNotes.value = mutableRemoteNotes.value.filterNot { it.id == id }
+        mutableNotes.value = mutableNotes.value.filterNot { it.remoteId == remoteId }
+    }
+
+    suspend fun setFileSuffix(fileSuffix: String): String {
+        require(fileSuffix == ".md" || fileSuffix == ".txt")
+        return api.updateSettings(fileSuffix).fileSuffix
+    }
+
+    private fun RemoteNote.toSourceNote(): SourceNote = SourceNote(
+        remoteId = id.toString(),
+        revision = etag,
+        title = title,
+        markdown = markdown,
+        category = category,
+        favorite = favorite,
+        modifiedAt = modifiedAt,
+        readOnly = readOnly,
+    )
 
     private data class NotesApiVersion(
         val major: Int,

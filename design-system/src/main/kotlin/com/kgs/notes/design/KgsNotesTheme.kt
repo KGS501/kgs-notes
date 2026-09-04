@@ -2,6 +2,8 @@ package com.kgs.notes.design
 
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.Easing
+import androidx.compose.animation.core.SpringSpec
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
@@ -29,7 +31,8 @@ private val LightColors = lightColorScheme(
     secondaryContainer = Color(0xFFD2F1F3),
     onSecondaryContainer = Color(0xFF123B41),
     tertiary = Color(0xFF7567B4),
-    background = Color(0xFFF4F8FD),
+    // Shared with KGS Calendar so both apps sit on the same cool blue canvas.
+    background = Color(0xFFEDF6FF),
     onBackground = Color(0xFF17202A),
     surface = Color(0xFFFFFFFF),
     surfaceDim = Color(0xFFE8EEF5),
@@ -82,6 +85,54 @@ data class KgsMotion(
     val shortMillis: Int = 150,
     val mediumMillis: Int = 300,
     val longMillis: Int = 450,
+    val fastSpatialDamping: Float = 0.6f,
+    val fastSpatialStiffness: Float = 800f,
+    val defaultSpatialDamping: Float = 0.8f,
+    val defaultSpatialStiffness: Float = 380f,
+    val slowSpatialDamping: Float = 0.8f,
+    val slowSpatialStiffness: Float = 200f,
+    val fastEffectsDamping: Float = 1f,
+    val fastEffectsStiffness: Float = 3_800f,
+    val defaultEffectsDamping: Float = 1f,
+    val defaultEffectsStiffness: Float = 1_600f,
+    val slowEffectsDamping: Float = 1f,
+    val slowEffectsStiffness: Float = 800f,
+)
+
+fun <T> KgsMotion.fastSpatialSpec(visibilityThreshold: T? = null): SpringSpec<T> = spring(
+    dampingRatio = fastSpatialDamping,
+    stiffness = fastSpatialStiffness,
+    visibilityThreshold = visibilityThreshold,
+)
+
+fun <T> KgsMotion.defaultSpatialSpec(visibilityThreshold: T? = null): SpringSpec<T> = spring(
+    dampingRatio = defaultSpatialDamping,
+    stiffness = defaultSpatialStiffness,
+    visibilityThreshold = visibilityThreshold,
+)
+
+fun <T> KgsMotion.slowSpatialSpec(visibilityThreshold: T? = null): SpringSpec<T> = spring(
+    dampingRatio = slowSpatialDamping,
+    stiffness = slowSpatialStiffness,
+    visibilityThreshold = visibilityThreshold,
+)
+
+fun <T> KgsMotion.fastEffectsSpec(visibilityThreshold: T? = null): SpringSpec<T> = spring(
+    dampingRatio = fastEffectsDamping,
+    stiffness = fastEffectsStiffness,
+    visibilityThreshold = visibilityThreshold,
+)
+
+fun <T> KgsMotion.defaultEffectsSpec(visibilityThreshold: T? = null): SpringSpec<T> = spring(
+    dampingRatio = defaultEffectsDamping,
+    stiffness = defaultEffectsStiffness,
+    visibilityThreshold = visibilityThreshold,
+)
+
+fun <T> KgsMotion.slowEffectsSpec(visibilityThreshold: T? = null): SpringSpec<T> = spring(
+    dampingRatio = slowEffectsDamping,
+    stiffness = slowEffectsStiffness,
+    visibilityThreshold = visibilityThreshold,
 )
 
 val LocalKgsMotion = staticCompositionLocalOf { KgsMotion() }

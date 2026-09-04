@@ -66,4 +66,41 @@ class MarkdownEditorSafetyTest {
         assertEquals("- [ ] Bring the blanket", task.markdown)
         assertEquals("1. Bring the blanket", numbered.markdown)
     }
+
+    @Test
+    fun `an Inline Image inserts portable Markdown and preserves a readable label`() {
+        val result = editor.insertAttachment(
+            markdown = "# Ridge walk\n\n",
+            selection = MarkdownSelection(14, 14),
+            attachment = MarkdownAttachment(
+                displayName = "ridge [east].jpg",
+                target = "../../.kgs-notes-attachments/note-id/file.jpg",
+                inlineImage = true,
+            ),
+        )
+
+        assertEquals(
+            "# Ridge walk\n\n![ridge \\[east\\].jpg](../../.kgs-notes-attachments/note-id/file.jpg)",
+            result.markdown,
+        )
+        assertEquals(MarkdownSelection(82, 82), result.selection)
+    }
+
+    @Test
+    fun `an Inline Image inserted after text starts in its own Markdown block`() {
+        val result = editor.insertAttachment(
+            markdown = "A quiet ridge",
+            selection = MarkdownSelection(13, 13),
+            attachment = MarkdownAttachment(
+                displayName = "view.jpg",
+                target = ".kgs-notes-attachments/note-id/file.jpg",
+                inlineImage = true,
+            ),
+        )
+
+        assertEquals(
+            "A quiet ridge\n\n![view.jpg](.kgs-notes-attachments/note-id/file.jpg)",
+            result.markdown,
+        )
+    }
 }

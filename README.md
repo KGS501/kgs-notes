@@ -1,13 +1,18 @@
 # KGS Notes
 
+> **ALPHA:** KGS Notes is an early prototype intended for testing and dogfooding.
+> Features, storage formats, and synchronization behavior may still change.
+
 KGS Notes is an Android-first, local-first Markdown notes app built for open and
-self-hosted Sources. The Local Source is already usable; Nextcloud support is the
-first external Source planned behind the connector seam.
+self-hosted Sources. Its Local Source and first Nextcloud Notes Source are usable
+for early dogfooding.
 
 ## Current development slice
 
 - exact Markdown files in app-private Local Source storage;
+- multiple Nextcloud Notes Sources with offline Working Copies and conflict-safe synchronization;
 - automatic titles, search, favorites, Trash, restore, and permanent deletion;
+- privacy-aware Inline Image import into a durable Local Source Attachment Vault;
 - bundled Tiptap Rich Mode with native Source Mode fallback;
 - phone and two-pane tablet/foldable layouts;
 - light and dark KGS visual themes with reduced, purposeful motion; and

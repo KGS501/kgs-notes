@@ -11,18 +11,21 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.MimeTypeMap
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.togetherWith
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,19 +33,22 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
@@ -51,32 +57,58 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
-import com.kgs.notes.design.kgsClickable
+import androidx.compose.ui.platform.LocalDensity
+import com.kgs.notes.design.KgsTooltip
+import com.kgs.notes.design.KgsCornerRadii
+import com.kgs.notes.design.KgsDropdownMenuItem
+import com.kgs.notes.design.KgsExpressiveSurface
+import com.kgs.notes.design.LocalKgsMotion
+import com.kgs.notes.design.defaultEffectsSpec
+import com.kgs.notes.design.defaultSpatialSpec
+import com.kgs.notes.design.fastEffectsSpec
+import com.kgs.notes.design.fastSpatialSpec
 import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
+import kotlinx.coroutines.flow.collect
 import org.json.JSONObject
+import java.io.InputStream
 
 enum class EditorMode {
     RICH,
@@ -89,6 +121,8 @@ fun KgsMarkdownEditor(
     requestedMode: EditorMode,
     onMarkdownChange: (String) -> Unit,
     onModeChange: (EditorMode) -> Unit,
+    onAddImage: () -> Unit = {},
+    openManagedAttachment: (String) -> InputStream? = { null },
     modifier: Modifier = Modifier,
     editor: MarkdownEditor = remember { DefaultMarkdownEditor() },
 ) {
@@ -106,8 +140,19 @@ fun KgsMarkdownEditor(
     }
 
     val commands = remember { EditorCommandDispatcher() }
+    var activeCommands by remember { mutableStateOf(emptySet<MarkdownCommand>()) }
+    var richEditorReady by remember { mutableStateOf(false) }
 
-    Column(modifier) {
+    LaunchedEffect(effectiveMode) {
+        if (effectiveMode == EditorMode.SOURCE) activeCommands = emptySet()
+        richEditorReady = false
+    }
+
+    Column(
+        modifier
+            .navigationBarsPadding()
+            .imePadding(),
+    ) {
         if (requestedMode == EditorMode.RICH && richModeBlocker != null) {
             SourceFallbackNotice(richModeBlocker)
         }
@@ -120,7 +165,10 @@ fun KgsMarkdownEditor(
                 EditorMode.RICH -> RichMarkdownEditor(
                     markdown = markdown,
                     onMarkdownChange = onMarkdownChange,
+                    onActiveCommandsChange = { activeCommands = it },
+                    onReady = { richEditorReady = true },
                     commands = commands,
+                    openManagedAttachment = openManagedAttachment,
                     modifier = Modifier.fillMaxSize(),
                 )
 
@@ -132,11 +180,20 @@ fun KgsMarkdownEditor(
                     modifier = Modifier.fillMaxSize(),
                 )
             }
+            if (richEditorReady) {
+                Spacer(
+                    Modifier
+                        .size(1.dp)
+                        .testTag("rich-editor-ready"),
+                )
+            }
         }
         EditorToolbar(
             mode = effectiveMode,
+            activeCommands = activeCommands,
             onModeChange = onModeChange,
             onCommand = commands::dispatch,
+            onAddImage = onAddImage,
         )
     }
 }
@@ -169,52 +226,81 @@ private fun SourceMarkdownEditor(
     editor: MarkdownEditor,
     modifier: Modifier,
 ) {
-    var field by remember { mutableStateOf(TextFieldValue(markdown)) }
+    val field = rememberTextFieldState(markdown)
+    val latestOnMarkdownChange by rememberUpdatedState(onMarkdownChange)
+    val commandOwner = remember { Any() }
     val undo = remember { ArrayDeque<TextFieldValue>() }
     val redo = remember { ArrayDeque<TextFieldValue>() }
+    var lastObserved by remember {
+        mutableStateOf(TextFieldValue(markdown, selection = field.selection))
+    }
+    var ignoredHistoryText by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(markdown) {
-        if (markdown != field.text) {
-            field = field.copy(
-                text = markdown,
-                selection = TextRange(
-                    field.selection.start.coerceAtMost(markdown.length),
-                    field.selection.end.coerceAtMost(markdown.length),
-                ),
-            )
+        if (markdown != field.text.toString()) {
+            ignoredHistoryText = markdown
+            field.edit {
+                val preservedSelection = TextRange(
+                    selection.start.coerceAtMost(markdown.length),
+                    selection.end.coerceAtMost(markdown.length),
+                )
+                replace(0, length, markdown)
+                selection = preservedSelection
+            }
         }
     }
+    LaunchedEffect(field) {
+        snapshotFlow { TextFieldValue(field.text.toString(), selection = field.selection) }
+            .collect { updated ->
+                if (updated.text != lastObserved.text) {
+                    if (updated.text == ignoredHistoryText) {
+                        ignoredHistoryText = null
+                    } else {
+                        undo.addLast(lastObserved)
+                        redo.clear()
+                    }
+                    latestOnMarkdownChange(updated.text)
+                }
+                lastObserved = updated
+            }
+    }
     SideEffect {
-        commands.action = { command ->
+        commands.connect(commandOwner) { command ->
             when (command) {
                 MarkdownCommand.UNDO -> undo.removeLastOrNull()?.let { previous ->
-                    redo.addLast(field)
-                    field = previous
-                    onMarkdownChange(previous.text)
+                    redo.addLast(lastObserved)
+                    ignoredHistoryText = previous.text
+                    field.edit {
+                        replace(0, length, previous.text)
+                        selection = previous.selection
+                    }
                 }
                 MarkdownCommand.REDO -> redo.removeLastOrNull()?.let { next ->
-                    undo.addLast(field)
-                    field = next
-                    onMarkdownChange(next.text)
+                    undo.addLast(lastObserved)
+                    ignoredHistoryText = next.text
+                    field.edit {
+                        replace(0, length, next.text)
+                        selection = next.selection
+                    }
                 }
                 else -> {
                     val edit = editor.applyCommand(
-                        markdown = field.text,
+                        markdown = field.text.toString(),
                         selection = MarkdownSelection(field.selection.start, field.selection.end),
                         command = command,
                     )
-                    if (edit.markdown != field.text) {
-                        undo.addLast(field)
-                        redo.clear()
-                        field = TextFieldValue(
-                            text = edit.markdown,
-                            selection = TextRange(edit.selection.start, edit.selection.end),
-                        )
-                        onMarkdownChange(edit.markdown)
+                    if (edit.markdown != field.text.toString()) {
+                        field.edit {
+                            replace(0, length, edit.markdown)
+                            selection = TextRange(edit.selection.start, edit.selection.end)
+                        }
                     }
                 }
             }
         }
+    }
+    DisposableEffect(commands, commandOwner) {
+        onDispose { commands.disconnect(commandOwner) }
     }
 
     Box(
@@ -223,21 +309,15 @@ private fun SourceMarkdownEditor(
             .padding(horizontal = 20.dp, vertical = 16.dp),
     ) {
         BasicTextField(
-            value = field,
-            onValueChange = { updated ->
-                if (updated.text != field.text) {
-                    undo.addLast(field)
-                    redo.clear()
-                    onMarkdownChange(updated.text)
-                }
-                field = updated
-            },
+            state = field,
             textStyle = MaterialTheme.typography.bodyLarge.copy(
                 color = MaterialTheme.colorScheme.onSurface,
                 fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
             ),
             cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .fillMaxSize()
+                .testTag("source-editor"),
         )
     }
 }
@@ -248,7 +328,10 @@ private fun SourceMarkdownEditor(
 private fun RichMarkdownEditor(
     markdown: String,
     onMarkdownChange: (String) -> Unit,
+    onActiveCommandsChange: (Set<MarkdownCommand>) -> Unit,
+    onReady: () -> Unit,
     commands: EditorCommandDispatcher,
+    openManagedAttachment: (String) -> InputStream?,
     modifier: Modifier,
 ) {
     val context = LocalContext.current
@@ -256,7 +339,23 @@ private fun RichMarkdownEditor(
     val latestMarkdown by rememberUpdatedState(markdown)
     val latestDarkMode by rememberUpdatedState(darkMode)
     val latestOnMarkdownChange by rememberUpdatedState(onMarkdownChange)
+    val latestOnActiveCommandsChange by rememberUpdatedState(onActiveCommandsChange)
+    val latestOnReady by rememberUpdatedState(onReady)
+    val latestOpenManagedAttachment by rememberUpdatedState(openManagedAttachment)
     var rendererGeneration by remember { mutableIntStateOf(0) }
+    var editorMarkdown by remember { mutableStateOf(markdown) }
+    var connectedWebView by remember(rendererGeneration) { mutableStateOf<WebView?>(null) }
+
+    LaunchedEffect(markdown, connectedWebView) {
+        val webView = connectedWebView ?: return@LaunchedEffect
+        if (markdown != editorMarkdown) {
+            editorMarkdown = markdown
+            webView.loadMarkdown(markdown)
+        }
+    }
+    LaunchedEffect(darkMode, connectedWebView) {
+        connectedWebView?.setDarkMode(darkMode)
+    }
 
     key(rendererGeneration) {
         AndroidView(
@@ -281,7 +380,18 @@ private fun RichMarkdownEditor(
                         override fun shouldInterceptRequest(
                             view: WebView,
                             request: WebResourceRequest,
-                        ): WebResourceResponse? = assetLoader.shouldInterceptRequest(request.url)
+                        ): WebResourceResponse? {
+                            request.managedAttachmentRequest()?.let { attachmentRequest ->
+                                val content = latestOpenManagedAttachment(attachmentRequest.id)
+                                    ?: return WebResourceResponse(null, null, null)
+                                return WebResourceResponse(
+                                    attachmentRequest.mediaType,
+                                    null,
+                                    content,
+                                )
+                            }
+                            return assetLoader.shouldInterceptRequest(request.url)
+                        }
 
                         override fun shouldOverrideUrlLoading(
                             view: WebView,
@@ -325,41 +435,111 @@ private fun RichMarkdownEditor(
                             when (payload.optString("type")) {
                                 "ready" -> {
                                     view.setDarkMode(latestDarkMode)
+                                    editorMarkdown = latestMarkdown
                                     view.loadMarkdown(latestMarkdown)
+                                    commands.connect(view) { command ->
+                                        view.runCommand(command, latestOnActiveCommandsChange)
+                                    }
+                                    connectedWebView = view
+                                    latestOnReady()
                                 }
-                                "changed" -> latestOnMarkdownChange(payload.optString("markdown"))
+                                "changed" -> {
+                                    val changed = payload.optString("markdown")
+                                    editorMarkdown = changed
+                                    latestOnMarkdownChange(changed)
+                                }
+                                "formatting" -> latestOnActiveCommandsChange(
+                                    buildSet {
+                                        val active = payload.optJSONArray("commands") ?: return@buildSet
+                                        for (index in 0 until active.length()) {
+                                            markdownCommandForBridgeName(active.optString(index))?.let(::add)
+                                        }
+                                    },
+                                )
                             }
                         }
                     }
                     loadUrl("$ASSET_ORIGIN/assets/kgs-editor/index.html")
                 }
             },
-            update = { webView ->
-                commands.action = webView::runCommand
-                webView.setDarkMode(darkMode)
-                webView.loadMarkdown(markdown)
+            update = {},
+            onRelease = { webView ->
+                commands.disconnect(webView)
+                if (connectedWebView === webView) connectedWebView = null
+                webView.destroy()
             },
-            onRelease = WebView::destroy,
             modifier = modifier,
         )
     }
 }
 
-private class EditorCommandDispatcher {
-    var action: (MarkdownCommand) -> Unit = {}
+private data class ManagedAttachmentRequest(
+    val id: String,
+    val mediaType: String,
+)
 
-    fun dispatch(command: MarkdownCommand) = action(command)
+private fun WebResourceRequest.managedAttachmentRequest(): ManagedAttachmentRequest? {
+    if (url.host != ASSET_HOST) return null
+    val vaultIndex = url.pathSegments.indexOf(".kgs-notes-attachments")
+    if (vaultIndex < 0 || vaultIndex + 2 >= url.pathSegments.size) return null
+    val storageName = url.pathSegments[vaultIndex + 2]
+    val id = storageName.substringBefore('.')
+    if (!id.matches(Regex("[a-f0-9-]{36}"))) return null
+    val extension = storageName.substringAfterLast('.', "").lowercase()
+    val mediaType = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
+        ?.takeIf { it.startsWith("image/") }
+        ?: return null
+    return ManagedAttachmentRequest(id, mediaType)
+}
+
+private class EditorCommandDispatcher {
+    private var owner: Any? = null
+    private var action: ((MarkdownCommand) -> Unit)? = null
+    private val pending = ArrayDeque<MarkdownCommand>()
+
+    fun connect(owner: Any, action: (MarkdownCommand) -> Unit) {
+        this.owner = owner
+        this.action = action
+        while (pending.isNotEmpty()) action(pending.removeFirst())
+    }
+
+    fun disconnect(owner: Any) {
+        if (this.owner === owner) {
+            this.owner = null
+            action = null
+        }
+    }
+
+    fun dispatch(command: MarkdownCommand) {
+        action?.invoke(command) ?: pending.addLast(command)
+    }
 }
 
 @Composable
 private fun EditorToolbar(
     mode: EditorMode,
+    activeCommands: Set<MarkdownCommand>,
     onModeChange: (EditorMode) -> Unit,
     onCommand: (MarkdownCommand) -> Unit,
+    onAddImage: () -> Unit,
 ) {
+    val motion = LocalKgsMotion.current
     var listMenuOpen by remember { mutableStateOf(false) }
+    val listMenuVisibility = remember { MutableTransitionState(false) }
+    listMenuVisibility.targetState = listMenuOpen
+    val toolsScroll = rememberScrollState()
+    val leftFade by animateFloatAsState(
+        targetValue = if (toolsScroll.canScrollBackward) 1f else 0f,
+        animationSpec = motion.fastEffectsSpec(),
+        label = "toolbar left edge fade",
+    )
+    val rightFade by animateFloatAsState(
+        targetValue = if (toolsScroll.canScrollForward) 1f else 0f,
+        animationSpec = motion.fastEffectsSpec(),
+        label = "toolbar right edge fade",
+    )
     Surface(
-        color = MaterialTheme.colorScheme.surfaceContainerLowest,
+        color = Color.White,
         tonalElevation = 0.dp,
         modifier = Modifier
             .fillMaxWidth()
@@ -370,6 +550,7 @@ private fun EditorToolbar(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.height(46.dp),
             ) {
+                Spacer(Modifier.width(9.dp))
                 ToolbarButton(
                     description = if (mode == EditorMode.RICH) "Switch to Source Mode" else "Switch to Rich Mode",
                     selected = true,
@@ -380,9 +561,10 @@ private fun EditorToolbar(
                     AnimatedContent(
                         targetState = mode,
                         transitionSpec = {
-                            (fadeIn(spring(dampingRatio = .72f, stiffness = 500f)) +
-                                scaleIn(spring(dampingRatio = .62f, stiffness = 420f), initialScale = .72f)) togetherWith
-                                (fadeOut(tween(90)) + scaleOut(tween(110), targetScale = .72f))
+                            (fadeIn(motion.defaultEffectsSpec()) +
+                                scaleIn(motion.defaultSpatialSpec(), initialScale = .72f)) togetherWith
+                                (fadeOut(motion.fastEffectsSpec()) +
+                                    scaleOut(motion.fastSpatialSpec(), targetScale = .72f))
                         },
                         label = "mode icon",
                     ) { current ->
@@ -393,72 +575,205 @@ private fun EditorToolbar(
                     }
                 }
                 Spacer(Modifier.width(7.dp))
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(0.dp),
+                Box(
                     modifier = Modifier
                         .weight(1f)
-                        .horizontalScroll(androidx.compose.foundation.rememberScrollState()),
+                        .fillMaxHeight()
+                        .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+                        .drawWithContent {
+                            drawContent()
+                            val fadeWidth = 15.dp.toPx().coerceAtMost(size.width / 2f)
+                            if (leftFade > .001f) {
+                                drawRect(
+                                    brush = Brush.horizontalGradient(
+                                        colors = listOf(
+                                            Color.White.copy(alpha = 1f - leftFade),
+                                            Color.White,
+                                        ),
+                                        startX = 0f,
+                                        endX = fadeWidth,
+                                    ),
+                                    size = Size(fadeWidth, size.height),
+                                    blendMode = BlendMode.DstIn,
+                                )
+                            }
+                            if (rightFade > .001f) {
+                                drawRect(
+                                    brush = Brush.horizontalGradient(
+                                        colors = listOf(
+                                            Color.White,
+                                            Color.White.copy(alpha = 1f - rightFade),
+                                        ),
+                                        startX = size.width - fadeWidth,
+                                        endX = size.width,
+                                    ),
+                                    topLeft = Offset(size.width - fadeWidth, 0f),
+                                    size = Size(fadeWidth, size.height),
+                                    blendMode = BlendMode.DstIn,
+                                )
+                            }
+                        },
                 ) {
-                    ToolbarIconButton(ToolbarGlyphType.BOLD, "Bold") { onCommand(MarkdownCommand.BOLD) }
-                    ToolbarIconButton(ToolbarGlyphType.ITALIC, "Italic") { onCommand(MarkdownCommand.ITALIC) }
-                    ToolbarIconButton(ToolbarGlyphType.HEADING, "Heading level 2") { onCommand(MarkdownCommand.HEADING_2) }
-                    Box {
-                        ToolbarButton(description = "Lists", onClick = { listMenuOpen = true }) {
-                            ToolbarGlyph(ToolbarGlyphType.LIST, MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        DropdownMenu(
-                            expanded = listMenuOpen,
-                            onDismissRequest = { listMenuOpen = false },
-                            shape = RoundedCornerShape(18.dp),
-                            containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-                            properties = PopupProperties(focusable = false),
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(0.dp),
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .horizontalScroll(toolsScroll),
+                    ) {
+                        ToolbarIconButton(ToolbarGlyphType.BOLD, "Bold", MarkdownCommand.BOLD in activeCommands) { onCommand(MarkdownCommand.BOLD) }
+                        ToolbarIconButton(ToolbarGlyphType.ITALIC, "Italic", MarkdownCommand.ITALIC in activeCommands) { onCommand(MarkdownCommand.ITALIC) }
+                        ToolbarIconButton(ToolbarGlyphType.HEADING, "Heading level 2", MarkdownCommand.HEADING_2 in activeCommands) { onCommand(MarkdownCommand.HEADING_2) }
+                        Box {
+                        val activeList = listOf(
+                            MarkdownCommand.BULLET_LIST,
+                            MarkdownCommand.TASK_LIST,
+                            MarkdownCommand.NUMBERED_LIST,
+                        ).firstOrNull { it in activeCommands }
+                        ToolbarButton(
+                            description = "Lists",
+                            selected = listMenuOpen || activeList != null,
+                            onClick = { listMenuOpen = true },
                         ) {
-                            ListMenuItem("Bulleted list", ToolbarGlyphType.LIST) {
-                                onCommand(MarkdownCommand.BULLET_LIST)
-                                listMenuOpen = false
+                            ToolbarGlyph(
+                                type = when (activeList) {
+                                    MarkdownCommand.TASK_LIST -> ToolbarGlyphType.CHECKLIST
+                                    MarkdownCommand.NUMBERED_LIST -> ToolbarGlyphType.NUMBERED_LIST
+                                    else -> ToolbarGlyphType.LIST
+                                },
+                                color = if (listMenuOpen || activeList != null) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                            )
+                        }
+                        val density = LocalDensity.current
+                        if (listMenuVisibility.currentState || listMenuVisibility.targetState) {
+                            val positionProvider = remember(density) {
+                                AboveAnchorPopupPositionProvider(
+                                    horizontalOffset = with(density) { 4.dp.roundToPx() },
+                                    verticalGap = with(density) { 6.dp.roundToPx() },
+                                    windowMargin = with(density) { 8.dp.roundToPx() },
+                                )
                             }
-                            ListMenuItem("Checklist", ToolbarGlyphType.CHECKLIST) {
-                                onCommand(MarkdownCommand.TASK_LIST)
-                                listMenuOpen = false
-                            }
-                            ListMenuItem("Numbered list", ToolbarGlyphType.NUMBERED_LIST) {
-                                onCommand(MarkdownCommand.NUMBERED_LIST)
-                                listMenuOpen = false
+                            Popup(
+                                popupPositionProvider = positionProvider,
+                                onDismissRequest = { listMenuOpen = false },
+                                properties = PopupProperties(
+                                    focusable = false,
+                                    dismissOnBackPress = true,
+                                    dismissOnClickOutside = true,
+                                    clippingEnabled = false,
+                                ),
+                            ) {
+                                ListStyleMenuPopupContent(
+                                    visibleState = listMenuVisibility,
+                                    activeCommands = activeCommands,
+                                    onSelect = { command ->
+                                        onCommand(command)
+                                        listMenuOpen = false
+                                    },
+                                )
                             }
                         }
+                        }
+                        ToolbarIconButton(ToolbarGlyphType.QUOTE, "Quote", MarkdownCommand.BLOCKQUOTE in activeCommands) { onCommand(MarkdownCommand.BLOCKQUOTE) }
+                        ToolbarIconButton(ToolbarGlyphType.CODE, "Code block", MarkdownCommand.CODE_BLOCK in activeCommands) { onCommand(MarkdownCommand.CODE_BLOCK) }
+                        ToolbarIconButton(ToolbarGlyphType.TABLE, "Insert table", MarkdownCommand.TABLE in activeCommands) { onCommand(MarkdownCommand.TABLE) }
+                        ToolbarIconButton(ToolbarGlyphType.IMAGE, "Add image") { onAddImage() }
                     }
-                    ToolbarIconButton(ToolbarGlyphType.QUOTE, "Quote") { onCommand(MarkdownCommand.BLOCKQUOTE) }
-                    ToolbarIconButton(ToolbarGlyphType.CODE, "Code block") { onCommand(MarkdownCommand.CODE_BLOCK) }
-                    ToolbarIconButton(ToolbarGlyphType.TABLE, "Insert table") { onCommand(MarkdownCommand.TABLE) }
                 }
                 Spacer(Modifier.width(4.dp))
                 ToolbarIconButton(ToolbarGlyphType.UNDO, "Undo") { onCommand(MarkdownCommand.UNDO) }
                 ToolbarIconButton(ToolbarGlyphType.REDO, "Redo") { onCommand(MarkdownCommand.REDO) }
                 Spacer(Modifier.width(2.dp))
             }
-            Spacer(Modifier.navigationBarsPadding())
         }
     }
 }
 
 @Composable
-private fun ListMenuItem(label: String, glyph: ToolbarGlyphType, onClick: () -> Unit) {
-    DropdownMenuItem(
-        text = { Text(label) },
-        leadingIcon = { ToolbarGlyph(glyph, MaterialTheme.colorScheme.onSurfaceVariant) },
-        onClick = onClick,
-    )
+private fun ListStyleMenuPopupContent(
+    visibleState: MutableTransitionState<Boolean>,
+    activeCommands: Set<MarkdownCommand>,
+    onSelect: (MarkdownCommand) -> Unit,
+) {
+    val motion = LocalKgsMotion.current
+    AnimatedVisibility(
+        visibleState = visibleState,
+        enter = scaleIn(
+            animationSpec = motion.fastSpatialSpec(),
+            initialScale = .8f,
+            transformOrigin = TransformOrigin(0f, 1f),
+        ) + fadeIn(motion.fastEffectsSpec()),
+        exit = scaleOut(
+            animationSpec = motion.fastSpatialSpec(),
+            targetScale = .8f,
+            transformOrigin = TransformOrigin(0f, 1f),
+        ) + fadeOut(motion.fastEffectsSpec()),
+    ) {
+        val listMenuShape = RoundedCornerShape(18.dp)
+        Surface(
+            color = Color.White,
+            shape = listMenuShape,
+            tonalElevation = 0.dp,
+            shadowElevation = 3.dp,
+            modifier = Modifier
+                .width(238.dp)
+                .testTag("list-style-menu")
+                .kgsMenuShadow(listMenuShape),
+        ) {
+            Column {
+                ListMenuItem(
+                    "Bulleted list",
+                    ToolbarGlyphType.LIST,
+                    selected = MarkdownCommand.BULLET_LIST in activeCommands,
+                ) { onSelect(MarkdownCommand.BULLET_LIST) }
+                ListMenuItem(
+                    "Checklist",
+                    ToolbarGlyphType.CHECKLIST,
+                    selected = MarkdownCommand.TASK_LIST in activeCommands,
+                ) { onSelect(MarkdownCommand.TASK_LIST) }
+                ListMenuItem(
+                    "Numbered list",
+                    ToolbarGlyphType.NUMBERED_LIST,
+                    selected = MarkdownCommand.NUMBERED_LIST in activeCommands,
+                ) { onSelect(MarkdownCommand.NUMBERED_LIST) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ListMenuItem(
+    label: String,
+    glyph: ToolbarGlyphType,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    KgsTooltip(label) {
+        KgsDropdownMenuItem(
+            text = label,
+            selected = selected,
+            icon = { ToolbarGlyph(glyph, MaterialTheme.colorScheme.onSurfaceVariant) },
+            onClick = onClick,
+        )
+    }
 }
 
 @Composable
 private fun ToolbarIconButton(
     glyph: ToolbarGlyphType,
     description: String,
+    selected: Boolean = false,
     onClick: () -> Unit,
 ) {
-    ToolbarButton(description, onClick) {
-        ToolbarGlyph(glyph, MaterialTheme.colorScheme.onSurfaceVariant)
+    ToolbarButton(description, onClick, selected) {
+        ToolbarGlyph(
+            glyph,
+            if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -469,109 +784,128 @@ private fun ToolbarButton(
     selected: Boolean = false,
     content: @Composable () -> Unit,
 ) {
-    val shape = RoundedCornerShape(10.dp)
-    Box(
-        contentAlignment = Alignment.Center,
-        modifier = Modifier
-            .padding(start = if (selected) 3.dp else 0.dp)
-            .size(38.dp)
-            .background(
-                color = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
-                shape = shape,
-            )
-            .kgsClickable(onClick, shape)
-            .semantics { contentDescription = description },
-    ) { content() }
+    val corner by androidx.compose.animation.core.animateDpAsState(
+        targetValue = if (selected) 19.dp else 10.dp,
+        animationSpec = LocalKgsMotion.current.fastSpatialSpec(),
+        label = "$description shape",
+    )
+    KgsTooltip(description) {
+        KgsExpressiveSurface(
+            onClick = onClick,
+            color = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+            restingCorners = KgsCornerRadii(corner),
+            modifier = Modifier
+                .size(38.dp)
+                .semantics {
+                    contentDescription = description
+                    this.selected = selected
+                },
+        ) { content() }
+    }
 }
 
 private enum class ToolbarGlyphType {
-    RICH, SOURCE, BOLD, ITALIC, HEADING, LIST, CHECKLIST, NUMBERED_LIST, QUOTE, CODE, TABLE, UNDO, REDO,
+    RICH, SOURCE, BOLD, ITALIC, HEADING, LIST, CHECKLIST, NUMBERED_LIST, QUOTE, CODE, TABLE, IMAGE, UNDO, REDO,
+}
+
+private fun Modifier.kgsMenuShadow(shape: RoundedCornerShape): Modifier = shadow(
+    elevation = 18.dp,
+    shape = shape,
+    clip = false,
+    ambientColor = Color.Black.copy(alpha = .065f),
+    spotColor = Color.Black.copy(alpha = .1f),
+)
+
+private class AboveAnchorPopupPositionProvider(
+    private val horizontalOffset: Int,
+    private val verticalGap: Int,
+    private val windowMargin: Int,
+) : PopupPositionProvider {
+    override fun calculatePosition(
+        anchorBounds: IntRect,
+        windowSize: IntSize,
+        layoutDirection: LayoutDirection,
+        popupContentSize: IntSize,
+    ): IntOffset {
+        val desiredX = if (layoutDirection == LayoutDirection.Ltr) {
+            anchorBounds.left + horizontalOffset
+        } else {
+            anchorBounds.right - popupContentSize.width - horizontalOffset
+        }
+        val maxX = (windowSize.width - popupContentSize.width - windowMargin)
+            .coerceAtLeast(windowMargin)
+        val x = desiredX.coerceIn(windowMargin, maxX)
+        val y = (anchorBounds.top - popupContentSize.height - verticalGap)
+            .coerceAtLeast(windowMargin)
+        return IntOffset(x, y)
+    }
 }
 
 @Composable
 private fun ToolbarGlyph(type: ToolbarGlyphType, color: Color) {
-    Canvas(Modifier.size(22.dp)) {
-        val stroke = size.minDimension * .105f
-        val line = Stroke(width = stroke, cap = StrokeCap.Round, join = StrokeJoin.Round)
-        fun horizontal(y: Float, start: Float = .2f, end: Float = .8f) =
-            drawLine(color, Offset(size.width * start, size.height * y), Offset(size.width * end, size.height * y), stroke, StrokeCap.Round)
-        when (type) {
-            ToolbarGlyphType.RICH -> {
-                horizontal(.28f, .16f, .62f)
-                horizontal(.5f, .16f, .84f)
-                horizontal(.72f, .16f, .7f)
-                drawCircle(color, stroke * .54f, Offset(size.width * .8f, size.height * .24f))
+    if (type in setOf(
+            ToolbarGlyphType.RICH,
+            ToolbarGlyphType.SOURCE,
+            ToolbarGlyphType.LIST,
+            ToolbarGlyphType.CODE,
+        )
+    ) {
+        Canvas(Modifier.size(22.dp)) {
+            val stroke = size.minDimension * .09f
+            fun roundedLine(start: Offset, end: Offset) {
+                drawLine(color, start, end, stroke, StrokeCap.Round)
             }
-            ToolbarGlyphType.SOURCE, ToolbarGlyphType.CODE -> {
-                drawLine(color, Offset(size.width * .36f, size.height * .28f), Offset(size.width * .16f, size.height * .5f), stroke, StrokeCap.Round)
-                drawLine(color, Offset(size.width * .16f, size.height * .5f), Offset(size.width * .36f, size.height * .72f), stroke, StrokeCap.Round)
-                drawLine(color, Offset(size.width * .64f, size.height * .28f), Offset(size.width * .84f, size.height * .5f), stroke, StrokeCap.Round)
-                drawLine(color, Offset(size.width * .84f, size.height * .5f), Offset(size.width * .64f, size.height * .72f), stroke, StrokeCap.Round)
-                drawLine(color, Offset(size.width * .57f, size.height * .19f), Offset(size.width * .43f, size.height * .81f), stroke * .8f, StrokeCap.Round)
-            }
-            ToolbarGlyphType.BOLD -> {
-                val path = Path().apply {
-                    moveTo(size.width * .28f, size.height * .18f)
-                    lineTo(size.width * .28f, size.height * .82f)
-                    moveTo(size.width * .28f, size.height * .2f)
-                    cubicTo(size.width * .73f, size.height * .16f, size.width * .75f, size.height * .49f, size.width * .3f, size.height * .5f)
-                    cubicTo(size.width * .8f, size.height * .49f, size.width * .8f, size.height * .84f, size.width * .28f, size.height * .8f)
+            when (type) {
+                ToolbarGlyphType.RICH -> {
+                    roundedLine(Offset(size.width * .22f, size.height * .29f), Offset(size.width * .78f, size.height * .29f))
+                    roundedLine(Offset(size.width * .22f, size.height * .50f), Offset(size.width * .66f, size.height * .50f))
+                    roundedLine(Offset(size.width * .22f, size.height * .71f), Offset(size.width * .73f, size.height * .71f))
                 }
-                drawPath(path, color, style = line)
-            }
-            ToolbarGlyphType.ITALIC -> {
-                horizontal(.2f, .42f, .78f)
-                horizontal(.8f, .22f, .58f)
-                drawLine(color, Offset(size.width * .62f, size.height * .2f), Offset(size.width * .38f, size.height * .8f), stroke, StrokeCap.Round)
-            }
-            ToolbarGlyphType.HEADING -> {
-                drawLine(color, Offset(size.width * .18f, size.height * .2f), Offset(size.width * .18f, size.height * .8f), stroke, StrokeCap.Round)
-                drawLine(color, Offset(size.width * .58f, size.height * .2f), Offset(size.width * .58f, size.height * .8f), stroke, StrokeCap.Round)
-                horizontal(.5f, .18f, .58f)
-                horizontal(.7f, .7f, .88f)
-                horizontal(.82f, .7f, .88f)
-            }
-            ToolbarGlyphType.LIST, ToolbarGlyphType.CHECKLIST, ToolbarGlyphType.NUMBERED_LIST -> {
-                listOf(.28f, .5f, .72f).forEachIndexed { index, y ->
-                    if (type == ToolbarGlyphType.CHECKLIST) {
-                        drawRoundRect(color, Offset(size.width * .1f, size.height * (y - .065f)), androidx.compose.ui.geometry.Size(size.width * .13f, size.height * .13f), style = Stroke(stroke * .62f))
-                        if (index == 0) {
-                            drawLine(color, Offset(size.width * .12f, size.height * y), Offset(size.width * .16f, size.height * (y + .035f)), stroke * .55f, StrokeCap.Round)
-                            drawLine(color, Offset(size.width * .16f, size.height * (y + .035f)), Offset(size.width * .22f, size.height * (y - .04f)), stroke * .55f, StrokeCap.Round)
-                        }
-                    } else if (type == ToolbarGlyphType.NUMBERED_LIST) {
-                        horizontal(y, .1f, if (index == 0) .15f else .2f)
-                    } else {
-                        drawCircle(color, stroke * .48f, Offset(size.width * .16f, size.height * y))
-                    }
-                    horizontal(y, .34f, .86f)
+                ToolbarGlyphType.SOURCE -> {
+                    roundedLine(Offset(size.width * .39f, size.height * .28f), Offset(size.width * .20f, size.height * .50f))
+                    roundedLine(Offset(size.width * .20f, size.height * .50f), Offset(size.width * .39f, size.height * .72f))
+                    roundedLine(Offset(size.width * .61f, size.height * .28f), Offset(size.width * .80f, size.height * .50f))
+                    roundedLine(Offset(size.width * .80f, size.height * .50f), Offset(size.width * .61f, size.height * .72f))
                 }
-            }
-            ToolbarGlyphType.QUOTE -> {
-                listOf(.3f, .62f).forEach { x ->
-                    val path = Path().apply {
-                        moveTo(size.width * x, size.height * .3f)
-                        cubicTo(size.width * (x - .14f), size.height * .42f, size.width * (x - .13f), size.height * .7f, size.width * (x + .02f), size.height * .71f)
-                        lineTo(size.width * (x + .08f), size.height * .55f)
-                    }
-                    drawPath(path, color, style = line)
+                ToolbarGlyphType.LIST -> {
+                    drawCircle(color, stroke * .62f, Offset(size.width * .22f, size.height * .35f))
+                    drawCircle(color, stroke * .62f, Offset(size.width * .22f, size.height * .65f))
+                    roundedLine(Offset(size.width * .39f, size.height * .35f), Offset(size.width * .80f, size.height * .35f))
+                    roundedLine(Offset(size.width * .39f, size.height * .65f), Offset(size.width * .80f, size.height * .65f))
                 }
-            }
-            ToolbarGlyphType.TABLE -> {
-                drawRoundRect(color, Offset(size.width * .14f, size.height * .19f), androidx.compose.ui.geometry.Size(size.width * .72f, size.height * .62f), style = Stroke(stroke * .8f))
-                horizontal(.42f, .14f, .86f)
-                horizontal(.62f, .14f, .86f)
-                drawLine(color, Offset(size.width * .5f, size.height * .19f), Offset(size.width * .5f, size.height * .81f), stroke * .8f, StrokeCap.Round)
-            }
-            ToolbarGlyphType.UNDO, ToolbarGlyphType.REDO -> {
-                val mirror = if (type == ToolbarGlyphType.UNDO) 1f else -1f
-                drawArc(color, if (mirror > 0) 195f else -15f, 235f * mirror, false, style = Stroke(stroke, cap = StrokeCap.Round))
-                val x = if (type == ToolbarGlyphType.UNDO) .18f else .82f
-                drawLine(color, Offset(size.width * x, size.height * .42f), Offset(size.width * (x + .12f * mirror), size.height * .23f), stroke, StrokeCap.Round)
-                drawLine(color, Offset(size.width * x, size.height * .42f), Offset(size.width * (x + .18f * mirror), size.height * .48f), stroke, StrokeCap.Round)
+                ToolbarGlyphType.CODE -> {
+                    roundedLine(Offset(size.width * .40f, size.height * .27f), Offset(size.width * .18f, size.height * .50f))
+                    roundedLine(Offset(size.width * .18f, size.height * .50f), Offset(size.width * .40f, size.height * .73f))
+                    roundedLine(Offset(size.width * .60f, size.height * .27f), Offset(size.width * .82f, size.height * .50f))
+                    roundedLine(Offset(size.width * .82f, size.height * .50f), Offset(size.width * .60f, size.height * .73f))
+                }
+                else -> Unit
             }
         }
+        return
     }
+    val drawable = when (type) {
+        ToolbarGlyphType.RICH -> R.drawable.ic_toolbar_rich
+        ToolbarGlyphType.SOURCE -> R.drawable.ic_toolbar_source
+        ToolbarGlyphType.BOLD -> R.drawable.ic_toolbar_bold
+        ToolbarGlyphType.ITALIC -> R.drawable.ic_toolbar_italic
+        ToolbarGlyphType.HEADING -> R.drawable.ic_toolbar_heading
+        ToolbarGlyphType.LIST -> R.drawable.ic_toolbar_bulleted_list
+        ToolbarGlyphType.CHECKLIST -> R.drawable.ic_toolbar_checklist
+        ToolbarGlyphType.NUMBERED_LIST -> R.drawable.ic_toolbar_numbered_list
+        ToolbarGlyphType.QUOTE -> R.drawable.ic_toolbar_quote
+        ToolbarGlyphType.CODE -> R.drawable.ic_toolbar_code
+        ToolbarGlyphType.TABLE -> R.drawable.ic_toolbar_table
+        ToolbarGlyphType.IMAGE -> R.drawable.ic_toolbar_image
+        ToolbarGlyphType.UNDO -> R.drawable.ic_toolbar_undo
+        ToolbarGlyphType.REDO -> R.drawable.ic_toolbar_redo
+    }
+    Icon(
+        painter = painterResource(drawable),
+        contentDescription = null,
+        tint = color,
+        modifier = Modifier.size(21.dp),
+    )
 }
 
 private fun WebView.loadMarkdown(markdown: String) {
@@ -585,7 +919,23 @@ private fun WebView.setDarkMode(enabled: Boolean) {
     evaluateJavascript("window.kgsEditor?.setDarkMode($enabled)", null)
 }
 
-private fun WebView.runCommand(command: MarkdownCommand) {
+private fun markdownCommandForBridgeName(name: String): MarkdownCommand? = when (name) {
+    "bold" -> MarkdownCommand.BOLD
+    "italic" -> MarkdownCommand.ITALIC
+    "heading" -> MarkdownCommand.HEADING_2
+    "bullet" -> MarkdownCommand.BULLET_LIST
+    "numbered" -> MarkdownCommand.NUMBERED_LIST
+    "task" -> MarkdownCommand.TASK_LIST
+    "quote" -> MarkdownCommand.BLOCKQUOTE
+    "code" -> MarkdownCommand.CODE_BLOCK
+    "table" -> MarkdownCommand.TABLE
+    else -> null
+}
+
+private fun WebView.runCommand(
+    command: MarkdownCommand,
+    onActiveCommandsChange: (Set<MarkdownCommand>) -> Unit,
+) {
     val name = when (command) {
         MarkdownCommand.BOLD -> "bold"
         MarkdownCommand.ITALIC -> "italic"
@@ -599,7 +949,17 @@ private fun WebView.runCommand(command: MarkdownCommand) {
         MarkdownCommand.UNDO -> "undo"
         MarkdownCommand.REDO -> "redo"
     }
-    evaluateJavascript("window.kgsEditor?.run(${JSONObject.quote(name)})", null)
+    evaluateJavascript("window.kgsEditor?.run(${JSONObject.quote(name)})") { result ->
+        val activeCommands = runCatching {
+            val values = org.json.JSONArray(result)
+            buildSet {
+                for (index in 0 until values.length()) {
+                    markdownCommandForBridgeName(values.optString(index))?.let(::add)
+                }
+            }
+        }.getOrNull() ?: return@evaluateJavascript
+        onActiveCommandsChange(activeCommands)
+    }
 }
 
 private const val ASSET_HOST = "appassets.androidplatform.net"

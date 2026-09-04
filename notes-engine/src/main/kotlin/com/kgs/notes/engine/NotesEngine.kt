@@ -1,5 +1,6 @@
 package com.kgs.notes.engine
 
+import java.io.InputStream
 import java.time.Instant
 import kotlinx.coroutines.flow.StateFlow
 
@@ -53,10 +54,41 @@ data class LibrarySnapshot(
     val favorites: List<NoteSummary> get() = active.filter(NoteSummary::favorite)
 }
 
+@JvmInline
+value class AttachmentId(val value: String)
+
+class AttachmentImport(
+    val displayName: String,
+    val mediaType: String,
+    val openContent: () -> InputStream,
+)
+
+data class ManagedAttachment(
+    val id: AttachmentId,
+    val noteId: NoteId,
+    val displayName: String,
+    val mediaType: String,
+    val markdownTarget: String,
+    val createdAt: Instant,
+)
+
 interface NotesEngine {
     val library: StateFlow<LibrarySnapshot>
+    val sources: StateFlow<List<SourceDescriptor>>
 
-    suspend fun createDraft(category: String = ""): NoteId
+    suspend fun createDraft(
+        category: String = "",
+        sourceId: SourceId = LocalSourceId,
+    ): NoteId
+
+    suspend fun attachSource(source: Source)
+
+    suspend fun refreshSources()
+
+    suspend fun synchronize(id: NoteId)
+
+    /** Moves the durable Note ownership to another Source and returns its resulting local identity. */
+    suspend fun moveToSource(id: NoteId, sourceId: SourceId): NoteId
 
     suspend fun note(id: NoteId): Note?
 
@@ -65,6 +97,15 @@ interface NotesEngine {
     suspend fun rename(id: NoteId, title: String)
 
     suspend fun setCategory(id: NoteId, category: String)
+
+    suspend fun importManagedAttachment(
+        noteId: NoteId,
+        attachment: AttachmentImport,
+    ): ManagedAttachment
+
+    suspend fun managedAttachments(noteId: NoteId): List<ManagedAttachment>
+
+    fun openManagedAttachment(id: AttachmentId): InputStream?
 
     suspend fun toggleFavorite(id: NoteId)
 

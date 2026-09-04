@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "${1:-}" in
+    devices)
+        cat <<'EOF'
+List of devices attached
+emulator-5554	device product:sdk_gphone64_x86_64
+emulator-5556	device product:sdk_gphone64_x86_64
+EOF
+        ;;
+    -s)
+        serial="${2:-}"
+        expected_serial="${EXPECTED_ANDROID_SERIAL:-emulator-5556}"
+        shift 2
+        if [[ "$serial" == emulator-5554 && "$*" == "emu avd name" ]]; then
+            printf 'kgs_calendar_api36\nOK\n'
+        elif [[ "$serial" == emulator-5556 && "$*" == "emu avd name" ]]; then
+            printf 'kgs_notes_phone_api36\nOK\n'
+        elif [[ "$serial" == "$expected_serial" && "$*" == "get-state" ]]; then
+            printf 'device\n'
+        elif [[ "$serial" == "$expected_serial" && "$*" == "shell getprop sys.boot_completed" ]]; then
+            printf '1\n'
+        elif [[ "$serial" == "$expected_serial" && "$*" == "shell pm path android" ]]; then
+            printf 'package:/system/framework/framework-res.apk\n'
+        elif [[ "$serial" == "$expected_serial" && "$*" == "shell pm path com.kgs501.kgsnotes" ]]; then
+            printf 'package:/data/app/com.kgs501.kgsnotes/base.apk\n'
+        elif [[ "${FAKE_ADB_HANG_DISABLE:-0}" == 1 && "$serial" == "$expected_serial" && "$*" == "shell pm disable-user --user 0 com.google.android.apps.wellbeing" ]]; then
+            sleep 30
+        elif [[ "$serial" == "$expected_serial" ]]; then
+            :
+        else
+            printf 'Unexpected targeted fake adb invocation: -s %s %s\n' "$serial" "$*" >&2
+            exit 64
+        fi
+        ;;
+    *)
+        printf 'Unexpected fake adb invocation: %s\n' "$*" >&2
+        exit 64
+        ;;
+esac

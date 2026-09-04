@@ -30,6 +30,12 @@ data class MarkdownEdit(
     val selection: MarkdownSelection,
 )
 
+data class MarkdownAttachment(
+    val displayName: String,
+    val target: String,
+    val inlineImage: Boolean,
+)
+
 interface MarkdownEditor {
     fun safetyFor(markdown: String): EditorSafety
 
@@ -37,6 +43,12 @@ interface MarkdownEditor {
         markdown: String,
         selection: MarkdownSelection,
         command: MarkdownCommand,
+    ): MarkdownEdit
+
+    fun insertAttachment(
+        markdown: String,
+        selection: MarkdownSelection,
+        attachment: MarkdownAttachment,
     ): MarkdownEdit
 }
 
@@ -77,6 +89,35 @@ class DefaultMarkdownEditor : MarkdownEditor {
             MarkdownCommand.REDO,
             -> MarkdownEdit(markdown, normalized)
         }
+    }
+
+    override fun insertAttachment(
+        markdown: String,
+        selection: MarkdownSelection,
+        attachment: MarkdownAttachment,
+    ): MarkdownEdit {
+        val normalized = selection.normalized(markdown.length)
+        val readableLabel = attachment.displayName
+            .replace("\\", "\\\\")
+            .replace("[", "\\[")
+            .replace("]", "\\]")
+        val marker = if (attachment.inlineImage) "!" else ""
+        val before = markdown.substring(0, normalized.start)
+        val after = markdown.substring(normalized.end)
+        val blockPrefix = when {
+            before.isEmpty() || before.endsWith("\n\n") -> ""
+            before.endsWith('\n') -> "\n"
+            else -> "\n\n"
+        }
+        val blockSuffix = when {
+            after.isEmpty() || after.startsWith("\n\n") -> ""
+            after.startsWith('\n') -> "\n"
+            else -> "\n\n"
+        }
+        return markdown.insert(
+            normalized,
+            "$blockPrefix$marker[$readableLabel](${attachment.target})$blockSuffix",
+        )
     }
 
     private fun MarkdownSelection.normalized(length: Int): MarkdownSelection {

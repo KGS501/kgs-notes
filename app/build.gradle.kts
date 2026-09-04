@@ -12,7 +12,7 @@ android {
         minSdk = 26
         targetSdk = 37
         versionCode = 1
-        versionName = "0.1.0-dev"
+        versionName = "V.0.0.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -28,6 +28,7 @@ android {
 
 dependencies {
     implementation(project(":notes-engine"))
+    implementation(project(":source:nextcloud"))
     implementation(project(":editor"))
     implementation(project(":design-system"))
 
@@ -41,6 +42,7 @@ dependencies {
     implementation(libs.lifecycle.runtime.ktx)
     implementation(libs.lifecycle.viewmodel.compose)
     implementation(libs.coroutines.android)
+    implementation(libs.exifinterface)
 
     testImplementation(libs.junit4)
     androidTestImplementation(platform(libs.compose.bom))

@@ -20,10 +20,14 @@
 - Run Gradle tasks sequentially; parallel Gradle invocations can contend for daemons and caches.
 - `local.properties` is machine-local and must not be committed.
 - On this machine, the shared SDK is `/home/agent/Projects/kgs-calendar/.android-sdk`.
-- Use `tools/android-emulator.sh create` once, then `start`, `install <apk>`,
-  `launch`, `screenshot <png>`, `ui [xml]`, and `logs` for device work. The
-  wrapper waits for both Android boot completion and a responsive package
-  manager; do not race installation against boot.
+- Route device work through the project-owned AVD using `tools/android-emulator.sh`:
+  run `create` once, then use `start`, `install <apk>`, `launch`, `screenshot
+  <png>`, `ui [xml]`, `logs`, and `adb <args...>`. The wrapper resolves the
+  AVD's current serial, so its commands remain isolated while another project
+  emulator is attached.
+- Run connected instrumentation through `tools/android-emulator.sh connected-test
+  [gradle args...]`; it binds Gradle to the KGS Notes AVD and waits for both
+  Android boot completion and a responsive package manager.
 - Do not print, edit, or commit signing material, credentials, private certificates, note content, or server URLs.
 
 ## Testing
@@ -32,7 +36,7 @@
 - Assert behavior only through the confirmed seams; do not mock internal KGS classes.
 - Use controlled adapters at external seams and real temporary storage where practical.
 - Run focused tests during each slice, then module tests, lint, and the debug build before handoff.
-- Use the shared Android emulator for Compose semantics, IME, accessibility, lifecycle, screenshots, and animation checks.
+- Use the project-owned Android AVD for Compose semantics, IME, accessibility, lifecycle, screenshots, and animation checks.
 
 ## Repository hygiene
 

@@ -20,7 +20,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        notesViewModel.startForegroundSourceRefresh()
+    }
+
     override fun onStop() {
+        notesViewModel.stopForegroundSourceRefresh()
         notesViewModel.flushPendingContent()
         super.onStop()
     }

@@ -1,6 +1,7 @@
 package com.kgs.notes.engine
 
 import java.io.Writer
+import java.io.InputStream
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.Path
@@ -10,6 +11,7 @@ import java.time.Clock
 import java.time.Instant
 import java.util.Properties
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.io.path.createDirectories
 import kotlin.io.path.deleteIfExists
 import kotlin.io.path.exists
@@ -27,16 +29,23 @@ class LocalNotesEngine private constructor(
     private val root: Path,
     private val clock: Clock,
     loadedNotes: Map<NoteId, StoredNote>,
+    loadedAttachments: Map<AttachmentId, StoredAttachment>,
 ) : NotesEngine {
     private val metadataRoot = root.resolve(".kgs/notes")
+    private val attachmentMetadataRoot = root.resolve(".kgs/attachments")
+    private val attachmentVaultRoot = root.resolve(".kgs-notes-attachments")
     private val draftsRoot = root.resolve(".kgs/drafts")
     private val mutex = Mutex()
     private val notes = loadedNotes.toMutableMap()
+    private val attachments = ConcurrentHashMap(loadedAttachments)
     private val mutableLibrary = MutableStateFlow(snapshotOf(notes.values))
+    private val mutableSources = MutableStateFlow(listOf(LOCAL_SOURCE_DESCRIPTOR))
 
     override val library: StateFlow<LibrarySnapshot> = mutableLibrary.asStateFlow()
+    override val sources: StateFlow<List<SourceDescriptor>> = mutableSources.asStateFlow()
 
-    override suspend fun createDraft(category: String): NoteId = mutex.withLock {
+    override suspend fun createDraft(category: String, sourceId: SourceId): NoteId = mutex.withLock {
+        require(sourceId == LocalSourceId) { "LocalNotesEngine only owns the Local Source" }
         val now = clock.instant()
         val id = NoteId(UUID.randomUUID().toString())
         val relativePath = ".kgs/drafts/${id.value}.md"
@@ -60,6 +69,19 @@ class LocalNotesEngine private constructor(
         id
     }
 
+    override suspend fun attachSource(source: Source) {
+        throw UnsupportedOperationException("Use ConnectedNotesEngine for external Sources")
+    }
+
+    override suspend fun refreshSources() = Unit
+
+    override suspend fun synchronize(id: NoteId) = Unit
+
+    override suspend fun moveToSource(id: NoteId, sourceId: SourceId): NoteId {
+        require(sourceId == LocalSourceId) { "Use ConnectedNotesEngine for external Sources" }
+        return id
+    }
+
     override suspend fun note(id: NoteId): Note? = mutex.withLock {
         notes[id]?.toPublic()
     }
@@ -77,13 +99,19 @@ class LocalNotesEngine private constructor(
         } else {
             availableContentPath(title, current.category, current.id, current.relativePath)
         }
-        writeTextAtomically(contentPath(desiredPath), markdown)
+        val storedMarkdown = rewriteManagedAttachmentTargets(
+            markdown = markdown,
+            noteId = id,
+            fromNotePath = current.relativePath,
+            toNotePath = desiredPath,
+        )
+        writeTextAtomically(contentPath(desiredPath), storedMarkdown)
         val updated = current.copy(
             title = title,
             state = state,
             updatedAt = clock.instant(),
             relativePath = desiredPath,
-            markdown = markdown,
+            markdown = storedMarkdown,
         )
         persistMetadata(updated)
         if (desiredPath != current.relativePath) contentPath(current.relativePath).deleteIfExists()
@@ -122,16 +150,63 @@ class LocalNotesEngine private constructor(
         } else {
             availableContentPath(current.title, normalized, current.id, current.relativePath)
         }
-        writeTextAtomically(contentPath(desiredPath), current.markdown)
+        val storedMarkdown = rewriteManagedAttachmentTargets(
+            markdown = current.markdown,
+            noteId = id,
+            fromNotePath = current.relativePath,
+            toNotePath = desiredPath,
+        )
+        writeTextAtomically(contentPath(desiredPath), storedMarkdown)
         val updated = current.copy(
             category = normalized,
             relativePath = desiredPath,
             updatedAt = clock.instant(),
+            markdown = storedMarkdown,
         )
         persistMetadata(updated)
         if (desiredPath != current.relativePath) contentPath(current.relativePath).deleteIfExists()
         notes[id] = updated
         publish()
+    }
+
+    override suspend fun importManagedAttachment(
+        noteId: NoteId,
+        attachment: AttachmentImport,
+    ): ManagedAttachment = mutex.withLock {
+        val note = requireNotNull(notes[noteId]) { "Cannot attach a file to a missing Note" }
+        val id = AttachmentId(UUID.randomUUID().toString())
+        val extension = safeAttachmentExtension(attachment.displayName, attachment.mediaType)
+        val storageName = id.value + extension.takeIf(String::isNotBlank)?.let { ".$it" }.orEmpty()
+        val relativePath = ".kgs-notes-attachments/${noteId.value}/$storageName"
+        val stored = StoredAttachment(
+            id = id,
+            noteId = noteId,
+            displayName = normalizeAttachmentDisplayName(attachment.displayName),
+            mediaType = normalizeMediaType(attachment.mediaType),
+            relativePath = relativePath,
+            createdAt = clock.instant(),
+        )
+
+        attachment.openContent().use { content ->
+            writeStreamAtomically(contentPath(relativePath), content)
+        }
+        persistAttachmentMetadata(stored)
+        attachments[id] = stored
+        stored.toPublic(markdownTarget(note.relativePath, relativePath))
+    }
+
+    override suspend fun managedAttachments(noteId: NoteId): List<ManagedAttachment> = mutex.withLock {
+        val note = notes[noteId] ?: return@withLock emptyList()
+        attachments.values
+            .filter { it.noteId == noteId }
+            .sortedBy(StoredAttachment::createdAt)
+            .map { it.toPublic(markdownTarget(note.relativePath, it.relativePath)) }
+    }
+
+    override fun openManagedAttachment(id: AttachmentId): InputStream? {
+        val stored = attachments[id] ?: return null
+        val path = contentPath(stored.relativePath)
+        return if (path.isRegularFile()) Files.newInputStream(path) else null
     }
 
     override suspend fun toggleFavorite(id: NoteId) = updateMetadata(id) { current ->
@@ -150,6 +225,13 @@ class LocalNotesEngine private constructor(
         val removed = notes.remove(id) ?: return@withLock
         contentPath(removed.relativePath).deleteIfExists()
         metadataPath(id).deleteIfExists()
+        val removedAttachments = attachments.values.filter { it.noteId == id }
+        removedAttachments.forEach { attachment ->
+            contentPath(attachment.relativePath).deleteIfExists()
+            attachmentMetadataPath(attachment.id).deleteIfExists()
+            attachments.remove(attachment.id)
+        }
+        deleteEmptyDirectories(attachmentVaultRoot.resolve(id.value))
         publish()
     }
 
@@ -196,7 +278,23 @@ class LocalNotesEngine private constructor(
         writePropertiesAtomically(metadataPath(note.id), properties)
     }
 
+    private fun persistAttachmentMetadata(attachment: StoredAttachment) {
+        val properties = Properties().apply {
+            setProperty("schema", "1")
+            setProperty("id", attachment.id.value)
+            setProperty("noteId", attachment.noteId.value)
+            setProperty("displayName", attachment.displayName)
+            setProperty("mediaType", attachment.mediaType)
+            setProperty("relativePath", attachment.relativePath)
+            setProperty("createdAt", attachment.createdAt.toString())
+        }
+        writePropertiesAtomically(attachmentMetadataPath(attachment.id), properties)
+    }
+
     private fun metadataPath(id: NoteId): Path = metadataRoot.resolve("${id.value}.properties")
+
+    private fun attachmentMetadataPath(id: AttachmentId): Path =
+        attachmentMetadataRoot.resolve("${id.value}.properties")
 
     private fun contentPath(relativePath: String): Path {
         val resolved = root.resolve(relativePath).normalize()
@@ -223,17 +321,54 @@ class LocalNotesEngine private constructor(
         return root.relativize(candidate).toString()
     }
 
+    private fun rewriteManagedAttachmentTargets(
+        markdown: String,
+        noteId: NoteId,
+        fromNotePath: String,
+        toNotePath: String,
+    ): String {
+        if (fromNotePath == toNotePath) return markdown
+        return attachments.values
+            .filter { it.noteId == noteId }
+            .fold(markdown) { content, attachment ->
+                content.replace(
+                    markdownTarget(fromNotePath, attachment.relativePath),
+                    markdownTarget(toNotePath, attachment.relativePath),
+                )
+            }
+    }
+
+    private fun markdownTarget(noteRelativePath: String, attachmentRelativePath: String): String {
+        val noteDirectory = root.resolve(noteRelativePath).normalize().parent
+        val attachmentPath = contentPath(attachmentRelativePath)
+        return noteDirectory.relativize(attachmentPath).joinToString("/") { it.toString() }
+    }
+
     companion object {
         private const val DEFAULT_TITLE = "New note"
         private const val MAX_TITLE_CODE_POINTS = 80
+        private val LOCAL_SOURCE_DESCRIPTOR = SourceDescriptor(
+            id = LocalSourceId,
+            name = "Local Source",
+            capabilities = SourceCapabilities(
+                markdown = true,
+                categories = true,
+                favorites = true,
+                attachments = true,
+                writable = true,
+            ),
+        )
 
         fun open(root: Path, clock: Clock = Clock.systemUTC()): LocalNotesEngine {
             val normalizedRoot = root.toAbsolutePath().normalize()
             normalizedRoot.createDirectories()
             normalizedRoot.resolve(".kgs/notes").createDirectories()
             normalizedRoot.resolve(".kgs/drafts").createDirectories()
+            normalizedRoot.resolve(".kgs/attachments").createDirectories()
+            normalizedRoot.resolve(".kgs-notes-attachments").createDirectories()
             val loaded = loadNotes(normalizedRoot)
-            return LocalNotesEngine(normalizedRoot, clock, loaded)
+            val loadedAttachments = loadAttachments(normalizedRoot)
+            return LocalNotesEngine(normalizedRoot, clock, loaded, loadedAttachments)
         }
 
         private fun loadNotes(root: Path): Map<NoteId, StoredNote> {
@@ -270,6 +405,38 @@ class LocalNotesEngine private constructor(
                 titleFixed = properties.getProperty("titleFixed", "true").toBoolean(),
                 relativePath = relativePath,
                 markdown = if (contentPath.exists()) contentPath.readText() else "",
+            )
+        }
+
+        private fun loadAttachments(root: Path): Map<AttachmentId, StoredAttachment> {
+            val metadataRoot = root.resolve(".kgs/attachments")
+            if (!metadataRoot.exists()) return emptyMap()
+            return Files.list(metadataRoot).use { paths ->
+                paths
+                    .filter { it.isRegularFile() && it.extension == "properties" }
+                    .map { path -> runCatching { readStoredAttachment(root, path) }.getOrNull() }
+                    .filter { it != null }
+                    .map { it!! }
+                    .toList()
+                    .associateBy(StoredAttachment::id)
+            }
+        }
+
+        private fun readStoredAttachment(root: Path, metadataPath: Path): StoredAttachment {
+            val properties = Properties()
+            Files.newBufferedReader(metadataPath).use(properties::load)
+            require(properties.getProperty("schema") == "1")
+            val relativePath = requireNotNull(properties.getProperty("relativePath"))
+            val contentPath = root.resolve(relativePath).normalize()
+            require(contentPath.startsWith(root))
+            require(contentPath.isRegularFile())
+            return StoredAttachment(
+                id = AttachmentId(properties.getProperty("id") ?: metadataPath.nameWithoutExtension),
+                noteId = NoteId(requireNotNull(properties.getProperty("noteId"))),
+                displayName = normalizeAttachmentDisplayName(properties.getProperty("displayName", "Attachment")),
+                mediaType = normalizeMediaType(properties.getProperty("mediaType", "application/octet-stream")),
+                relativePath = relativePath,
+                createdAt = Instant.parse(properties.getProperty("createdAt")),
             )
         }
 
@@ -311,6 +478,37 @@ class LocalNotesEngine private constructor(
             return sanitized.ifBlank { DEFAULT_TITLE }
         }
 
+        private fun normalizeAttachmentDisplayName(value: String): String {
+            val clean = value
+                .replace(Regex("[\\p{Cc}\\p{Cf}]"), "")
+                .lineSequence()
+                .firstOrNull()
+                .orEmpty()
+                .trim()
+                .ifBlank { "Attachment" }
+            val codePoints = clean.codePoints().toArray()
+            return if (codePoints.size <= 160) clean else String(codePoints, 0, 160)
+        }
+
+        private fun normalizeMediaType(value: String): String = value
+            .trim()
+            .lowercase()
+            .takeIf { it.matches(Regex("[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+")) }
+            ?: "application/octet-stream"
+
+        private fun safeAttachmentExtension(displayName: String, mediaType: String): String {
+            val fromName = displayName.substringAfterLast('.', "")
+                .lowercase()
+                .takeIf { it.matches(Regex("[a-z0-9]{1,10}")) }
+            return fromName ?: when (normalizeMediaType(mediaType)) {
+                "image/jpeg" -> "jpg"
+                "image/png" -> "png"
+                "image/gif" -> "gif"
+                "image/webp" -> "webp"
+                else -> ""
+            }
+        }
+
         private fun snapshotOf(notes: Collection<StoredNote>): LibrarySnapshot {
             fun summariesFor(state: NoteState) = notes
                 .filter { it.state == state }
@@ -338,6 +536,32 @@ class LocalNotesEngine private constructor(
             }
         }
 
+        private fun writeStreamAtomically(path: Path, content: InputStream) {
+            path.parent.createDirectories()
+            val temporary = Files.createTempFile(path.parent, ".${path.fileName}.", ".tmp")
+            try {
+                Files.newOutputStream(
+                    temporary,
+                    StandardOpenOption.TRUNCATE_EXISTING,
+                    StandardOpenOption.WRITE,
+                ).use(content::copyTo)
+                moveAtomically(temporary, path)
+            } finally {
+                temporary.deleteIfExists()
+            }
+        }
+
+        private fun deleteEmptyDirectories(path: Path) {
+            if (!path.exists()) return
+            Files.walk(path).use { paths ->
+                paths.sorted(Comparator.reverseOrder()).forEach { candidate ->
+                    if (Files.isDirectory(candidate) && Files.list(candidate).use { !it.findAny().isPresent }) {
+                        candidate.deleteIfExists()
+                    }
+                }
+            }
+        }
+
         private fun writePropertiesAtomically(path: Path, properties: Properties) {
             path.parent.createDirectories()
             val temporary = Files.createTempFile(path.parent, ".${path.fileName}.", ".tmp")
@@ -361,6 +585,24 @@ class LocalNotesEngine private constructor(
             }
         }
     }
+}
+
+private data class StoredAttachment(
+    val id: AttachmentId,
+    val noteId: NoteId,
+    val displayName: String,
+    val mediaType: String,
+    val relativePath: String,
+    val createdAt: Instant,
+) {
+    fun toPublic(markdownTarget: String): ManagedAttachment = ManagedAttachment(
+        id = id,
+        noteId = noteId,
+        displayName = displayName,
+        mediaType = mediaType,
+        markdownTarget = markdownTarget,
+        createdAt = createdAt,
+    )
 }
 
 private data class StoredNote(

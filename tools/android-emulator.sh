@@ -12,20 +12,55 @@ EMULATOR="${ANDROID_SDK_ROOT}/emulator/emulator"
 AVDMANAGER="${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/avdmanager"
 SYSTEM_IMAGE="system-images;android-36;google_apis;x86_64"
 PACKAGE_NAME="com.kgs501.kgsnotes"
+GRADLEW="${KGS_NOTES_GRADLEW:-$PROJECT_ROOT/gradlew}"
+SETUP_TIMEOUT_SECONDS="${KGS_ANDROID_SETUP_TIMEOUT_SECONDS:-5}"
 
 usage() {
-    echo "Usage: tools/android-emulator.sh create|start|wait|status|stop|install <apk>|launch|screenshot <png>|ui [xml]|logs"
+    echo "Usage: tools/android-emulator.sh create|start|wait|status|serial|stop|install <apk>|launch|screenshot <png>|ui [xml]|logs|adb <args...>|connected-test [gradle args...]"
+}
+
+require_adb() {
+    test -x "$ADB" || { echo "adb not found at $ADB" >&2; exit 1; }
 }
 
 require_tooling() {
-    test -x "$ADB" || { echo "adb not found at $ADB" >&2; exit 1; }
+    require_adb
     test -x "$EMULATOR" || { echo "emulator not found at $EMULATOR" >&2; exit 1; }
 }
 
+serial_for_avd() {
+    require_adb
+    local serial state avd_name avd_output
+    while read -r serial state _; do
+        [[ "$serial" == emulator-* && "$state" == device ]] || continue
+        avd_output="$("$ADB" -s "$serial" emu avd name 2>/dev/null)" || continue
+        avd_name="${avd_output%%$'\n'*}"
+        avd_name="${avd_name//$'\r'/}"
+        if [[ "$avd_name" == "$AVD_NAME" ]]; then
+            printf '%s\n' "$serial"
+            return 0
+        fi
+    done < <("$ADB" devices)
+    return 1
+}
+
+ready_serial() {
+    local serial
+    serial="$(serial_for_avd)" || return 1
+    "$ADB" -s "$serial" get-state >/dev/null 2>&1 &&
+        test "$("$ADB" -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" &&
+        timeout 8 "$ADB" -s "$serial" shell pm path android >/dev/null 2>&1 &&
+        printf '%s\n' "$serial"
+}
+
 device_ready() {
-    "$ADB" get-state >/dev/null 2>&1 &&
-        test "$("$ADB" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" &&
-        timeout 8 "$ADB" shell pm path android >/dev/null 2>&1
+    ready_serial >/dev/null
+}
+
+run_setup_adb() {
+    local serial="$1"
+    shift
+    timeout "$SETUP_TIMEOUT_SECONDS" "$ADB" -s "$serial" "$@" >/dev/null 2>&1 || true
 }
 
 create_avd() {
@@ -79,21 +114,26 @@ start_emulator() {
 
 wait_for_device() {
     require_tooling
-    local deadline=$((SECONDS + 240))
+    local deadline=$((SECONDS + 240)) serial
     while (( SECONDS < deadline )); do
-        if device_ready; then
-            "$ADB" shell settings put global window_animation_scale 1
-            "$ADB" shell settings put global transition_animation_scale 1
-            "$ADB" shell settings put global animator_duration_scale 1
+        if serial="$(ready_serial)"; then
+            run_setup_adb "$serial" shell input keyevent KEYCODE_WAKEUP
+            run_setup_adb "$serial" shell wm dismiss-keyguard
+            run_setup_adb "$serial" shell svc power stayon true
+            run_setup_adb "$serial" shell settings put system screen_off_timeout 2147483647
+            run_setup_adb "$serial" shell settings put global hide_error_dialogs 1
+            run_setup_adb "$serial" shell settings put global window_animation_scale 1
+            run_setup_adb "$serial" shell settings put global transition_animation_scale 1
+            run_setup_adb "$serial" shell settings put global animator_duration_scale 1
             for package_name in \
                 com.google.android.apps.wellbeing \
                 com.google.android.as \
                 com.google.android.dialer \
                 com.google.android.apps.messaging \
                 com.android.stk; do
-                "$ADB" shell pm disable-user --user 0 "$package_name" >/dev/null 2>&1 || true
+                run_setup_adb "$serial" shell pm disable-user --user 0 "$package_name"
             done
-            echo "Emulator $AVD_NAME is ready"
+            echo "Emulator $AVD_NAME is ready as $serial"
             return
         fi
         sleep 2
@@ -104,12 +144,13 @@ wait_for_device() {
 }
 
 status() {
+    local serial
     systemctl --user is-active "$UNIT_NAME" || true
     "$ADB" devices -l
-    if device_ready; then
-        echo "boot_completed=1 package_manager=ready"
+    if serial="$(ready_serial)"; then
+        echo "target=$AVD_NAME serial=$serial boot_completed=1 package_manager=ready"
     else
-        echo "device_not_ready"
+        echo "target=$AVD_NAME device_not_ready"
     fi
 }
 
@@ -119,55 +160,82 @@ stop_emulator() {
 }
 
 install_apk() {
-    local apk="${1:-}"
+    local apk="${1:-}" serial
     test -n "$apk" || { usage; exit 2; }
     test -f "$apk" || { echo "APK not found: $apk" >&2; exit 1; }
     wait_for_device
-    timeout 120 "$ADB" install -r -t "$apk"
+    serial="$(serial_for_avd)"
+    timeout 120 "$ADB" -s "$serial" install -r -t "$apk"
 }
 
 launch_app() {
+    local serial
     wait_for_device
-    "$ADB" shell pm path "$PACKAGE_NAME" >/dev/null 2>&1 || {
+    serial="$(serial_for_avd)"
+    "$ADB" -s "$serial" shell pm path "$PACKAGE_NAME" >/dev/null 2>&1 || {
         echo "$PACKAGE_NAME is not installed; run the install command first" >&2
         exit 1
     }
-    "$ADB" shell am force-stop "$PACKAGE_NAME"
-    "$ADB" shell monkey -p "$PACKAGE_NAME" -c android.intent.category.LAUNCHER 1 >/dev/null
-    echo "Launched $PACKAGE_NAME"
+    "$ADB" -s "$serial" shell am force-stop "$PACKAGE_NAME"
+    "$ADB" -s "$serial" shell monkey -p "$PACKAGE_NAME" -c android.intent.category.LAUNCHER 1 >/dev/null
+    echo "Launched $PACKAGE_NAME on $serial"
 }
 
 take_screenshot() {
-    local destination="${1:-}"
+    local destination="${1:-}" serial
     test -n "$destination" || { usage; exit 2; }
     wait_for_device
+    serial="$(serial_for_avd)"
     mkdir -p "$(dirname "$destination")"
-    timeout 30 "$ADB" exec-out screencap -p > "$destination"
+    timeout 30 "$ADB" -s "$serial" exec-out screencap -p > "$destination"
     echo "$destination"
 }
 
 dump_ui() {
-    local destination="${1:-}"
+    local destination="${1:-}" serial
     wait_for_device
-    "$ADB" shell uiautomator dump /sdcard/kgs-notes-window.xml >/dev/null
+    serial="$(serial_for_avd)"
+    "$ADB" -s "$serial" shell uiautomator dump /sdcard/kgs-notes-window.xml >/dev/null
     if test -n "$destination"; then
         mkdir -p "$(dirname "$destination")"
-        "$ADB" exec-out cat /sdcard/kgs-notes-window.xml > "$destination"
+        "$ADB" -s "$serial" exec-out cat /sdcard/kgs-notes-window.xml > "$destination"
         echo "$destination"
     else
-        "$ADB" exec-out cat /sdcard/kgs-notes-window.xml
+        "$ADB" -s "$serial" exec-out cat /sdcard/kgs-notes-window.xml
     fi
 }
 
 app_logs() {
-    local app_pid
-    app_pid="$("$ADB" shell pidof "$PACKAGE_NAME" 2>/dev/null | tr -d '\r')"
+    local app_pid serial
+    wait_for_device
+    serial="$(serial_for_avd)"
+    app_pid="$("$ADB" -s "$serial" shell pidof "$PACKAGE_NAME" 2>/dev/null | tr -d '\r')"
     if test -n "$app_pid"; then
-        "$ADB" logcat -d --pid="$app_pid"
+        "$ADB" -s "$serial" logcat -d --pid="$app_pid"
     else
         echo "$PACKAGE_NAME is not running" >&2
         exit 1
     fi
+}
+
+run_targeted_adb() {
+    local serial
+    (( $# > 0 )) || { usage; exit 2; }
+    serial="$(serial_for_avd)" || {
+        echo "Emulator $AVD_NAME is not connected" >&2
+        exit 1
+    }
+    "$ADB" -s "$serial" "$@"
+}
+
+run_connected_tests() {
+    local serial
+    wait_for_device
+    serial="$(serial_for_avd)"
+    (
+        cd "$PROJECT_ROOT"
+        ANDROID_SERIAL="$serial" "$GRADLEW" :app:connectedDebugAndroidTest "$@"
+    )
 }
 
 case "${1:-}" in
@@ -175,11 +243,14 @@ case "${1:-}" in
     start) start_emulator ;;
     wait) wait_for_device ;;
     status) status ;;
+    serial) serial_for_avd ;;
     stop) stop_emulator ;;
     install) install_apk "${2:-}" ;;
     launch) launch_app ;;
     screenshot) take_screenshot "${2:-}" ;;
     ui) dump_ui "${2:-}" ;;
     logs) app_logs ;;
+    adb) shift; run_targeted_adb "$@" ;;
+    connected-test) shift; run_connected_tests "$@" ;;
     *) usage; exit 2 ;;
 esac
