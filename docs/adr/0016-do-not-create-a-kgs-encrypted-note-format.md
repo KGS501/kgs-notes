@@ -1,3 +1,0 @@
-# Do not create a KGS-specific encrypted note format
-
-KGS Notes v1 will not add application-level end-to-end encryption to note bodies or attachments or an app-specific biometric/PIN gate. A KGS-specific encrypted representation would make otherwise portable Markdown unreadable to Nextcloud Notes and ordinary clients, contradicting the product's ownership and interoperability goals; an interface lock without encrypted storage would also create a misleading security promise. KGS Notes will rely on Android's application sandbox and device storage protections, describe their limits accurately, and leave a genuinely interoperable encryption design to future research.

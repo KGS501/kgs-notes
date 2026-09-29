@@ -44,9 +44,6 @@ Run the focused behavioral suites with:
 ./gradlew :app:connectedDebugAndroidTest
 ```
 
-Its product vocabulary is defined in [CONTEXT.md](CONTEXT.md), and consequential
-architecture decisions are recorded under [docs/adr](docs/adr).
-
 ## Principles
 
 - Notes remain usable offline and portable outside the app.

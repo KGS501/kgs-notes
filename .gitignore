@@ -30,6 +30,9 @@ keystore.properties
 *.p12
 
 # Local agent artifacts
+/AGENTS.md
+/CONTEXT.md
+/docs/
 .codex-remote-attachments/
 .worktrees/
 tmp/

@@ -1,3 +1,0 @@
-# Back up only Local Source content to Android cloud
-
-Android cloud backup may contain current notes, attachments, Trash, and indispensable metadata whose authoritative source is the Local Source, protecting device-only work from device loss. Revision bodies, credentials, synchronization metadata, and working copies of external notes must be excluded; revisions are intentionally available through KGS Archive instead. Recovery takes precedence over requiring Android's client-side-encryption capability, so eligible Local Source content may be backed up on API 26–27 without the capability guarantee available on newer Android versions; the privacy notice must state this clearly.
