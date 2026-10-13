@@ -97,6 +97,22 @@ internal class NextcloudAccountStore(
         secretPath(id).deleteIfExists()
     }
 
+    fun rename(id: SourceId, name: String): NextcloudAccountProfile {
+        val existing = loadAll().firstOrNull { it.profile.id == id }
+            ?: throw IllegalArgumentException("Source is no longer connected")
+        val profile = existing.profile.copy(name = normalizeSourceName(name))
+        require(loadAll().none { it.profile.id != id && it.profile.name.equals(profile.name, ignoreCase = true) }) {
+            "Source names must be unique"
+        }
+        val properties = Properties().apply {
+            setProperty("schema", PROFILE_SCHEMA.toString())
+            setProperty("id", id.value)
+            setProperty("name", profile.name)
+        }
+        writePropertiesAtomically(profilePath(id), properties)
+        return profile
+    }
+
     private fun load(path: Path): ConnectedNextcloudAccount {
         val properties = Properties()
         Files.newBufferedReader(path).use(properties::load)

@@ -54,16 +54,14 @@ interface MarkdownEditor {
 
 class DefaultMarkdownEditor : MarkdownEditor {
     override fun safetyFor(markdown: String): EditorSafety {
-        val checks = listOf(
-            Regex("<!--") to "Markdown comments are not safe in Rich Mode yet",
-            Regex("(?m)^\\s*\\[\\^[^]]+]:") to "Footnotes are not safe in Rich Mode yet",
-            Regex("(?m)^\\s*\\$\\$\\s*$") to "Math blocks are not safe in Rich Mode yet",
-            Regex("(?i)```\\s*mermaid") to "Mermaid diagrams are not safe in Rich Mode yet",
-            Regex("(?m)^\\s*:::+") to "Markdown directives are not safe in Rich Mode yet",
-            Regex("(?s)<[A-Za-z][^>]*>") to "Raw HTML is not safe in Rich Mode yet",
-        )
-        val unsafe = checks.firstOrNull { (pattern, _) -> pattern.containsMatchIn(markdown) }
-        return if (unsafe == null) EditorSafety.RichMode else EditorSafety.SourceMode(unsafe.second)
+        // The bundled Markdown parser understands lexical context. HTML and
+        // extension fragments use byte-preserving Source Capsules, so scanning
+        // the whole Note with regexes would reject autolinks and code examples.
+        return when {
+            markdown.length > 200_000 -> EditorSafety.SourceMode("This Note is large. Source Mode keeps editing responsive.")
+            '\u0000' in markdown -> EditorSafety.SourceMode("This Note contains characters that need Source Mode to stay intact.")
+            else -> EditorSafety.RichMode
+        }
     }
 
     override fun applyCommand(

@@ -4,6 +4,20 @@ plugins {
 
 kotlin {
     jvmToolchain(17)
+    compilerOptions {
+        // Keep the JVM module's platform calls compatible with Android's minimum SDK.
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_1_8)
+        freeCompilerArgs.add("-Xjdk-release=8")
+    }
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_1_8
+    targetCompatibility = JavaVersion.VERSION_1_8
+}
+
+tasks.withType<JavaCompile>().configureEach {
+    options.release.set(8)
 }
 
 dependencies {

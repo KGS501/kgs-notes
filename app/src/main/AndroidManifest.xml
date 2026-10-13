@@ -6,19 +6,67 @@
         android:allowBackup="true"
         android:fullBackupContent="@xml/backup_rules"
         android:dataExtractionRules="@xml/data_extraction_rules"
-        android:icon="@drawable/ic_launcher_foreground"
+        android:icon="@mipmap/ic_launcher"
         android:label="KGS Notes"
         android:networkSecurityConfig="@xml/network_security_config"
-        android:roundIcon="@drawable/ic_launcher_foreground"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.KgsNotes">
         <activity
             android:name=".MainActivity"
+            android:icon="@mipmap/ic_launcher"
+            android:theme="@style/Theme.KgsNotes.Starting"
             android:exported="true"
+            android:launchMode="singleTask"
             android:windowSoftInputMode="adjustNothing">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter android:label="KGS Notes">
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.EDIT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:mimeType="text/plain" />
+                <data android:mimeType="text/markdown" />
+                <data android:mimeType="text/x-markdown" />
+                <data android:mimeType="application/markdown" />
+                <data android:mimeType="application/x-markdown" />
+                <!-- File apps sometimes give .md files this generic MIME type.
+                     Verify the provider's display name before reading any bytes. -->
+                <data android:mimeType="application/octet-stream" />
+                <data android:mimeType="application/x-empty" />
+            </intent-filter>
+            <!-- Extension fallback for file apps which omit or misidentify the MIME type.
+                 Opaque provider URIs use the MIME filter above instead. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.EDIT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" android:host="*" />
+                <data android:pathSuffix=".md" android:pathPattern=".*\\.md" />
+                <data android:pathSuffix=".txt" android:pathPattern=".*\\.txt" />
+                <data android:pathSuffix=".MD" android:pathPattern=".*\\.MD" />
+                <data android:pathSuffix=".TXT" android:pathPattern=".*\\.TXT" />
+                <data android:pathPattern=".*\\..*\\.md" />
+                <data android:pathPattern=".*\\..*\\.txt" />
+                <data android:pathPattern=".*\\..*\\..*\\.md" />
+                <data android:pathPattern=".*\\..*\\..*\\.txt" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.EDIT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" android:host="*" android:mimeType="*/*" />
+                <data android:pathSuffix=".md" android:pathPattern=".*\\.md" />
+                <data android:pathSuffix=".txt" android:pathPattern=".*\\.txt" />
+                <data android:pathSuffix=".MD" android:pathPattern=".*\\.MD" />
+                <data android:pathSuffix=".TXT" android:pathPattern=".*\\.TXT" />
+                <data android:pathPattern=".*\\..*\\.md" />
+                <data android:pathPattern=".*\\..*\\.txt" />
+                <data android:pathPattern=".*\\..*\\..*\\.md" />
+                <data android:pathPattern=".*\\..*\\..*\\.txt" />
             </intent-filter>
         </activity>
     </application>

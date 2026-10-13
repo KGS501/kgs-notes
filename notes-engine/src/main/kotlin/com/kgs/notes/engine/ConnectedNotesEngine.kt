@@ -12,6 +12,7 @@ import java.time.Clock
 import java.time.Instant
 import java.util.Properties
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.io.path.createDirectories
 import kotlin.io.path.deleteIfExists
 import kotlin.io.path.exists
@@ -24,6 +25,11 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 
 /**
  * Owns local Notes plus durable, offline-first Working Copies for external Sources.
@@ -39,7 +45,10 @@ class ConnectedNotesEngine private constructor(
     private val contentRoot = workingCopyRoot.resolve("content")
     private val baseRoot = workingCopyRoot.resolve("base")
     private val mutex = Mutex()
+    private val sourceOperations = ConcurrentHashMap<SourceId, Mutex>()
+    private val transfers = Mutex()
     private val workingCopies = loadedWorkingCopies.toMutableMap()
+    private val editingNotes = mutableSetOf<NoteId>()
     private val attachedSources = linkedMapOf<SourceId, Source>()
     private val mutableLibrary = MutableStateFlow(snapshot())
     private val mutableSources = MutableStateFlow(local.sources.value)
@@ -89,21 +98,72 @@ class ConnectedNotesEngine private constructor(
         mutableSources.value = local.sources.value + attachedSources.values.map(Source::descriptor)
     }
 
+    override suspend fun removeSource(id: SourceId) = mutex.withLock {
+        require(id != LocalSourceId) { "The Local Source cannot be removed" }
+        val copies = workingCopies.values.filter { it.sourceId == id }
+        check(copies.none { it.id in editingNotes }) { "Close this Source's Notes before removing it" }
+        check(copies.all { it.syncState == NoteSyncState.SYNCED && !it.pendingRemoteDeletion }) {
+            "Save, move, or export pending Notes before removing this Source"
+        }
+        copies.forEach { copy ->
+            metadataPath(copy.id).deleteIfExists()
+            contentPath(copy.id).deleteIfExists()
+            basePath(copy.id).deleteIfExists()
+            workingCopies.remove(copy.id)
+        }
+        attachedSources.remove(id)
+        mutableSources.value = local.sources.value + attachedSources.values.map(Source::descriptor)
+        publishLocked()
+    }
+
     override suspend fun refreshSources() {
         val connected = mutex.withLock { attachedSources.values.toList() }
+        var firstFailure: Exception? = null
         connected.forEach { source ->
-            source.refresh()
-            mutex.withLock {
-                reconcile(source.descriptor.id, source.notes.value)
-                publishLocked()
+            try {
+                sourceOperations.computeIfAbsent(source.descriptor.id) { Mutex() }.withLock {
+                    source.refresh()
+                    mutex.withLock {
+                        if (attachedSources[source.descriptor.id] !== source) return@withLock
+                        reconcile(source.descriptor.id, source.notes.value)
+                        publishLocked()
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                // One unavailable Source must not block the other Sources, and
+                // its durable Working Copies remain intact for the next retry.
+                if (firstFailure == null) firstFailure = failure
             }
         }
+        firstFailure?.let { throw it }
     }
 
     override suspend fun synchronize(id: NoteId) {
+        val sourceId = mutex.withLock { workingCopies[id]?.sourceId } ?: return
+        sourceOperations.computeIfAbsent(sourceId) { Mutex() }.withLock {
+            // Finish an issued write and retain the returned remote identity even
+            // if its caller is cancelled. A replacement create must not duplicate it.
+            withContext(NonCancellable) { synchronizeRemote(id) }
+        }
+        currentCoroutineContext().ensureActive()
+    }
+
+    private suspend fun synchronizeRemote(id: NoteId) {
         val request = mutex.withLock {
             val current = workingCopies[id] ?: return
             val source = attachedSources[current.sourceId] ?: return
+            if (current.syncState == NoteSyncState.SYNCED ||
+                (current.state == NoteState.DRAFT && current.markdown.isBlank() && !current.titleFixed)
+            ) return
+            if (current.state == NoteState.TRASHED && current.remoteId.isBlank()) {
+                val retained = current.copy(syncState = NoteSyncState.SYNCED, pendingRemoteDeletion = false)
+                persist(retained)
+                workingCopies[id] = retained
+                publishLocked()
+                return
+            }
             if (current.readOnly) {
                 val blocked = current.copy(syncState = NoteSyncState.NEEDS_ATTENTION)
                 persist(blocked)
@@ -148,14 +208,32 @@ class ConnectedNotesEngine private constructor(
             result.fold(
                 onSuccess = { outcome ->
                     val synced = when (outcome) {
-                        is SyncOutcome.Upserted -> current.adopt(
-                            outcome.note,
-                            syncState = NoteSyncState.SYNCED,
-                        )
+                        is SyncOutcome.Upserted -> if (
+                            current.toSourceDraft() == request.workingCopy.toSourceDraft() &&
+                            current.state == request.workingCopy.state &&
+                            current.pendingRemoteDeletion == request.workingCopy.pendingRemoteDeletion
+                        ) {
+                            current.adopt(outcome.note, syncState = NoteSyncState.SYNCED)
+                                .copy(titleFixed = true)
+                        } else {
+                            current.copy(
+                                remoteId = outcome.note.remoteId,
+                                revision = outcome.note.revision,
+                                baseMarkdown = outcome.note.markdown,
+                                readOnly = outcome.note.readOnly,
+                                titleFixed = true,
+                                pendingRemoteDeletion = current.pendingRemoteDeletion || current.state == NoteState.TRASHED,
+                                syncState = NoteSyncState.SAVED_LOCALLY,
+                            )
+                        }
                         SyncOutcome.Deleted -> current.copy(
                             remoteId = "",
                             revision = "",
-                            syncState = NoteSyncState.SYNCED,
+                            syncState = if (current.state == NoteState.TRASHED) {
+                                NoteSyncState.SYNCED
+                            } else {
+                                NoteSyncState.SAVED_LOCALLY
+                            },
                             pendingRemoteDeletion = false,
                         )
                     }
@@ -177,28 +255,102 @@ class ConnectedNotesEngine private constructor(
         }
     }
 
-    override suspend fun moveToSource(id: NoteId, sourceId: SourceId): NoteId {
-        val original = requireNotNull(note(id)) { "Cannot move a missing Note" }
-        if (original.sourceId == sourceId) return id
-        require(original.sourceId == LocalSourceId && sourceId != LocalSourceId) {
-            "Only publishing a Local Source Note is available in this version"
+    override suspend fun moveToSource(id: NoteId, sourceId: SourceId): NoteId = transfers.withLock {
+        val initial = requireNotNull(note(id)) { "Cannot move a missing Note" }
+        if (initial.sourceId == sourceId) return@withLock id
+        require(initial.sourceId == LocalSourceId || sourceId == LocalSourceId) {
+            "Move this Note to the Local Source before choosing another external Source"
         }
-        val targetId = createDraft(original.category, sourceId)
-        updateContent(targetId, original.markdown)
-        rename(targetId, original.title)
-        if (original.favorite) toggleFavorite(targetId)
-        synchronize(targetId)
-        if (note(targetId)?.syncState != NoteSyncState.SYNCED) {
-            deletePermanently(targetId)
-            throw IllegalStateException("The destination Source did not confirm the Note")
+        require(initial.state != NoteState.TRASHED) { "Restore this Note before moving it" }
+        val externalId = if (sourceId == LocalSourceId) initial.sourceId else sourceId
+        sourceOperations.computeIfAbsent(externalId) { Mutex() }.withLock {
+            val source = mutex.withLock {
+                requireNotNull(attachedSources[externalId]) { "Connect this Source before moving the Note" }
+            }
+            require(source.descriptor.capabilities.writable) { "This Source is read-only" }
+            // Retain the result of issued writes even when the caller leaves the editor.
+            withContext(NonCancellable) {
+                val original = requireNotNull(note(id)) { "Cannot move a missing Note" }
+                if (sourceId == LocalSourceId) {
+                    val remote = mutex.withLock { requireNotNull(workingCopies[id]) }
+                    require(!remote.readOnly) { "This Note is read-only" }
+                    local.retainTransferredNote(original)
+                    try {
+                        if (remote.remoteId.isNotBlank()) {
+                            source.deleteNote(remote.remoteId, remote.revision)
+                        }
+                    } catch (failure: Exception) {
+                        // The original Working Copy is still durable and authoritative.
+                        // Do not queue a deletion after a rejected or uncertain transfer.
+                        local.deletePermanently(id)
+                        if (failure is SourceConflictException) {
+                            updateWorkingCopy(id) { it.copy(syncState = NoteSyncState.NEEDS_ATTENTION) }
+                        }
+                        throw failure
+                    }
+                    mutex.withLock {
+                        val latest = requireNotNull(workingCopies[id])
+                        local.retainTransferredNote(latest.toPublic())
+                        removeWorkingCopyLocked(id)
+                        publishLocked()
+                    }
+                } else {
+                    require(local.managedAttachments(id).isEmpty()) {
+                        "Notes with Managed Attachments cannot move to this Source yet"
+                    }
+                    val confirmed = source.createNote(SourceNoteDraft(
+                        title = original.title,
+                        markdown = original.markdown,
+                        category = original.category,
+                        favorite = original.favorite,
+                        modifiedAt = original.updatedAt,
+                    ))
+                    mutex.withLock {
+                        val latest = requireNotNull(local.note(id))
+                        var transferred = WorkingCopy.fromRemote(id, sourceId, confirmed)
+                            .copy(createdAt = original.createdAt, pinned = original.pinned)
+                        if (latest != original) {
+                            transferred = transferred.copy(
+                                title = latest.title,
+                                markdown = latest.markdown,
+                                category = latest.category,
+                                favorite = latest.favorite,
+                                pinned = latest.pinned,
+                                state = latest.state,
+                                updatedAt = latest.updatedAt,
+                                trashedAt = latest.trashedAt,
+                                syncState = NoteSyncState.SAVED_LOCALLY,
+                                pendingRemoteDeletion = latest.state == NoteState.TRASHED,
+                            )
+                        }
+                        persist(transferred)
+                        workingCopies[id] = transferred
+                        local.deletePermanently(id)
+                        publishLocked()
+                    }
+                }
+            }
         }
-        deletePermanently(id)
-        return targetId
+        currentCoroutineContext().ensureActive()
+        id
+    }
+
+    private fun removeWorkingCopyLocked(id: NoteId) {
+        workingCopies.remove(id)
+        metadataPath(id).deleteIfExists()
+        contentPath(id).deleteIfExists()
+        basePath(id).deleteIfExists()
     }
 
     override suspend fun note(id: NoteId): Note? = mutex.withLock {
         workingCopies[id]?.toPublic()
     } ?: local.note(id)
+
+    override suspend fun openEditingSession(id: NoteId): Note? = mutex.withLock {
+        val current = workingCopies[id]?.toPublic() ?: local.note(id) ?: return@withLock null
+        if (current.state != NoteState.TRASHED) editingNotes += id
+        current
+    }
 
     override suspend fun updateContent(id: NoteId, markdown: String) {
         if (updateWorkingCopy(id) { current ->
@@ -259,6 +411,12 @@ class ConnectedNotesEngine private constructor(
 
     override fun openManagedAttachment(id: AttachmentId): InputStream? = local.openManagedAttachment(id)
 
+    override suspend fun togglePin(id: NoteId) {
+        if (updateWorkingCopy(id) { it.copy(pinned = !it.pinned) }) return
+        local.togglePin(id)
+        publish()
+    }
+
     override suspend fun toggleFavorite(id: NoteId) {
         if (updateWorkingCopy(id) { current ->
                 current.copy(
@@ -274,6 +432,7 @@ class ConnectedNotesEngine private constructor(
 
     override suspend fun moveToTrash(id: NoteId) {
         if (updateWorkingCopy(id) { current ->
+                editingNotes.remove(id)
                 current.copy(
                     state = NoteState.TRASHED,
                     trashedAt = clock.instant(),
@@ -321,6 +480,7 @@ class ConnectedNotesEngine private constructor(
         }
         val removed = mutex.withLock {
             val present = workingCopies.remove(id) ?: return@withLock false
+            editingNotes.remove(id)
             metadataPath(present.id).deleteIfExists()
             contentPath(present.id).deleteIfExists()
             basePath(present.id).deleteIfExists()
@@ -335,6 +495,7 @@ class ConnectedNotesEngine private constructor(
 
     override suspend fun close(id: NoteId) {
         val handled = mutex.withLock {
+            editingNotes.remove(id)
             val current = workingCopies[id] ?: return@withLock false
             if (current.state == NoteState.DRAFT && current.markdown.isBlank() && !current.titleFixed) {
                 workingCopies.remove(id)
@@ -377,6 +538,7 @@ class ConnectedNotesEngine private constructor(
             val reconciled = when {
                 existing == null -> WorkingCopy.fromRemote(id, sourceId, remote)
                 existing.revision == remote.revision -> existing
+                existing.syncState == NoteSyncState.SYNCED && existing.id in editingNotes -> existing
                 existing.syncState == NoteSyncState.SYNCED -> existing.adopt(remote, NoteSyncState.SYNCED)
                 else -> existing.copy(syncState = NoteSyncState.NEEDS_ATTENTION)
             }
@@ -387,7 +549,7 @@ class ConnectedNotesEngine private constructor(
             .filter { it.sourceId == sourceId && it.remoteId.isNotBlank() && it.remoteId !in remoteIds }
             .toList()
             .forEach { existing ->
-                val reconciled = if (existing.syncState == NoteSyncState.SYNCED) {
+                val reconciled = if (existing.syncState == NoteSyncState.SYNCED && existing.id !in editingNotes) {
                     existing.copy(
                         remoteId = "",
                         revision = "",
@@ -418,8 +580,10 @@ class ConnectedNotesEngine private constructor(
             .filter { it.state == state }
             .map(WorkingCopy::toSummary)
         return LibrarySnapshot(
-            active = (localSnapshot.active + externalFor(NoteState.ACTIVE)).sortedByDescending(NoteSummary::updatedAt),
-            trash = (localSnapshot.trash + externalFor(NoteState.TRASHED)).sortedByDescending(NoteSummary::updatedAt),
+            active = (localSnapshot.active.filterNot { it.id in workingCopies } + externalFor(NoteState.ACTIVE))
+                .sortedByDescending(NoteSummary::updatedAt),
+            trash = (localSnapshot.trash.filterNot { it.id in workingCopies } + externalFor(NoteState.TRASHED))
+                .sortedByDescending(NoteSummary::updatedAt),
         )
     }
 
@@ -435,6 +599,7 @@ class ConnectedNotesEngine private constructor(
             setProperty("title", note.title)
             setProperty("category", note.category)
             setProperty("favorite", note.favorite.toString())
+            setProperty("pinned", note.pinned.toString())
             setProperty("state", note.state.name)
             setProperty("createdAt", note.createdAt.toString())
             setProperty("updatedAt", note.updatedAt.toString())
@@ -482,7 +647,7 @@ class ConnectedNotesEngine private constructor(
             val metadataRoot = root.resolve("notes")
             if (!metadataRoot.exists()) return emptyMap()
             return Files.list(metadataRoot).use { paths ->
-                paths.filter { it.isRegularFile() && it.extension == "properties" }
+                paths.iterator().asSequence().filter { it.isRegularFile() && it.extension == "properties" }
                     .map { path -> runCatching { readWorkingCopy(root, path) }.getOrNull() }
                     .filter { it != null }
                     .map { it!! }
@@ -505,6 +670,7 @@ class ConnectedNotesEngine private constructor(
                 markdown = root.resolve("content/${id.value}.md").takeIf(Path::exists)?.readText().orEmpty(),
                 category = normalizeCategory(properties.getProperty("category", "")),
                 favorite = properties.getProperty("favorite", "false").toBoolean(),
+                pinned = properties.getProperty("pinned", "false").toBoolean(),
                 state = NoteState.valueOf(properties.getProperty("state", NoteState.ACTIVE.name)),
                 createdAt = Instant.parse(properties.getProperty("createdAt")),
                 updatedAt = Instant.parse(properties.getProperty("updatedAt")),
@@ -616,6 +782,7 @@ private data class WorkingCopy(
     val syncState: NoteSyncState,
     val baseMarkdown: String,
     val pendingRemoteDeletion: Boolean,
+    val pinned: Boolean = false,
 ) {
     fun toPublic() = Note(
         id = id,
@@ -625,6 +792,7 @@ private data class WorkingCopy(
         markdown = markdown,
         category = category,
         favorite = favorite,
+        pinned = pinned,
         state = state,
         createdAt = createdAt,
         updatedAt = updatedAt,
@@ -643,8 +811,10 @@ private data class WorkingCopy(
             ?.replace(Regex("[*_~`#>\\[\\]]"), "")
             ?.trim()
             .orEmpty(),
+        previewMarkdown = notePreviewMarkdown(markdown, title),
         category = category,
         favorite = favorite,
+        pinned = pinned,
         createdAt = createdAt,
         updatedAt = updatedAt,
     )

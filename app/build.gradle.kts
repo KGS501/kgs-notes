@@ -11,14 +11,23 @@ android {
         applicationId = "com.kgs501.kgsnotes"
         minSdk = 26
         targetSdk = 37
-        versionCode = 1
-        versionName = "V.0.0.1"
+        versionCode = 34
+        versionName = "V.0.0.34"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+
+    buildTypes {
+        release {
+            isDebuggable = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
+        }
     }
 
     packaging {
@@ -34,6 +43,7 @@ dependencies {
 
     implementation(platform(libs.compose.bom))
     implementation(libs.activity.compose)
+    implementation(libs.core.splashscreen)
     implementation(libs.compose.foundation)
     implementation(libs.compose.material3)
     implementation(libs.compose.material.icons.core)

@@ -73,6 +73,10 @@ class LocalNotesEngine private constructor(
         throw UnsupportedOperationException("Use ConnectedNotesEngine for external Sources")
     }
 
+    override suspend fun removeSource(id: SourceId) {
+        throw UnsupportedOperationException("Use ConnectedNotesEngine for external Sources")
+    }
+
     override suspend fun refreshSources() = Unit
 
     override suspend fun synchronize(id: NoteId) = Unit
@@ -84,6 +88,35 @@ class LocalNotesEngine private constructor(
 
     override suspend fun note(id: NoteId): Note? = mutex.withLock {
         notes[id]?.toPublic()
+    }
+
+    /** Confirms a transferred Note as canonical local Markdown without changing its identity. */
+    internal suspend fun retainTransferredNote(note: Note) = mutex.withLock {
+        val previous = notes[note.id]
+        val title = normalizeTitle(note.title)
+        val category = normalizeCategory(note.category)
+        val relativePath = availableContentPath(title, category, note.id, previous?.relativePath.orEmpty())
+        val stored = StoredNote(
+            id = note.id,
+            title = title,
+            category = category,
+            favorite = note.favorite,
+            pinned = note.pinned,
+            state = note.state,
+            createdAt = note.createdAt,
+            updatedAt = note.updatedAt,
+            trashedAt = note.trashedAt,
+            titleFixed = true,
+            relativePath = relativePath,
+            markdown = note.markdown,
+        )
+        writeTextAtomically(contentPath(relativePath), stored.markdown)
+        persistMetadata(stored)
+        notes[note.id] = stored
+        if (previous != null && previous.relativePath != relativePath) {
+            contentPath(previous.relativePath).deleteIfExists()
+        }
+        publish()
     }
 
     override suspend fun updateContent(id: NoteId, markdown: String) = mutex.withLock {
@@ -209,6 +242,8 @@ class LocalNotesEngine private constructor(
         return if (path.isRegularFile()) Files.newInputStream(path) else null
     }
 
+    override suspend fun togglePin(id: NoteId) = updateMetadata(id) { it.copy(pinned = !it.pinned) }
+
     override suspend fun toggleFavorite(id: NoteId) = updateMetadata(id) { current ->
         current.copy(favorite = !current.favorite, updatedAt = clock.instant())
     }
@@ -268,6 +303,7 @@ class LocalNotesEngine private constructor(
             setProperty("title", note.title)
             setProperty("category", note.category)
             setProperty("favorite", note.favorite.toString())
+            setProperty("pinned", note.pinned.toString())
             setProperty("state", note.state.name)
             setProperty("createdAt", note.createdAt.toString())
             setProperty("updatedAt", note.updatedAt.toString())
@@ -375,7 +411,7 @@ class LocalNotesEngine private constructor(
             val metadataRoot = root.resolve(".kgs/notes")
             if (!metadataRoot.exists()) return emptyMap()
             return Files.list(metadataRoot).use { paths ->
-                paths
+                paths.iterator().asSequence()
                     .filter { it.isRegularFile() && it.extension == "properties" }
                     .map { path -> runCatching { readStoredNote(root, path) }.getOrNull() }
                     .filter { it != null }
@@ -398,6 +434,7 @@ class LocalNotesEngine private constructor(
                 title = properties.getProperty("title", DEFAULT_TITLE),
                 category = normalizeCategory(properties.getProperty("category", "")),
                 favorite = properties.getProperty("favorite", "false").toBoolean(),
+                pinned = properties.getProperty("pinned", "false").toBoolean(),
                 state = NoteState.valueOf(properties.getProperty("state", NoteState.ACTIVE.name)),
                 createdAt = Instant.parse(properties.getProperty("createdAt")),
                 updatedAt = Instant.parse(properties.getProperty("updatedAt")),
@@ -412,7 +449,7 @@ class LocalNotesEngine private constructor(
             val metadataRoot = root.resolve(".kgs/attachments")
             if (!metadataRoot.exists()) return emptyMap()
             return Files.list(metadataRoot).use { paths ->
-                paths
+                paths.iterator().asSequence()
                     .filter { it.isRegularFile() && it.extension == "properties" }
                     .map { path -> runCatching { readStoredAttachment(root, path) }.getOrNull() }
                     .filter { it != null }
@@ -617,6 +654,7 @@ private data class StoredNote(
     val titleFixed: Boolean,
     val relativePath: String,
     val markdown: String,
+    val pinned: Boolean = false,
 ) {
     fun toPublic(): Note = Note(
         id = id,
@@ -626,6 +664,7 @@ private data class StoredNote(
         markdown = markdown,
         category = category,
         favorite = favorite,
+        pinned = pinned,
         state = state,
         createdAt = createdAt,
         updatedAt = updatedAt,
@@ -645,8 +684,10 @@ private data class StoredNote(
             ?.replace(Regex("[*_~`#>\\[\\]]"), "")
             ?.trim()
             .orEmpty(),
+        previewMarkdown = notePreviewMarkdown(markdown, title),
         category = category,
         favorite = favorite,
+        pinned = pinned,
         createdAt = createdAt,
         updatedAt = updatedAt,
     )

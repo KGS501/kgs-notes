@@ -5,7 +5,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FAKE_SDK="$PROJECT_ROOT/tools/test-fixtures/android-sdk"
 
 actual="$(
-    ANDROID_SDK_ROOT="$FAKE_SDK" \
+    KGS_NOTES_ANDROID_SDK_ROOT="$FAKE_SDK" \
         "$PROJECT_ROOT/tools/android-emulator.sh" serial
 )"
 
@@ -16,7 +16,7 @@ fi
 
 adb_output="$(
     ANDROID_SERIAL=emulator-5554 \
-        ANDROID_SDK_ROOT="$FAKE_SDK" \
+        KGS_NOTES_ANDROID_SDK_ROOT="$FAKE_SDK" \
         "$PROJECT_ROOT/tools/android-emulator.sh" adb get-state
 )"
 
@@ -29,7 +29,7 @@ set +e
 launch_output="$(
     timeout 2 env \
         ANDROID_SERIAL=emulator-5554 \
-        ANDROID_SDK_ROOT="$FAKE_SDK" \
+        KGS_NOTES_ANDROID_SDK_ROOT="$FAKE_SDK" \
         "$PROJECT_ROOT/tools/android-emulator.sh" launch 2>&1
 )"
 launch_status=$?
@@ -43,7 +43,7 @@ fi
 set +e
 bounded_wait_output="$(
     timeout 4 env \
-        ANDROID_SDK_ROOT="$FAKE_SDK" \
+        KGS_NOTES_ANDROID_SDK_ROOT="$FAKE_SDK" \
         FAKE_ADB_HANG_DISABLE=1 \
         KGS_ANDROID_SETUP_TIMEOUT_SECONDS=1 \
         "$PROJECT_ROOT/tools/android-emulator.sh" wait 2>&1
@@ -58,7 +58,7 @@ fi
 
 connected_test_output="$(
     ANDROID_SERIAL=emulator-5554 \
-        ANDROID_SDK_ROOT="$FAKE_SDK" \
+        KGS_NOTES_ANDROID_SDK_ROOT="$FAKE_SDK" \
         KGS_NOTES_GRADLEW="$PROJECT_ROOT/tools/test-fixtures/gradlew" \
         "$PROJECT_ROOT/tools/android-emulator.sh" connected-test --example-argument
 )"

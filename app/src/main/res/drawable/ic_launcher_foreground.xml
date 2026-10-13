@@ -1,13 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<vector xmlns:android="http://schemas.android.com/apk/res/android"
-    android:width="108dp"
-    android:height="108dp"
-    android:viewportWidth="108"
-    android:viewportHeight="108">
-    <path
-        android:fillColor="#2563A8"
-        android:pathData="M22,16h64a14,14 0,0 1,14 14v48a14,14 0,0 1,-14 14H22A14,14 0,0 1,8 78V30A14,14 0,0 1,22 16z" />
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M30,35h48v7H30zM30,51h37v7H30zM30,67h26v7H30z" />
+<!-- Generated from logo/logo.svg by tools/generate_logo_resources.py. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <group android:scaleX="0.1312140280" android:scaleY="0.1312140280" android:translateX="32.88" android:translateY="32.88">
+        <group android:translateX="-82.21" android:translateY="-84.93">
+            <path android:fillColor="@color/logo_mark" android:pathData="M367.18,84.93H132.57a50.35,50.35,0,0,0-50.36,50.36V369.9a50.36,50.36,0,0,0,50.36,50.36H247.34v-97a75.05,75.05,0,0,1,75-75h95.23v-113A50.36,50.36,0,0,0,367.18,84.93ZM120.57,319.38ZM172.06,303l-42.62,13.6a4.55,4.55,0,0,1-.53,0,6.14,6.14,0,0,1-6.14-6.11L132,272.9,245.39,159.47l35.09,35.09ZM313.18,161.19,292.9,181.48l-35.06-35.07,20.28-20.28a11.71,11.71,0,0,1,16.56,0l18.5,18.51A11.7,11.7,0,0,1,313.18,161.19Z" />
+        </group>
+        <group android:translateX="-82.21" android:translateY="-84.93">
+            <path android:fillColor="@color/logo_mark" android:pathData="M322.31,293.32a30,30,0,0,0-30,30v97l125.2-126.94H322.31Z" />
+        </group>
+    </group>
 </vector>

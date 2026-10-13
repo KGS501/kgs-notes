@@ -2,9 +2,7 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-/home/agent/Projects/kgs-calendar/.android-sdk}"
-ANDROID_AVD_HOME="${ANDROID_AVD_HOME:-${ANDROID_SDK_ROOT}/avd}"
-export ANDROID_SDK_ROOT ANDROID_AVD_HOME
+source "$PROJECT_ROOT/tools/dev-env.sh"
 AVD_NAME="${KGS_NOTES_AVD_NAME:-kgs_notes_phone_api36}"
 UNIT_NAME="kgs-notes-emulator.service"
 ADB="${ANDROID_SDK_ROOT}/platform-tools/adb"
@@ -87,27 +85,32 @@ start_emulator() {
     if ! "$EMULATOR" -list-avds | grep -Fxq "$AVD_NAME"; then
         create_avd
     fi
-    local available_kib
+    local available_kib emulator_command
+    local -a emulator_args launcher
     available_kib="$(awk '/MemAvailable/ { print $2 }' /proc/meminfo)"
     if (( available_kib < 5242880 )); then
         echo "Warning: less than 5 GiB host memory is available; stop idle Gradle daemons if the emulator becomes sluggish." >&2
     fi
     systemctl --user reset-failed "$UNIT_NAME" >/dev/null 2>&1 || true
     if ! systemctl --user is-active --quiet "$UNIT_NAME"; then
+        emulator_args=(-avd "$AVD_NAME" -no-window -gpu swiftshader_indirect
+            -no-audio -no-boot-anim -no-snapshot-load -no-snapshot-save)
+        if sg kvm -c 'test -r /dev/kvm && test -w /dev/kvm' >/dev/null 2>&1; then
+            # The existing user manager lacks the newly granted kvm group.
+            printf -v emulator_command '%q ' "$EMULATOR" "${emulator_args[@]}"
+            launcher=(sg kvm -c "$emulator_command")
+        else
+            echo "KVM is unavailable; using software emulation." >&2
+            launcher=("$EMULATOR" "${emulator_args[@]}" -accel off)
+        fi
         systemd-run --user \
             --unit="${UNIT_NAME%.service}" \
             --collect \
             --property="WorkingDirectory=$PROJECT_ROOT" \
             --setenv="ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" \
             --setenv="ANDROID_AVD_HOME=$ANDROID_AVD_HOME" \
-            "$EMULATOR" \
-            -avd "$AVD_NAME" \
-            -no-window \
-            -gpu swiftshader_indirect \
-            -no-audio \
-            -no-boot-anim \
-            -no-snapshot-load \
-            -no-snapshot-save
+            --setenv="ANDROID_USER_HOME=$ANDROID_USER_HOME" \
+            "${launcher[@]}"
     fi
     wait_for_device
 }

@@ -2,11 +2,27 @@ package com.kgs.notes
 
 import android.content.Intent
 import android.net.Uri
+import com.kgs.notes.design.KgsSheetDock
+import com.kgs.notes.design.KgsSheetExpansion
+import com.kgs.notes.design.KgsExpandableSheetPanel
+import com.kgs.notes.design.KgsConfirmationDialog
+import com.kgs.notes.design.kgsSheetControls
+import com.kgs.notes.design.LocalKgsSheetDock
+import com.kgs.notes.design.rememberKgsDismissSheets
+import com.kgs.notes.design.kgsNewNoteShadow
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.SizeTransform
+import androidx.compose.ui.graphics.CompositingStrategy
+import com.kgs.notes.design.LocalKgsInlineSheet
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.key
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.BoundsTransform
 import androidx.compose.animation.EnterExitState
@@ -16,6 +32,7 @@ import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateDp
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
@@ -26,9 +43,15 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Image
+import androidx.compose.ui.semantics.Role
+import com.kgs.notes.design.KgsNotesTheme
+import com.kgs.notes.design.NotesTheme
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -38,7 +61,6 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -63,85 +85,113 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.requiredWidth
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.TextField
-import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.MutableFloatState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.text.PlatformTextStyle
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.platform.LocalHapticFeedback
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInParent
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
 import com.kgs.notes.design.LocalKgsMotion
+import com.kgs.notes.design.LocalKgsDarkTheme
+import com.kgs.notes.design.LocalKgsAccentColors
 import com.kgs.notes.design.KgsCornerRadii
 import com.kgs.notes.design.KgsDropdownMenuItem
+import com.kgs.notes.design.KgsSearchField
+import com.kgs.notes.design.KgsNoteTitleField
+import com.kgs.notes.design.kgsHorizontalTextFade
+import com.kgs.notes.design.KgsTextField
 import com.kgs.notes.design.KgsExpressiveSurface
+import com.kgs.notes.design.KgsBottomSheet
+import com.kgs.notes.design.KgsSheetDialog
+import com.kgs.notes.design.LocalKgsSheetContentHeight
 import com.kgs.notes.design.KgsTooltip
 import com.kgs.notes.design.defaultEffectsSpec
 import com.kgs.notes.design.defaultSpatialSpec
@@ -150,6 +200,7 @@ import com.kgs.notes.design.fastSpatialSpec
 import com.kgs.notes.design.rememberKgsHapticClick
 import com.kgs.notes.design.collectIsVisuallyPressedAsState
 import com.kgs.notes.editor.EditorMode
+import androidx.compose.foundation.isSystemInDarkTheme
 import com.kgs.notes.editor.KgsMarkdownEditor
 import com.kgs.notes.engine.Note
 import com.kgs.notes.engine.NoteId
@@ -174,6 +225,9 @@ data class NotesActions(
     val onSourceChange: (SourceId) -> Unit = {},
     val onAddSource: () -> Unit = {},
     val onDefaultSourceChange: (SourceId) -> Unit = {},
+    val onThemeChange: (NotesTheme) -> Unit = {},
+    val onDarkModeChange: (DarkModePreference) -> Unit = {},
+    val onDefaultEditorModeChange: (EditorMode) -> Unit = {},
     val onNoteFormatPreferenceChange: (NoteFormatPreference) -> Unit = {},
     val onBrowserSourceConnect: (String, String) -> Unit = { _, _ -> },
     val onAppPasswordSourceConnect: (String, String, String, String) -> Unit = { _, _, _, _ -> },
@@ -186,82 +240,150 @@ data class NotesActions(
     val onQueryChange: (String) -> Unit = {},
     val onSortChange: (LibrarySort) -> Unit = {},
     val onToggleSortDirection: () -> Unit = {},
+    val onToggleLibraryView: () -> Unit = {},
+    val onGroupByDateChange: (Boolean) -> Unit = {},
     val onToggleSourceVisibility: (SourceId) -> Unit = {},
     val onDestinationChange: (LibraryDestination) -> Unit = {},
+    val onLibraryCategoryChange: (String?) -> Unit = {},
     val onEditorModeChange: (EditorMode) -> Unit = {},
     val onAttachmentMetadataPreferenceChange: (AttachmentMetadataPreference) -> Unit = {},
     val onAddImage: () -> Unit = {},
     val openManagedAttachment: (String) -> InputStream? = { null },
     val onMessageDismissed: () -> Unit = {},
+    val onRenameNote: (NoteId, String) -> Unit = { _, _ -> },
+    val onSelectedNotesAction: (Set<NoteId>, NoteSelectionOperation, String) -> Unit = { _, _, _ -> },
+    val onRenameSource: (SourceId, String) -> Unit = { _, _ -> },
+    val onRemoveSource: (SourceId) -> Unit = {},
+    val onRefreshSources: () -> Unit = {},
+    val onEditSourceConnection: (SourceId) -> Unit = {},
+    val onOpenProjectLink: (String) -> Unit = {},
 )
 
 @Composable
-fun KgsNotesApp(viewModel: NotesViewModel) {
+internal fun DarkModePreference.isDark(): Boolean = when (this) {
+    DarkModePreference.SYSTEM -> isSystemInDarkTheme()
+    DarkModePreference.LIGHT -> false
+    DarkModePreference.DARK -> true
+}
+
+@Composable
+fun KgsNotesApp(viewModel: NotesViewModel, onExternalPreviewClosed: () -> Unit = {}) {
     val state by viewModel.state.collectAsState()
-    val context = LocalContext.current
-    var imageImportDialogOpen by rememberSaveable { mutableStateOf(false) }
-    var removePrivateMetadata by rememberSaveable { mutableStateOf(true) }
-    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-        uri?.let { viewModel.importImage(it, removePrivateMetadata) }
-    }
-    KgsNotesScreen(
-        state = state,
-        actions = NotesActions(
-            onCreate = viewModel::createNote,
-            onSelect = viewModel::selectNote,
-            onContentChange = viewModel::updateContent,
-            onRename = viewModel::rename,
-            onToggleFavorite = viewModel::toggleFavorite,
-            onCategoryChange = viewModel::setCategory,
-            onSourceChange = viewModel::changeSource,
-            onAddSource = viewModel::showSourceConnection,
-            onDefaultSourceChange = viewModel::setDefaultSource,
-            onNoteFormatPreferenceChange = viewModel::setNoteFormatPreference,
-            onBrowserSourceConnect = viewModel::connectWithBrowser,
-            onAppPasswordSourceConnect = viewModel::connectWithAppPassword,
-            onDismissSourceConnection = viewModel::dismissSourceConnection,
-            onCloseEditor = viewModel::closeEditor,
-            onMoveToTrash = viewModel::moveToTrash,
-            onRestore = viewModel::restore,
-            onDeletePermanently = viewModel::deletePermanently,
-            onFilterChange = viewModel::setFilter,
-            onQueryChange = viewModel::setQuery,
-            onSortChange = viewModel::setSort,
-            onToggleSortDirection = viewModel::toggleSortDirection,
-            onToggleSourceVisibility = viewModel::toggleSourceVisibility,
-            onDestinationChange = viewModel::openDestination,
-            onEditorModeChange = viewModel::setEditorMode,
-            onAttachmentMetadataPreferenceChange = viewModel::setAttachmentMetadataPreference,
-            onAddImage = {
-                when (state.attachmentMetadataPreference) {
-                    AttachmentMetadataPreference.ASK_EVERY_TIME -> imageImportDialogOpen = true
-                    AttachmentMetadataPreference.REMOVE_PRIVATE_METADATA -> {
-                        removePrivateMetadata = true
-                        imagePicker.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
-                        )
-                    }
-                    AttachmentMetadataPreference.KEEP_ORIGINAL -> {
-                        removePrivateMetadata = false
-                        imagePicker.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
-                        )
-                    }
-                }
-            },
-            openManagedAttachment = viewModel::openManagedAttachment,
-            onMessageDismissed = viewModel::clearUserMessage,
-        ),
-    )
-    LaunchedEffect(state.sourceConnection.browserUrl) {
-        val browserUrl = state.sourceConnection.browserUrl ?: return@LaunchedEffect
-        runCatching {
-            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(browserUrl)))
+    KgsNotesTheme(darkTheme = state.darkMode.isDark(), theme = state.theme) {
+        val editorDock = remember { KgsSheetDock() }
+        CompositionLocalProvider(LocalKgsSheetDock provides if (state.externalFile != null || state.selectedNote?.state == NoteState.ACTIVE) editorDock else null) {
+        val context = LocalContext.current
+        var imageImportDialogOpen by rememberSaveable { mutableStateOf(false) }
+        var removePrivateMetadata by rememberSaveable { mutableStateOf(true) }
+        var editPermissionSessionKey by rememberSaveable { mutableStateOf<String?>(null) }
+        val externalEditPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            val sessionKey = editPermissionSessionKey
+            if (uri != null && sessionKey != null) viewModel.grantExternalEditing(sessionKey, uri)
+            editPermissionSessionKey = null
         }
-        viewModel.browserLaunchHandled()
-    }
-    if (imageImportDialogOpen) {
+        val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+            uri?.let { viewModel.importImage(it, removePrivateMetadata) }
+        }
+        val externalFile = state.externalFile
+        if (externalFile != null) {
+            key(externalFile.sessionKey) {
+            ExternalFileScreen(
+                file = externalFile,
+                sources = state.sources,
+                onTextChange = { viewModel.updateExternalText(externalFile.sessionKey, it) },
+                onModeChange = { viewModel.setExternalEditorMode(externalFile.sessionKey, it) },
+                onCopy = { viewModel.copyExternalFileToSource(externalFile.sessionKey, it) },
+                onClose = { viewModel.closeExternalFile(externalFile.sessionKey, onClosed = onExternalPreviewClosed) },
+                onRetry = { viewModel.retryExternalSave(externalFile.sessionKey) },
+                onDiscard = { viewModel.closeExternalFile(externalFile.sessionKey, discard = true, onClosed = onExternalPreviewClosed) },
+                onDismissCloseWarning = { viewModel.dismissExternalCloseWarning(externalFile.sessionKey) },
+                onEditOriginal = {
+                    if (editPermissionSessionKey == null) {
+                        editPermissionSessionKey = externalFile.sessionKey
+                        runCatching {
+                            externalEditPicker.launch(arrayOf("text/*", "application/octet-stream", "application/markdown", "application/x-markdown"))
+                        }.onFailure {
+                            editPermissionSessionKey = null
+                            android.widget.Toast.makeText(context, "No file picker is available", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                },
+            )
+            }
+        } else KgsNotesScreen(
+            state = state,
+            actions = NotesActions(
+                onCreate = viewModel::createNote,
+                onSelect = viewModel::selectNote,
+                onContentChange = viewModel::updateContent,
+                onRename = viewModel::rename,
+                onToggleFavorite = viewModel::toggleFavorite,
+                onCategoryChange = viewModel::setCategory,
+                onSourceChange = viewModel::changeSource,
+                onAddSource = viewModel::showSourceConnection,
+                onDefaultSourceChange = viewModel::setDefaultSource,
+                onNoteFormatPreferenceChange = viewModel::setNoteFormatPreference,
+                onThemeChange = viewModel::setTheme,
+                onDarkModeChange = viewModel::setDarkMode,
+                onDefaultEditorModeChange = viewModel::setDefaultEditorMode,
+                onBrowserSourceConnect = viewModel::connectWithBrowser,
+                onAppPasswordSourceConnect = viewModel::connectWithAppPassword,
+                onDismissSourceConnection = viewModel::dismissSourceConnection,
+                onCloseEditor = viewModel::closeEditor,
+                onMoveToTrash = viewModel::moveToTrash,
+                onRestore = viewModel::restore,
+                onDeletePermanently = viewModel::deletePermanently,
+                onFilterChange = viewModel::setFilter,
+                onQueryChange = viewModel::setQuery,
+                onSortChange = viewModel::setSort,
+                onToggleSortDirection = viewModel::toggleSortDirection,
+                onToggleLibraryView = viewModel::toggleLibraryView,
+                onGroupByDateChange = viewModel::setGroupByDate,
+                onToggleSourceVisibility = viewModel::toggleSourceVisibility,
+                onDestinationChange = viewModel::openDestination,
+                onLibraryCategoryChange = viewModel::openCategory,
+                onEditorModeChange = viewModel::setEditorMode,
+                onAttachmentMetadataPreferenceChange = viewModel::setAttachmentMetadataPreference,
+                onAddImage = {
+                    when (state.attachmentMetadataPreference) {
+                        AttachmentMetadataPreference.ASK_EVERY_TIME -> imageImportDialogOpen = true
+                        AttachmentMetadataPreference.REMOVE_PRIVATE_METADATA -> {
+                            removePrivateMetadata = true
+                            imagePicker.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                            )
+                        }
+                        AttachmentMetadataPreference.KEEP_ORIGINAL -> {
+                            removePrivateMetadata = false
+                            imagePicker.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                            )
+                        }
+                    }
+                },
+                openManagedAttachment = viewModel::openManagedAttachment,
+                onMessageDismissed = viewModel::clearUserMessage,
+                onRenameNote = viewModel::renameNote,
+                onSelectedNotesAction = viewModel::applyToNotes,
+                onRenameSource = viewModel::renameSource,
+                onRemoveSource = viewModel::removeSource,
+                onRefreshSources = viewModel::refreshSources,
+                onEditSourceConnection = viewModel::editSourceConnection,
+                onOpenProjectLink = { url ->
+                    runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+                        .onFailure { android.widget.Toast.makeText(context, "No browser is available", android.widget.Toast.LENGTH_SHORT).show() }
+                },
+            ),
+        )
+        LaunchedEffect(state.sourceConnection.browserUrl) {
+            val browserUrl = state.sourceConnection.browserUrl ?: return@LaunchedEffect
+            runCatching {
+                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(browserUrl)))
+            }
+            viewModel.browserLaunchHandled()
+        }
         ImageImportDialog(
+            expanded = imageImportDialogOpen,
             removePrivateMetadata = removePrivateMetadata,
             onRemovePrivateMetadataChange = { removePrivateMetadata = it },
             onChoose = {
@@ -272,6 +394,8 @@ fun KgsNotesApp(viewModel: NotesViewModel) {
             },
             onDismiss = { imageImportDialogOpen = false },
         )
+
+        }
     }
 }
 
@@ -284,19 +408,24 @@ private fun NextcloudConnectionDialog(
     onAppPasswordConnect: (String, String, String, String) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    var sourceName by rememberSaveable { mutableStateOf("Nextcloud") }
-    var serverUrl by rememberSaveable { mutableStateOf("") }
-    var loginName by rememberSaveable { mutableStateOf("") }
-    var appPassword by rememberSaveable { mutableStateOf("") }
-    var mode by rememberSaveable { mutableStateOf(NextcloudSetupMode.BROWSER) }
-    val busy = state.phase in setOf(
-        SourceConnectionPhase.STARTING,
-        SourceConnectionPhase.WAITING_FOR_BROWSER,
-        SourceConnectionPhase.VERIFYING,
-    )
-    Dialog(onDismissRequest = onDismiss) {
+    KgsBottomSheet(expanded = state.visible, onDismissRequest = onDismiss, title = "Nextcloud Source") {
+        var sourceName by rememberSaveable(state.editingSourceId?.value) { mutableStateOf(state.initialName) }
+        var serverUrl by rememberSaveable(state.editingSourceId?.value) { mutableStateOf(state.initialServerUrl) }
+        var loginName by rememberSaveable(state.editingSourceId?.value) { mutableStateOf(state.initialLoginName) }
+        var appPassword by rememberSaveable { mutableStateOf("") }
+        var mode by rememberSaveable(state.editingSourceId?.value) {
+            mutableStateOf(
+                if (state.editingSourceId == null) NextcloudSetupMode.BROWSER else NextcloudSetupMode.APP_PASSWORD,
+            )
+        }
+        val busy = state.phase in setOf(
+            SourceConnectionPhase.STARTING,
+            SourceConnectionPhase.WAITING_FOR_BROWSER,
+            SourceConnectionPhase.VERIFYING,
+        )
+
         Surface(
-            color = Color.White,
+            color = MaterialTheme.colorScheme.surface,
             shape = RoundedCornerShape(26.dp),
             modifier = Modifier
                 .fillMaxWidth()
@@ -306,7 +435,10 @@ private fun NextcloudConnectionDialog(
                 verticalArrangement = Arrangement.spacedBy(11.dp),
                 modifier = Modifier.padding(20.dp),
             ) {
-                Text("Add Nextcloud Source", style = MaterialTheme.typography.titleLarge)
+                Text(
+                    if (state.editingSourceId == null) "Add Nextcloud Source" else "Update Nextcloud Source",
+                    style = MaterialTheme.typography.titleLarge,
+                )
                 Text(
                     "Notes stay available as offline Working Copies and sync through the Notes API.",
                     style = MaterialTheme.typography.bodyMedium,
@@ -323,14 +455,14 @@ private fun NextcloudConnectionDialog(
                     onValueChange = { serverUrl = it },
                     label = "Nextcloud address",
                     placeholder = "cloud.example.com",
-                    enabled = !busy,
+                    enabled = !busy && state.editingSourceId == null,
                 )
                 if (mode == NextcloudSetupMode.APP_PASSWORD) {
                     KgsConnectionField(
                         value = loginName,
                         onValueChange = { loginName = it },
                         label = "Username",
-                        enabled = !busy,
+                        enabled = !busy && state.editingSourceId == null,
                     )
                     KgsConnectionField(
                         value = appPassword,
@@ -425,44 +557,43 @@ private fun KgsConnectionField(
     placeholder: String = "",
     password: Boolean = false,
 ) {
-    TextField(
-        value = value,
-        onValueChange = onValueChange,
-        label = { Text(label) },
-        placeholder = { if (placeholder.isNotEmpty()) Text(placeholder) },
-        enabled = enabled,
-        singleLine = true,
-        visualTransformation = if (password) PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None,
-        shape = RoundedCornerShape(14.dp),
-        colors = TextFieldDefaults.colors(
-            focusedContainerColor = MaterialTheme.colorScheme.background,
-            unfocusedContainerColor = MaterialTheme.colorScheme.background,
-            disabledContainerColor = MaterialTheme.colorScheme.background,
-            focusedIndicatorColor = Color.Transparent,
-            unfocusedIndicatorColor = Color.Transparent,
-            disabledIndicatorColor = Color.Transparent,
-        ),
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag(
-                when (label) {
-                    "Source name" -> "nextcloud-source-name"
-                    "Nextcloud address" -> "nextcloud-address"
-                    "Username" -> "nextcloud-username"
-                    else -> "nextcloud-app-password"
-                },
-            ),
-    )
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        KgsTextField(
+            value = value,
+            onValueChange = onValueChange,
+            placeholder = placeholder,
+            enabled = enabled,
+            visualTransformation = if (password) PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None,
+            containerColor = MaterialTheme.colorScheme.background,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(
+                    when (label) {
+                        "Source name" -> "nextcloud-source-name"
+                        "Nextcloud address" -> "nextcloud-address"
+                        "Username" -> "nextcloud-username"
+                        else -> "nextcloud-app-password"
+                    },
+                ),
+        )
+    }
 }
 
 @Composable
 private fun ImageImportDialog(
+    expanded: Boolean,
     removePrivateMetadata: Boolean,
     onRemovePrivateMetadataChange: (Boolean) -> Unit,
     onChoose: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    Dialog(onDismissRequest = onDismiss) {
+    KgsBottomSheet(expanded = expanded, onDismissRequest = onDismiss, title = "Add image") {
+
         Surface(
             color = MaterialTheme.colorScheme.surface,
             shape = RoundedCornerShape(26.dp),
@@ -494,9 +625,8 @@ private fun ImageImportDialog(
                     icon = { ImageGlyph(MaterialTheme.colorScheme.onSurfaceVariant) },
                 )
                 Spacer(Modifier.height(3.dp))
-                val chooseImage = rememberKgsHapticClick(onChoose)
                 Button(
-                    onClick = chooseImage,
+                    onClick = rememberKgsHapticClick(onChoose),
                     shape = RoundedCornerShape(14.dp),
                     modifier = Modifier.fillMaxWidth(),
                 ) {
@@ -515,7 +645,41 @@ fun KgsNotesScreen(
     modifier: Modifier = Modifier,
 ) {
     val motion = LocalKgsMotion.current
+    val focusManager = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    val cardScrollOffset = rememberSaveable(state.destination, state.libraryCategory) { mutableFloatStateOf(0f) }
+    var selectedIds by remember { mutableStateOf(setOf<NoteId>()) }
+    var selectedTitles by remember { mutableStateOf(mapOf<NoteId, String>()) }
+    var returnMorphInterrupted by remember { mutableStateOf(false) }
+    val onLibraryScroll: () -> Unit = {
+        if (state.selectedNote == null) returnMorphInterrupted = true
+    }
+    val toggleSelection: (NoteId) -> Unit = { id ->
+        keyboard?.hide()
+        focusManager.clearFocus()
+        if (id in selectedIds) {
+            selectedIds = selectedIds - id
+            selectedTitles = selectedTitles - id
+        } else {
+            selectedIds = selectedIds + id
+            selectedTitles = selectedTitles + (id to (state.notes.firstOrNull { it.id == id }?.title.orEmpty()))
+        }
+    }
+    val closeEditor = {
+        returnMorphInterrupted = false
+        keyboard?.hide()
+        focusManager.clearFocus()
+        actions.onCloseEditor()
+    }
     var drawerOpen by rememberSaveable { mutableStateOf(false) }
+    var pendingNavigation by remember { mutableStateOf<Pair<LibraryDestination, String?>?>(null) }
+    val dismissSheets = rememberKgsDismissSheets()
+    val openDrawer = {
+        dismissSheets()
+        selectedIds = emptySet()
+        selectedTitles = emptyMap()
+        drawerOpen = true
+    }
     var newNoteMorphActive by remember { mutableStateOf(false) }
     LaunchedEffect(state.userMessage) {
         if (state.userMessage != null) {
@@ -523,11 +687,16 @@ fun KgsNotesScreen(
             actions.onMessageDismissed()
         }
     }
-    BackHandler(enabled = state.selectedNote != null, onBack = actions.onCloseEditor)
-    BackHandler(enabled = drawerOpen) { drawerOpen = false }
+    BackHandler(enabled = state.selectedNote != null, onBack = closeEditor)
+    BackHandler(enabled = selectedIds.isNotEmpty()) { selectedIds = emptySet(); selectedTitles = emptyMap() }
+    BackHandler(enabled = drawerOpen || pendingNavigation != null) { pendingNavigation = null; drawerOpen = false }
     BackHandler(
-        enabled = state.selectedNote == null && !drawerOpen && state.destination != LibraryDestination.NOTES,
-    ) { actions.onDestinationChange(LibraryDestination.NOTES) }
+        enabled = state.selectedNote == null && selectedIds.isEmpty() && !drawerOpen && pendingNavigation == null &&
+            (state.destination != LibraryDestination.NOTES || state.libraryCategory != null),
+    ) {
+        if (state.destination == LibraryDestination.NOTES) actions.onLibraryCategoryChange(null)
+        else actions.onDestinationChange(LibraryDestination.NOTES)
+    }
 
     BoxWithConstraints(
         modifier = modifier
@@ -540,8 +709,12 @@ fun KgsNotesScreen(
                 LibraryPane(
                     state = state,
                     actions = actions,
-                    onOpenDrawer = { drawerOpen = true },
+                    onOpenDrawer = openDrawer,
                     selectedId = state.selectedNote?.id,
+                    cardScrollOffset = cardScrollOffset,
+                    selectedIds = selectedIds,
+                    onToggleSelection = toggleSelection,
+                    selectionActive = selectedIds.isNotEmpty(),
                     modifier = Modifier
                         .widthIn(min = 330.dp, max = 410.dp)
                         .fillMaxHeight(),
@@ -566,6 +739,14 @@ fun KgsNotesScreen(
         } else {
             SharedTransitionLayout(modifier = Modifier.fillMaxSize()) {
                 val sharedScope = this
+                val morphConfig = remember {
+                    object : SharedTransitionScope.SharedContentConfig {
+                        override val SharedTransitionScope.SharedContentState.isEnabled: Boolean
+                            get() = !returnMorphInterrupted
+                        // Scrolling takes over immediately, including mid-morph.
+                        override val shouldKeepEnabledForOngoingAnimation: Boolean = false
+                    }
+                }
                 AnimatedContent(
                     targetState = state.selectedNote,
                     contentKey = { it?.id },
@@ -573,29 +754,24 @@ fun KgsNotesScreen(
                         if (newNoteMorphActive) {
                             fadeIn(motion.defaultEffectsSpec()) togetherWith
                                 fadeOut(motion.fastEffectsSpec())
-                        } else if (targetState != null) {
-                            slideInHorizontally(motion.defaultSpatialSpec()) { it / 4 } +
-                                fadeIn(motion.defaultEffectsSpec()) togetherWith
-                                slideOutHorizontally(motion.fastSpatialSpec()) { -it / 5 } +
-                                fadeOut(motion.fastEffectsSpec())
                         } else {
-                            slideInHorizontally(motion.defaultSpatialSpec()) { -it / 5 } +
-                                fadeIn(motion.defaultEffectsSpec()) togetherWith
-                                slideOutHorizontally(motion.fastSpatialSpec()) { it / 4 } +
-                                fadeOut(motion.fastEffectsSpec())
+                            fadeIn(motion.defaultEffectsSpec()) togetherWith fadeOut(motion.fastEffectsSpec())
                         }
                     },
                     label = "library editor navigation",
                     modifier = Modifier.fillMaxSize(),
                 ) { note ->
                     val visibilityScope = this
+                    val noteMorph = NoteMorph(sharedScope, visibilityScope, morphConfig)
                     if (note == null) {
                         val libraryActions = actions.copy(
                             onCreate = {
+                                returnMorphInterrupted = false
                                 newNoteMorphActive = true
                                 actions.onCreate()
                             },
                             onSelect = { id ->
+                                returnMorphInterrupted = false
                                 newNoteMorphActive = false
                                 actions.onSelect(id)
                             },
@@ -603,31 +779,55 @@ fun KgsNotesScreen(
                         LibraryPane(
                             state = state,
                             actions = libraryActions,
-                            onOpenDrawer = { drawerOpen = true },
+                            onOpenDrawer = openDrawer,
                             selectedId = null,
+                            cardScrollOffset = cardScrollOffset,
+                            noteMorph = noteMorph,
+                            onScroll = onLibraryScroll,
+                            selectedIds = selectedIds,
+                            onToggleSelection = toggleSelection,
+                            selectionActive = selectedIds.isNotEmpty(),
                             newNoteButtonModifier = Modifier.newNoteMorphBounds(
                                 sharedScope = sharedScope,
                                 visibilityScope = visibilityScope,
                                 ownCorner = 18.dp,
                                 counterpartCorner = 0.dp,
-                                enabled = newNoteMorphActive,
-                            ),
+                                // Register and measure the FAB before any tap. Adding
+                                // shared bounds in onCreate loses the first source frame.
+                                enabled = true,
+                                config = morphConfig,
+                            ).then(if (newNoteMorphActive) Modifier else Modifier.newNoteButtonLayer(noteMorph, shadow = false)),
+                            newNoteButtonShadowModifier = Modifier.newNoteMorphShadow(sharedScope, visibilityScope, button = true, config = morphConfig)
+                                .then(if (newNoteMorphActive) Modifier else Modifier.newNoteButtonLayer(noteMorph, shadow = true)),
                             modifier = Modifier.fillMaxSize(),
                         )
                     } else {
+                        if (newNoteMorphActive) {
+                            Box(Modifier.fillMaxSize()
+                                .newNoteMorphShadow(sharedScope, visibilityScope, button = false, config = morphConfig)
+                                .testTag("editor-morph-shadow"))
+                        }
                         EditorPane(
                             state = state,
                             note = note,
-                            actions = actions,
+                            actions = actions.copy(onCloseEditor = closeEditor),
                             showBack = true,
+                            noteMorph = if (newNoteMorphActive) null else noteMorph,
+                            stableLayoutScope = sharedScope,
+
                             modifier = Modifier
                                 .fillMaxSize()
+                                .noteMorphBounds(
+                                    if (newNoteMorphActive) null else noteMorph,
+                                    note.id, "container", 0.dp, 14.dp,
+                                )
                                 .newNoteMorphBounds(
                                     sharedScope = sharedScope,
                                     visibilityScope = visibilityScope,
                                     ownCorner = 0.dp,
                                     counterpartCorner = 18.dp,
                                     enabled = newNoteMorphActive,
+                                    config = morphConfig,
                                 ),
                         )
                     }
@@ -635,14 +835,66 @@ fun KgsNotesScreen(
             }
         }
 
+        var displayedSelectedIds by remember { mutableStateOf(emptySet<NoteId>()) }
+        if (selectedIds.isNotEmpty()) displayedSelectedIds = selectedIds
+        val selectionForBar = selectedIds.ifEmpty { displayedSelectedIds }
+        val selectionExpansion = remember { KgsSheetExpansion() }
+        KgsBottomSheet(
+            expanded = selectedIds.isNotEmpty() && state.selectedNote == null,
+            modal = false,
+            title = "Selected Notes",
+            animateSizeChanges = false,
+            expansion = selectionExpansion,
+            onHidden = { selectionExpansion.expanded = false; selectionExpansion.available = false },
+            onDismissRequest = { selectedIds = emptySet(); selectedTitles = emptyMap() },
+        ) {
+            NoteSelectionBar(
+                expansion = selectionExpansion,
+                count = selectionForBar.size,
+                interactive = selectedIds.isNotEmpty(),
+                selectedTitles = selectionForBar.map { id ->
+                    state.notes.firstOrNull { it.id == id }?.title ?: selectedTitles[id].orEmpty()
+                },
+                selectedTitle = state.notes.firstOrNull { it.id == selectionForBar.singleOrNull() }?.title.orEmpty(),
+                currentCategory = state.notes.filter { it.id in selectionForBar }.map { it.category }.distinct().singleOrNull(),
+                currentSource = state.notes.filter { it.id in selectionForBar }.map { it.sourceId }.distinct().singleOrNull(),
+                allFavorite = state.notes.filter { it.id in selectionForBar }
+                    .let { visible -> visible.isNotEmpty() && visible.all { it.favorite } },
+                moveStatus = state.notes.filter { it.id in selectionForBar }
+                    .map { noteSaveStatus(it.syncState) }.distinct().singleOrNull() ?: EditorSaveStatus.SAVED_LOCALLY,
+                destination = state.destination,
+                categories = state.categories,
+                sources = state.sources,
+                onDismiss = { selectedIds = emptySet(); selectedTitles = emptyMap() },
+                onRename = { title ->
+                    selectionForBar.singleOrNull()?.let { actions.onRenameNote(it, title) }
+                },
+                onAction = { operation, value ->
+                    actions.onSelectedNotesAction(selectionForBar, operation, value)
+                },
+            )
+        }
+
         NotesDrawer(
             visible = drawerOpen,
             state = state,
             onDismiss = { drawerOpen = false },
             onToggleSource = actions.onToggleSourceVisibility,
+            onSync = actions.onRefreshSources,
             onDestination = { destination ->
-                actions.onDestinationChange(destination)
+                pendingNavigation = destination to null
                 drawerOpen = false
+            },
+            onCategory = { category ->
+                pendingNavigation = LibraryDestination.NOTES to category
+                drawerOpen = false
+            },
+            onClosed = {
+                pendingNavigation?.let { (destination, category) ->
+                    pendingNavigation = null
+                    if (destination == LibraryDestination.NOTES) actions.onLibraryCategoryChange(category)
+                    else actions.onDestinationChange(destination)
+                }
             },
         )
         AnimatedContent(
@@ -676,14 +928,13 @@ fun KgsNotesScreen(
             }
         }
     }
-    if (state.sourceConnection.visible) {
-        NextcloudConnectionDialog(
-            state = state.sourceConnection,
-            onBrowserConnect = actions.onBrowserSourceConnect,
-            onAppPasswordConnect = actions.onAppPasswordSourceConnect,
-            onDismiss = actions.onDismissSourceConnection,
-        )
-    }
+    NextcloudConnectionDialog(
+        state = state.sourceConnection,
+        onBrowserConnect = actions.onBrowserSourceConnect,
+        onAppPasswordConnect = actions.onAppPasswordSourceConnect,
+        onDismiss = actions.onDismissSourceConnection,
+    )
+
 }
 
 @Composable
@@ -692,26 +943,45 @@ private fun LibraryPane(
     actions: NotesActions,
     onOpenDrawer: () -> Unit = {},
     selectedId: NoteId?,
+    cardScrollOffset: MutableFloatState,
+    noteMorph: NoteMorph? = null,
+    selectedIds: Set<NoteId>,
+    onToggleSelection: (NoteId) -> Unit,
+    selectionActive: Boolean,
     newNoteButtonModifier: Modifier = Modifier,
+    newNoteButtonShadowModifier: Modifier = Modifier.kgsNewNoteShadow(),
+    onScroll: () -> Unit = {},
     modifier: Modifier,
 ) {
     val motion = LocalKgsMotion.current
     val navigationBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    val location = LibraryLocation(state.destination, state.libraryCategory.takeIf { state.destination == LibraryDestination.NOTES })
+    val latestLocation by rememberUpdatedState(location)
+    val snapshots = remember { mutableMapOf<LibraryLocation, LibraryDisplay>() }
+    SideEffect { snapshots[location] = LibraryDisplay(state, cardScrollOffset) }
+    val background by animateColorAsState(
+        if (state.destination == LibraryDestination.TRASH) {
+            if (MaterialTheme.colorScheme.surface.luminance() > .5f) Color(0xFFE9E6E3) else Color(0xFF242526)
+        } else MaterialTheme.colorScheme.background,
+        motion.defaultEffectsSpec(), label = "Library background",
+    )
     Scaffold(
         modifier = modifier.testTag("library-pane"),
-        containerColor = MaterialTheme.colorScheme.background,
+        containerColor = background,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         floatingActionButton = {
-            if (state.destination == LibraryDestination.NOTES) {
+            if (state.destination == LibraryDestination.NOTES && !selectionActive) {
                 KgsTooltip("New Note") {
-                    Box(Modifier.padding(bottom = navigationBottom)) {
+                    Box(Modifier.padding(bottom = navigationBottom).size(56.dp)) {
+                        Box(newNoteButtonShadowModifier.size(56.dp).testTag("new-note-shadow"))
                         KgsExpressiveSurface(
                             onClick = actions.onCreate,
-                            color = MaterialTheme.colorScheme.primaryContainer,
-                            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                            color = LocalKgsAccentColors.current.fabContainer,
+                            contentColor = LocalKgsAccentColors.current.fabContent,
                             restingCorners = KgsCornerRadii(18.dp),
                             showIndication = false,
-                            modifier = newNoteButtonModifier.size(56.dp),
+                            modifier = newNoteButtonModifier
+                                .size(56.dp).testTag("new-note-button"),
                         ) {
                             Icon(
                                 Icons.Default.Add,
@@ -730,15 +1000,10 @@ private fun LibraryPane(
                 .padding(padding)
                 .padding(horizontal = 18.dp),
         ) {
-            LibraryHeader(
-                destination = state.destination,
-                onOpenDrawer = onOpenDrawer,
-                onBackToNotes = { actions.onDestinationChange(LibraryDestination.NOTES) },
-            )
             AnimatedContent(
-                targetState = state.destination,
+                targetState = location,
                 transitionSpec = {
-                    if (targetState == LibraryDestination.NOTES) {
+                    if (targetState.destination == LibraryDestination.NOTES && targetState.category == null) {
                         slideInHorizontally(motion.defaultSpatialSpec()) { -it / 5 } +
                             fadeIn(motion.defaultEffectsSpec()) togetherWith
                             slideOutHorizontally(motion.fastSpatialSpec()) { it / 5 } +
@@ -752,27 +1017,131 @@ private fun LibraryPane(
                 },
                 label = "library destination",
                 modifier = Modifier.fillMaxSize(),
-            ) { destination ->
+            ) { shownLocation ->
+                val destination = shownLocation.destination
+                val displayed = if (shownLocation == location) LibraryDisplay(state, cardScrollOffset)
+                    else snapshots[shownLocation] ?: LibraryDisplay(state, cardScrollOffset)
+                DisposableEffect(shownLocation) {
+                    onDispose { if (shownLocation != latestLocation) snapshots.remove(shownLocation) }
+                }
                 if (destination == LibraryDestination.SETTINGS) {
-                    SettingsPane(
-                        state = state,
+                    NotesSettingsScreen(
+                        state = displayed.state,
                         actions = actions,
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(top = 10.dp),
+                        modifier = Modifier.fillMaxSize(),
                     )
                 } else {
-                    LibraryCollection(
-                        state = state,
-                        actions = actions,
-                        destination = destination,
-                        selectedId = selectedId,
-                        navigationBottom = navigationBottom,
-                    )
+                    Column(Modifier.fillMaxSize()) {
+                        if (destination == LibraryDestination.TRASH) {
+                            LibraryHeader(
+                                destination = destination,
+                                onOpenDrawer = onOpenDrawer,
+                                onBackToNotes = { actions.onDestinationChange(LibraryDestination.NOTES) },
+                            )
+                        }
+                        LibraryCollection(
+                            state = displayed.state,
+                            actions = actions,
+                            destination = destination,
+                            selectedId = selectedId,
+                            cardScrollOffset = displayed.scrollOffset,
+                            noteMorph = noteMorph.takeIf { shownLocation == location },
+                            onScroll = onScroll,
+                            selectedIds = selectedIds,
+                            onToggleSelection = onToggleSelection,
+                            navigationBottom = navigationBottom,
+                            onOpenDrawer = onOpenDrawer,
+                        )
+                    }
                 }
             }
         }
     }
+}
+
+private data class LibraryDisplay(val state: NotesUiState, val scrollOffset: MutableFloatState)
+private data class LibraryLocation(val destination: LibraryDestination, val category: String?)
+
+@OptIn(ExperimentalSharedTransitionApi::class)
+private data class NoteMorph(
+    val scope: SharedTransitionScope,
+    val visibility: AnimatedVisibilityScope,
+    val config: SharedTransitionScope.SharedContentConfig,
+)
+
+@Composable
+@OptIn(ExperimentalSharedTransitionApi::class)
+private fun Modifier.noteMorphBounds(
+    morph: NoteMorph?,
+    id: NoteId,
+    element: String,
+    ownCorner: androidx.compose.ui.unit.Dp = 0.dp,
+    otherCorner: androidx.compose.ui.unit.Dp = 0.dp,
+): Modifier {
+    if (morph == null) return this
+    val motion = LocalKgsMotion.current
+    val corner by morph.visibility.transition.animateDp(
+        transitionSpec = { motion.defaultSpatialSpec() },
+        label = "Note morph corner",
+    ) { if (it == EnterExitState.Visible) ownCorner else otherCorner }
+    return with(morph.scope) {
+        this@noteMorphBounds.sharedBounds(
+            sharedContentState = rememberSharedContentState("note-${id.value}-$element", morph.config),
+            animatedVisibilityScope = morph.visibility,
+            boundsTransform = BoundsTransform { _, _ -> motion.defaultSpatialSpec() },
+            // The shape changes size; text layers only move and crossfade.
+            // Never inherit an anisotropic transform from the card container.
+            resizeMode = if (element == "container") SharedTransitionScope.ResizeMode.RemeasureToBounds
+                else SharedTransitionScope.ResizeMode.scaleToBounds(ContentScale.None, Alignment.TopStart),
+            placeholderSize = SharedTransitionScope.PlaceholderSize.ContentSize,
+            clipInOverlayDuringTransition = OverlayClip(RoundedCornerShape(corner.coerceAtLeast(0.dp))),
+            enter = fadeIn(motion.defaultEffectsSpec()),
+            exit = fadeOut(motion.fastEffectsSpec()),
+            // Preview text must stay below the opaque footer backings in its
+            // container layer throughout the morph, just as it does at rest.
+            renderInOverlayDuringTransition = element != "body",
+            zIndexInOverlay = if (element == "container") 1f else 3f,
+        )
+    }
+}
+
+/** Keep editor/preview content at its final geometry inside the resizing shape. */
+@Composable
+@OptIn(ExperimentalSharedTransitionApi::class)
+private fun Modifier.noteMorphStableLayout(morph: NoteMorph?): Modifier =
+    if (morph == null) this else with(morph.scope) { this@noteMorphStableLayout.skipToLookaheadSize() }
+
+@Composable
+private fun noteMorphTitleStyle(morph: NoteMorph?, editor: Boolean): TextStyle {
+    val own = if (editor) MaterialTheme.typography.titleLarge else MaterialTheme.typography.titleMedium
+    if (morph == null) return own
+    val motion = LocalKgsMotion.current
+    val progress by morph.visibility.transition.animateFloat(
+        transitionSpec = { motion.defaultSpatialSpec() }, label = "Note title typography",
+    ) { if (it == EnterExitState.Visible) 1f else 0f }
+    val other = if (editor) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleLarge
+    return androidx.compose.ui.text.lerp(other, own, progress.coerceIn(0f, 1f))
+}
+
+/** Fade card-only details and their opaque backings as one layer. */
+@Composable
+private fun Modifier.noteMorphFooter(morph: NoteMorph?): Modifier {
+    if (morph == null) return this
+    val motion = LocalKgsMotion.current
+    val opacity by morph.visibility.transition.animateFloat(
+        transitionSpec = { motion.fastEffectsSpec() }, label = "Note footer visibility",
+    ) { if (it == EnterExitState.Visible) 1f else 0f }
+    return graphicsLayer { alpha = opacity.coerceIn(0f, 1f) }
+}
+
+@Composable
+private fun noteMorphCorner(morph: NoteMorph?, own: androidx.compose.ui.unit.Dp): androidx.compose.ui.unit.Dp {
+    if (morph == null) return own
+    val motion = LocalKgsMotion.current
+    val corner by morph.visibility.transition.animateDp(
+        transitionSpec = { motion.defaultSpatialSpec() }, label = "Note surface corner",
+    ) { if (it == EnterExitState.Visible) own else 0.dp }
+    return corner.coerceAtLeast(0.dp)
 }
 
 @Composable
@@ -783,31 +1152,127 @@ private fun Modifier.newNoteMorphBounds(
     ownCorner: androidx.compose.ui.unit.Dp,
     counterpartCorner: androidx.compose.ui.unit.Dp,
     enabled: Boolean,
+    config: SharedTransitionScope.SharedContentConfig,
 ): Modifier {
     if (!enabled) return this
     val motion = LocalKgsMotion.current
-    val animatedCorner by visibilityScope.transition.animateDp(
+    val animatedCorner = visibilityScope.transition.animateDp(
         transitionSpec = { motion.defaultSpatialSpec() },
         label = "new note container corner",
     ) { visibility ->
         if (visibility == EnterExitState.Visible) ownCorner else counterpartCorner
     }
+    // Read the spring in drawing/layer updates, never in composition. The
+    // editor and the library should not recompose just to round this outline.
+    val overlayClip = remember(animatedCorner) {
+        object : SharedTransitionScope.OverlayClip {
+            private val path = androidx.compose.ui.graphics.Path()
+            override fun getClipPath(
+                sharedContentState: SharedTransitionScope.SharedContentState,
+                bounds: Rect,
+                layoutDirection: androidx.compose.ui.unit.LayoutDirection,
+                density: androidx.compose.ui.unit.Density,
+            ): androidx.compose.ui.graphics.Path {
+                val radius = with(density) { animatedCorner.value.coerceAtLeast(0.dp).toPx() }
+                    .coerceAtMost(minOf(bounds.width, bounds.height).coerceAtLeast(0f) / 2f)
+                path.reset()
+                path.addRoundRect(androidx.compose.ui.geometry.RoundRect(bounds, androidx.compose.ui.geometry.CornerRadius(radius)))
+                return path
+            }
+        }
+    }
     return with(sharedScope) {
         this@newNoteMorphBounds.sharedBounds(
-            sharedContentState = rememberSharedContentState("new-note-container"),
+            sharedContentState = rememberSharedContentState("new-note-container", config),
             animatedVisibilityScope = visibilityScope,
             boundsTransform = BoundsTransform { _, _ -> motion.defaultSpatialSpec() },
             resizeMode = SharedTransitionScope.ResizeMode.RemeasureToBounds,
-            placeholderSize = SharedTransitionScope.PlaceholderSize.AnimatedSize,
+            placeholderSize = SharedTransitionScope.PlaceholderSize.ContentSize,
             // Spatial springs intentionally overshoot. Corner radii cannot, so
             // constrain only the physical boundary while preserving the bounce.
-            clipInOverlayDuringTransition = OverlayClip(
-                RoundedCornerShape(animatedCorner.coerceAtLeast(0.dp)),
-            ),
+            clipInOverlayDuringTransition = overlayClip,
             enter = fadeIn(motion.defaultEffectsSpec()),
             exit = fadeOut(motion.fastEffectsSpec()),
             zIndexInOverlay = 2f,
-        )
+        ).graphicsLayer {
+            shape = RoundedCornerShape(animatedCorner.value.coerceAtLeast(0.dp))
+            clip = true
+        }
+    }
+}
+
+/** A hardware shadow follows the container on its own unclipped layer. */
+@Composable
+@OptIn(ExperimentalSharedTransitionApi::class)
+private fun Modifier.newNoteMorphShadow(
+    scope: SharedTransitionScope,
+    visibility: AnimatedVisibilityScope,
+    button: Boolean,
+    config: SharedTransitionScope.SharedContentConfig,
+): Modifier {
+    val motion = LocalKgsMotion.current
+    val corner = visibility.transition.animateDp(
+        transitionSpec = { motion.defaultSpatialSpec() }, label = "New Note shadow corner",
+    ) { if ((it == EnterExitState.Visible) == button) 18.dp else 0.dp }
+    val opacity = visibility.transition.animateFloat(
+        transitionSpec = { tween(240, easing = motion.standard) }, label = "New Note shadow visibility",
+    ) { if (it == EnterExitState.Visible && button) 1f else 0f }
+    val overlayClip = remember {
+        object : SharedTransitionScope.OverlayClip {
+            private val path = androidx.compose.ui.graphics.Path()
+            override fun getClipPath(
+                sharedContentState: SharedTransitionScope.SharedContentState,
+                bounds: Rect,
+                layoutDirection: androidx.compose.ui.unit.LayoutDirection,
+                density: androidx.compose.ui.unit.Density,
+            ): androidx.compose.ui.graphics.Path {
+                path.reset()
+                path.addRect(bounds.inflate(with(density) { 32.dp.toPx() }))
+                return path
+            }
+        }
+    }
+    return with(scope) {
+        this@newNoteMorphShadow.sharedBounds(
+            sharedContentState = rememberSharedContentState("new-note-shadow", config),
+            animatedVisibilityScope = visibility,
+            boundsTransform = BoundsTransform { _, _ -> motion.defaultSpatialSpec() },
+            resizeMode = SharedTransitionScope.ResizeMode.RemeasureToBounds,
+            placeholderSize = SharedTransitionScope.PlaceholderSize.ContentSize,
+            enter = EnterTransition.None,
+            exit = ExitTransition.None,
+            zIndexInOverlay = 1.5f,
+            clipInOverlayDuringTransition = overlayClip,
+        ).graphicsLayer {
+            // dropShadow rasterizes and blurs a new mask when bounds change.
+            // A RenderNode outline follows the morph without a screen-size bitmap.
+            alpha = opacity.value.coerceIn(0f, 1f)
+            shadowElevation = if (alpha > 0f) 9.dp.toPx() else 0f
+            shape = RoundedCornerShape(corner.value.coerceAtLeast(0.dp))
+            clip = false
+            // Keep the soft outline outside the layer, including while fading.
+            compositingStrategy = CompositingStrategy.ModulateAlpha
+        }
+    }
+}
+
+/** The FAB stays above existing Note morphs; its shadow never inherits their bounds. */
+@Composable
+@OptIn(ExperimentalSharedTransitionApi::class)
+private fun Modifier.newNoteButtonLayer(morph: NoteMorph?, shadow: Boolean): Modifier {
+    if (morph == null) return this
+    val motion = LocalKgsMotion.current
+    val opacity by morph.visibility.transition.animateFloat(
+        transitionSpec = { tween(240, easing = motion.standard) }, label = "New Note button visibility",
+    ) { if (it == EnterExitState.Visible) 1f else 0f }
+    return with(morph.scope) {
+        this@newNoteButtonLayer.renderInSharedTransitionScopeOverlay(
+            zIndexInOverlay = if (shadow) 3.5f else 4f,
+        ).graphicsLayer {
+            alpha = opacity.coerceIn(0f, 1f)
+            // An offscreen alpha layer would cut the soft shadow to the FAB bounds.
+            compositingStrategy = CompositingStrategy.ModulateAlpha
+        }
     }
 }
 
@@ -818,12 +1283,20 @@ private fun LibraryCollection(
     actions: NotesActions,
     destination: LibraryDestination,
     selectedId: NoteId?,
+    cardScrollOffset: MutableFloatState,
+    noteMorph: NoteMorph? = null,
+    selectedIds: Set<NoteId>,
+    onToggleSelection: (NoteId) -> Unit,
     navigationBottom: androidx.compose.ui.unit.Dp,
+    onOpenDrawer: () -> Unit,
+    onScroll: () -> Unit = {},
 ) {
     val motion = LocalKgsMotion.current
     val focusManager = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
     var sortMenuOpen by remember { mutableStateOf(false) }
     var searchBounds by remember { mutableStateOf<Rect?>(null) }
+    var collectionOrigin by remember { mutableStateOf(Offset.Zero) }
     var searchImeWasVisible by remember { mutableStateOf(false) }
     val searchInteractions = remember { MutableInteractionSource() }
     val searchFocused by searchInteractions.collectIsFocusedAsState()
@@ -843,6 +1316,7 @@ private fun LibraryCollection(
     Column(
         Modifier
             .fillMaxSize()
+            .onGloballyPositioned { collectionOrigin = it.boundsInRoot().topLeft }
             .pointerInput(searchFocused, searchBounds) {
                 awaitEachGesture {
                     val down = awaitFirstDown(
@@ -851,25 +1325,43 @@ private fun LibraryCollection(
                     )
                     val up = waitForUpOrCancellation(pass = PointerEventPass.Final)
                     val bounds = searchBounds
-                    if (up != null && searchFocused && bounds != null && !bounds.contains(down.position)) {
+                    if (up != null && searchFocused && bounds != null && !bounds.contains(down.position + collectionOrigin)) {
                         focusManager.clearFocus()
                     }
                 }
             },
     ) {
-        Spacer(Modifier.height(10.dp))
+        if (destination != LibraryDestination.NOTES) Spacer(Modifier.height(10.dp))
         if (destination == LibraryDestination.NOTES) {
-            KgsSearchField(
-                value = state.query,
-                onValueChange = actions.onQueryChange,
-                placeholder = "Search notes",
-                interactionSource = searchInteractions,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .onGloballyPositioned { searchBounds = it.boundsInParent() }
-                    .testTag("notes-search"),
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.fillMaxWidth().padding(top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 5.dp),
+            ) {
+                ExpressiveIconButton(label = "Open Menu", onClick = {
+                    keyboard?.hide()
+                    focusManager.clearFocus()
+                    onOpenDrawer()
+                }) { Icon(Icons.Default.Menu, contentDescription = "Open menu") }
+                KgsSearchField(
+                    value = state.query,
+                    onValueChange = actions.onQueryChange,
+                    placeholder = "Search notes",
+                    interactionSource = searchInteractions,
+                    modifier = Modifier.weight(1f)
+                        .onGloballyPositioned { searchBounds = it.boundsInRoot() }
+                        .testTag("notes-search"),
+                )
+            }
+            state.libraryCategory?.let { category ->
+                BoxWithConstraints(Modifier.fillMaxWidth()) {
+                    LibraryCategoryHeader(category, state.notes.size,
+                        ((maxWidth - 143.dp) / 4).coerceIn(28.dp, 44.dp))
+                }
+            }
             Spacer(Modifier.height(10.dp))
+            BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val filterBaseWidth = ((maxWidth - 143.dp) / 4).coerceIn(28.dp, 44.dp)
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth(),
@@ -879,14 +1371,19 @@ private fun LibraryCollection(
                 }
                 val filterPressed = filterInteractions.map { it.collectIsVisuallyPressedAsState().value }
                 val pressedFilter = filterPressed.indexOfFirst { it }
-                val pressedNeighborCount = listOf(pressedFilter - 1, pressedFilter + 1)
-                    .count { it in LibraryFilter.entries.indices }
+                val neighbors = LibraryFilter.entries.indices.filter { index ->
+                    index != pressedFilter && kotlin.math.abs(index - pressedFilter) <= 3
+                }
+                val totalWeight = neighbors.sumOf { index ->
+                    (4 - kotlin.math.abs(index - pressedFilter)).toDouble()
+                }
                 LibraryFilter.entries.forEachIndexed { index, filter ->
                     val targetWidth = when {
-                        pressedFilter < 0 -> 44.dp
-                        index == pressedFilter -> 50.6.dp
-                        kotlin.math.abs(index - pressedFilter) == 1 -> 44.dp - 6.6.dp / pressedNeighborCount
-                        else -> 44.dp
+                        pressedFilter < 0 -> filterBaseWidth
+                        index == pressedFilter -> filterBaseWidth * 1.15f
+                        index in neighbors -> filterBaseWidth - filterBaseWidth * .15f *
+                            ((4 - kotlin.math.abs(index - pressedFilter)) / totalWeight).toFloat()
+                        else -> filterBaseWidth
                     }
                     val filterWidth by animateDpAsState(
                         targetValue = targetWidth,
@@ -906,12 +1403,15 @@ private fun LibraryCollection(
                 Spacer(Modifier.weight(1f))
                 val directionInteractions = remember { MutableInteractionSource() }
                 val sortInteractions = remember { MutableInteractionSource() }
+                val viewInteractions = remember { MutableInteractionSource() }
+                val viewPressed by viewInteractions.collectIsVisuallyPressedAsState()
                 val directionPressed by directionInteractions.collectIsVisuallyPressedAsState()
                 val sortPressed by sortInteractions.collectIsVisuallyPressedAsState()
                 val directionWidth by animateDpAsState(
                     targetValue = when {
                         directionPressed -> 50.6.dp
-                        sortPressed -> 37.4.dp
+                        sortPressed -> 40.7.dp
+                        viewPressed -> 42.5.dp
                         else -> 44.dp
                     },
                     animationSpec = motion.fastSpatialSpec(),
@@ -920,11 +1420,22 @@ private fun LibraryCollection(
                 val sortWidth by animateDpAsState(
                     targetValue = when {
                         sortPressed -> 50.6.dp
-                        directionPressed -> 37.4.dp
+                        directionPressed -> 39.6.dp
+                        viewPressed -> 39.5.dp
                         else -> 44.dp
                     },
                     animationSpec = motion.fastSpatialSpec(),
                     label = "sort group width",
+                )
+                val viewWidth by animateDpAsState(
+                    targetValue = when {
+                        viewPressed -> 46.dp
+                        sortPressed -> 36.7.dp
+                        directionPressed -> 37.8.dp
+                        else -> 40.dp
+                    },
+                    animationSpec = motion.fastSpatialSpec(),
+                    label = "view group width",
                 )
                 KgsTooltip(if (state.ascending) "Ascending" else "Descending") {
                     KgsExpressiveSurface(
@@ -995,22 +1506,26 @@ private fun LibraryCollection(
                                 .width(sortWidth)
                                 .height(44.dp),
                         ) {
-                            SortGlyph(
-                                color = sortContent,
+                            AnimatedContent(
+                                targetState = state.sort,
+                                transitionSpec = {
+                                    (fadeIn(motion.fastEffectsSpec()) +
+                                        scaleIn(motion.fastSpatialSpec(), initialScale = .65f)) togetherWith
+                                        (fadeOut(motion.fastEffectsSpec()) +
+                                            scaleOut(motion.fastSpatialSpec(), targetScale = .65f))
+                                },
+                                label = "selected sort icon",
                                 modifier = Modifier.semantics { contentDescription = "Sort notes" },
-                            )
+                            ) { sort ->
+                                LibrarySortOptionGlyph(sort = sort, color = sortContent)
+                            }
                         }
                     }
-                    val sortMenuShape = RoundedCornerShape(20.dp)
-                    DropdownMenu(
+                    KgsBottomSheet(
                         expanded = sortMenuOpen,
                         onDismissRequest = { sortMenuOpen = false },
-                        offset = DpOffset(0.dp, 8.dp),
-                        shape = sortMenuShape,
-                        containerColor = Color.White,
-                        tonalElevation = 0.dp,
-                        shadowElevation = 3.dp,
-                        modifier = Modifier.kgsMenuShadow(sortMenuShape),
+                        modifier = Modifier.testTag("sort-options-menu"),
+                        title = "Sort Notes",
                     ) {
                         LibrarySort.entries.forEach { sort ->
                             val selected = sort == state.sort
@@ -1033,36 +1548,60 @@ private fun LibraryCollection(
                         }
                     }
                 }
+                Spacer(Modifier.width(4.dp))
+                LibraryViewButton(
+                    current = state.libraryView,
+                    modifier = Modifier.width(viewWidth),
+                    interactionSource = viewInteractions,
+                    onClick = actions.onToggleLibraryView,
+                )
+            }
             }
             Spacer(Modifier.height(10.dp))
         } else {
             Spacer(Modifier.height(2.dp))
         }
-        if (state.notes.isEmpty()) {
-            EmptyLibrary(
-                filter = state.filter,
-                destination = destination,
-                query = state.query,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .testTag("empty-library"),
-            )
-        } else {
-            LazyColumn(
-                verticalArrangement = Arrangement.spacedBy(9.dp),
-                modifier = Modifier.fillMaxSize(),
-            ) {
-                items(state.notes, key = { it.id.value }) { note ->
+        Box(Modifier.fillMaxSize()) {
+            NoteCollection(
+                notes = state.notes,
+                view = state.libraryView,
+                previewModes = state.previewModes,
+                scrollOffset = cardScrollOffset,
+                bottomPadding = 92.dp + navigationBottom,
+                modifier = Modifier.noteViewportTopFade(),
+                groupByDate = state.groupByDate && destination == LibraryDestination.NOTES,
+                dateByCreated = state.sort == LibrarySort.LAST_CREATED,
+                onScroll = onScroll,
+            ) { note, cardModifier ->
+                SwipeToFavoriteNote(
+                    favorite = note.favorite,
+                    enabled = destination != LibraryDestination.TRASH && selectedIds.isEmpty(),
+                    onFavorite = { actions.onSelectedNotesAction(setOf(note.id), NoteSelectionOperation.FAVORITE, if (note.favorite) "remove" else "add") },
+                    modifier = cardModifier.testTag("note-swipe-${note.id.value}"),
+                ) { swipeModifier ->
                     NoteCard(
                         note = note,
+                        previewMode = state.previewModes[note.id] ?: EditorMode.RICH,
+                        trashed = destination == LibraryDestination.TRASH,
                         selected = note.id == selectedId,
-                        onClick = { actions.onSelect(note.id) },
-                        modifier = Modifier.animateItem(
-                            placementSpec = motion.defaultSpatialSpec(),
-                        ),
+                        highlighted = note.id in selectedIds,
+                        onClick = {
+                            if (selectedIds.isEmpty()) actions.onSelect(note.id) else onToggleSelection(note.id)
+                        },
+                        onLongClick = { onToggleSelection(note.id) },
+                        cardView = state.libraryView == LibraryView.CARDS,
+                        noteMorph = noteMorph,
+                        modifier = swipeModifier,
                     )
                 }
-                item { Spacer(Modifier.height(92.dp + navigationBottom)) }
+            }
+            androidx.compose.animation.AnimatedVisibility(
+                visible = state.notes.isEmpty(),
+                enter = fadeIn(tween(180, delayMillis = 120)),
+                exit = fadeOut(tween(100)),
+            ) {
+                EmptyLibrary(state.filter, destination, state.query,
+                    Modifier.fillMaxSize().testTag("empty-library"), category = state.libraryCategory)
             }
         }
     }
@@ -1076,6 +1615,7 @@ private fun LibraryHeader(
 ) {
     val statusTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     val focusManager = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -1093,7 +1633,11 @@ private fun LibraryHeader(
     ) {
         ExpressiveIconButton(
             label = if (destination == LibraryDestination.NOTES) "Open Menu" else "Back",
-            onClick = if (destination == LibraryDestination.NOTES) onOpenDrawer else onBackToNotes,
+            onClick = {
+                keyboard?.hide()
+                focusManager.clearFocus()
+                if (destination == LibraryDestination.NOTES) onOpenDrawer() else onBackToNotes()
+            },
         ) {
             if (destination == LibraryDestination.NOTES) {
                 Icon(Icons.Default.Menu, contentDescription = "Open menu")
@@ -1102,13 +1646,17 @@ private fun LibraryHeader(
             }
         }
         Surface(
-            color = MaterialTheme.colorScheme.primary,
-            contentColor = MaterialTheme.colorScheme.onPrimary,
+            color = if (destination == LibraryDestination.TRASH) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.primary,
+            contentColor = if (destination == LibraryDestination.TRASH) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onPrimary,
             shape = MaterialTheme.shapes.medium,
             modifier = Modifier.size(40.dp),
         ) {
             Box(contentAlignment = Alignment.Center) {
-                Text("K", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black)
+                if (destination == LibraryDestination.TRASH) {
+                    Icon(Icons.Default.Delete, contentDescription = null)
+                } else {
+                    Icon(Icons.Default.Settings, contentDescription = null)
+                }
             }
         }
         Column {
@@ -1124,19 +1672,12 @@ private fun LibraryHeader(
     }
 }
 
-private fun Modifier.kgsMenuShadow(shape: RoundedCornerShape): Modifier = shadow(
-    elevation = 18.dp,
-    shape = shape,
-    clip = false,
-    ambientColor = Color.Black.copy(alpha = .065f),
-    spotColor = Color.Black.copy(alpha = .1f),
-)
-
 @Composable
-private fun ExpressiveIconButton(
+internal fun ExpressiveIconButton(
     label: String,
     onClick: () -> Unit,
     selected: Boolean = false,
+    modifier: Modifier = Modifier,
     content: @Composable () -> Unit,
 ) {
     val background by animateColorAsState(
@@ -1150,8 +1691,7 @@ private fun ExpressiveIconButton(
             color = background,
             restingCorners = KgsCornerRadii(20.dp),
             showIndication = false,
-            modifier = Modifier
-                .size(40.dp),
+            modifier = modifier.size(40.dp),
         ) { content() }
     }
 }
@@ -1176,19 +1716,28 @@ private fun LibraryFilterButton(
         LibraryFilter.SERVER -> "Server notes"
     }
     val motion = LocalKgsMotion.current
+    val darkTheme = LocalKgsDarkTheme.current
+    val accent = when (filter) {
+        LibraryFilter.ALL -> MaterialTheme.colorScheme.onPrimaryContainer
+        LibraryFilter.FAVORITES -> if (darkTheme) Color(0xFFFF8A9A) else FavoriteRed
+        LibraryFilter.LOCAL -> if (darkTheme) Color(0xFF77D5AA) else Color(0xFF248A63)
+        LibraryFilter.SERVER -> if (darkTheme) Color(0xFF9BCAFF) else Color(0xFF3978C6)
+    }
     val iconColor by animateColorAsState(
-        targetValue = if (filter == LibraryFilter.FAVORITES && selected) {
-            FavoriteRed
-        } else if (selected) {
-            MaterialTheme.colorScheme.onPrimaryContainer
-        } else {
-            MaterialTheme.colorScheme.onSurfaceVariant
-        },
+        targetValue = if (selected) accent else MaterialTheme.colorScheme.onSurfaceVariant,
         animationSpec = motion.defaultEffectsSpec(),
         label = "$description icon color",
     )
     val containerColor by animateColorAsState(
-        targetValue = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.White,
+        targetValue = if (selected && filter == LibraryFilter.FAVORITES) favoriteContainerColor()
+        else if (selected && darkTheme && filter != LibraryFilter.ALL) {
+            lerp(MaterialTheme.colorScheme.surface, accent, .18f)
+        } else if (selected) when (filter) {
+            LibraryFilter.ALL -> MaterialTheme.colorScheme.primaryContainer
+            LibraryFilter.FAVORITES -> Color(0xFFFFE9E9)
+            LibraryFilter.LOCAL -> Color(0xFFE2F4E9)
+            LibraryFilter.SERVER -> Color(0xFFE5EFFC)
+        } else MaterialTheme.colorScheme.surface,
         animationSpec = motion.defaultEffectsSpec(),
         label = "$description container color",
     )
@@ -1225,7 +1774,7 @@ private fun LibraryFilterButton(
                     label = "$description icon state",
                 ) { active ->
                     when (filter) {
-                        LibraryFilter.ALL -> AllNotesGlyph(iconColor, filled = active)
+                        LibraryFilter.ALL -> AllNotesGlyph(iconColor)
                         LibraryFilter.FAVORITES -> Icon(
                             if (active) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
                             contentDescription = null,
@@ -1236,25 +1785,44 @@ private fun LibraryFilterButton(
                     }
                 }
             }
-            if (filter == LibraryFilter.LOCAL && pendingSyncCount > 0) {
-                Surface(
-                color = Color(0xFFF28C28),
-                contentColor = Color.White,
-                shape = CircleShape,
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .size(18.dp),
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Text(
-                            pendingSyncCount.coerceAtMost(99).toString(),
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                        )
+            if (filter == LibraryFilter.LOCAL) {
+                var retainedCount by remember { mutableIntStateOf(pendingSyncCount) }
+                SideEffect { if (pendingSyncCount > 0) retainedCount = pendingSyncCount }
+                PendingSyncIndicator(pendingSyncCount > 0, Modifier.align(Alignment.TopEnd)) {
+                    Surface(
+                        color = Color(0xFFF28C28),
+                        contentColor = Color.White,
+                        shape = CircleShape,
+                        modifier = Modifier
+                            .testTag("pending-sync-badge")
+                            .size(22.dp),
+                    ) {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Text(
+                                (pendingSyncCount.takeIf { it > 0 } ?: retainedCount).let { if (it > 9) "9+" else it.toString() },
+                                style = TextStyle(fontSize = 10.sp, lineHeight = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    platformStyle = PlatformTextStyle(includeFontPadding = false)),
+                                maxLines = 1,
+                                modifier = Modifier.testTag("pending-sync-count"),
+                            )
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun PendingSyncIndicator(visible: Boolean, modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+    val motion = LocalKgsMotion.current
+    val visibility = remember { MutableTransitionState(false) }
+    visibility.targetState = visible
+    AnimatedVisibility(visibleState = visibility, modifier = modifier,
+        enter = fadeIn(tween(220, easing = motion.standard)),
+        exit = fadeOut(tween(220, easing = motion.standard))) {
+        content()
     }
 }
 
@@ -1281,17 +1849,55 @@ private fun SortDirectionGlyph(ascending: Boolean) {
 }
 
 @Composable
-private fun SortGlyph(color: Color, modifier: Modifier = Modifier) {
-    Canvas(modifier.size(21.dp)) {
-        val stroke = size.minDimension * .09f
-        listOf(.29f to .78f, .51f to .6f, .73f to .4f).forEach { (y, width) ->
-            drawLine(
+private fun LibraryViewButton(
+    current: LibraryView,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier.width(40.dp),
+    interactionSource: MutableInteractionSource = remember { MutableInteractionSource() },
+) {
+    val action = if (current == LibraryView.LIST) "Card view" else "List view"
+    val motion = LocalKgsMotion.current
+    KgsTooltip(action) {
+        KgsExpressiveSurface(
+            onClick = onClick,
+            color = MaterialTheme.colorScheme.surface,
+            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            restingCorners = KgsCornerRadii(11.dp),
+            showIndication = false,
+            interactionSource = interactionSource,
+            modifier = modifier.height(44.dp).semantics {
+                contentDescription = action
+                stateDescription = if (current == LibraryView.LIST) "List view" else "Card view"
+            },
+        ) {
+            AnimatedContent(
+                targetState = current,
+                transitionSpec = {
+                    (fadeIn(motion.defaultEffectsSpec()) + scaleIn(motion.fastSpatialSpec(), initialScale = .84f)) togetherWith
+                        (fadeOut(motion.defaultEffectsSpec()) + scaleOut(motion.fastSpatialSpec(), targetScale = .84f))
+                },
+                label = "Library view icon",
+            ) { LibraryViewGlyph(it) }
+        }
+    }
+}
+
+@Composable
+private fun LibraryViewGlyph(current: LibraryView) {
+    val color = MaterialTheme.colorScheme.onSurfaceVariant
+    Canvas(Modifier.size(22.dp)) {
+        if (current == LibraryView.CARDS) repeat(4) { index ->
+            drawRoundRect(
                 color,
-                Offset(size.width * .16f, size.height * y),
-                Offset(size.width * width, size.height * y),
-                stroke,
-                StrokeCap.Round,
+                topLeft = Offset(size.width * (.08f + (index % 2) * .5f), size.height * (.08f + (index / 2) * .5f)),
+                size = Size(size.width * .34f, size.height * .34f),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(size.width * .06f),
             )
+        } else repeat(2) { index ->
+            drawRoundRect(color,
+                topLeft = Offset(size.width * .08f, size.height * (.14f + index * .44f)),
+                size = Size(size.width * .84f, size.height * .28f),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(size.width * .07f))
         }
     }
 }
@@ -1339,23 +1945,22 @@ private fun LibrarySortOptionGlyph(sort: LibrarySort, color: Color) {
 }
 
 @Composable
-private fun AllNotesGlyph(color: Color, filled: Boolean = false) {
+private fun AllNotesGlyph(color: Color) {
     Canvas(Modifier.size(21.dp)) {
-        val stroke = size.minDimension * .08f
-        listOf(.28f, .5f, .72f).forEach { y ->
-            drawLine(
-                color,
-                Offset(size.width * (if (filled) .16f else .2f), size.height * y),
-                Offset(size.width * (if (filled) .84f else .8f), size.height * y),
-                if (filled) stroke * 1.5f else stroke,
-                StrokeCap.Round,
-            )
+        val stroke = size.minDimension * .075f
+        drawRoundRect(color, topLeft = Offset(size.width * .16f, size.height * .10f),
+            size = Size(size.width * .68f, size.height * .80f),
+            cornerRadius = androidx.compose.ui.geometry.CornerRadius(size.width * .14f),
+            style = Stroke(stroke))
+        repeat(3) { row ->
+            val y = size.height * (.30f + row * .20f)
+            drawLine(color, Offset(size.width * .32f, y), Offset(size.width * .68f, y), stroke, StrokeCap.Round)
         }
     }
 }
 
 @Composable
-private fun LocalNotesGlyph(color: Color, filled: Boolean = false) {
+internal fun LocalNotesGlyph(color: Color, filled: Boolean = false) {
     Canvas(Modifier.size(21.dp)) {
         val stroke = size.minDimension * .08f
         drawRoundRect(
@@ -1374,7 +1979,7 @@ private fun LocalNotesGlyph(color: Color, filled: Boolean = false) {
 }
 
 @Composable
-private fun CloudGlyph(color: Color, filled: Boolean = false) {
+internal fun CloudGlyph(color: Color, filled: Boolean = false) {
     Canvas(Modifier.size(22.dp)) {
         val stroke = size.minDimension * .085f
         val path = androidx.compose.ui.graphics.Path().apply {
@@ -1393,7 +1998,7 @@ private fun CloudGlyph(color: Color, filled: Boolean = false) {
 }
 
 @Composable
-private fun PrivacyGlyph(color: Color) {
+internal fun PrivacyGlyph(color: Color) {
     Canvas(Modifier.size(22.dp)) {
         val stroke = size.minDimension * .09f
         val shield = androidx.compose.ui.graphics.Path().apply {
@@ -1424,7 +2029,7 @@ private fun PrivacyGlyph(color: Color) {
 }
 
 @Composable
-private fun QuestionGlyph(color: Color) {
+internal fun QuestionGlyph(color: Color) {
     Canvas(Modifier.size(22.dp)) {
         val stroke = size.minDimension * .085f
         drawCircle(
@@ -1473,18 +2078,74 @@ private fun ImageGlyph(color: Color) {
 }
 
 @Composable
+private fun LibraryCategoryHeader(category: String, count: Int, filterBaseWidth: androidx.compose.ui.unit.Dp) {
+    Row(
+        Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 2.dp)
+            .semantics(mergeDescendants = true) {}.testTag("library-category-context"),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Box(Modifier.width(filterBaseWidth).testTag("library-category-icon"), contentAlignment = Alignment.Center) {
+            CategoryIcon(false, LocalKgsAccentColors.current.focus)
+        }
+        Text(category.ifBlank { "No Category" }, style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.onSurface, maxLines = 2, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f))
+        Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = RoundedCornerShape(10.dp)) {
+            Text("$count ${if (count == 1) "Note" else "Notes"}", style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp))
+        }
+    }
+}
+
+@Composable
+private fun DrawerSyncButton(syncing: Boolean, onSync: () -> Unit) {
+    KgsTooltip("Sync all Sources") {
+        KgsExpressiveSurface(
+            onClick = onSync,
+            enabled = !syncing,
+            showIndication = false,
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            contentColor = MaterialTheme.colorScheme.onSurface,
+            restingCorners = KgsCornerRadii(14.dp),
+            modifier = Modifier.fillMaxWidth().testTag("sidebar-sync"),
+        ) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 13.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(13.dp)) {
+                AnimatedContent(targetState = syncing,
+                    transitionSpec = { fadeIn(tween(180)) togetherWith fadeOut(tween(180)) },
+                    label = "Sidebar sync progress") { busy ->
+                    Box(Modifier.size(23.dp), contentAlignment = Alignment.Center) {
+                        if (busy) CircularProgressIndicator(Modifier.size(19.dp).semantics { contentDescription = "Syncing all Sources" },
+                            strokeWidth = 2.dp, color = LocalKgsAccentColors.current.focus)
+                        else Icon(Icons.Default.Refresh, contentDescription = null)
+                    }
+                }
+                Text("Sync", style = MaterialTheme.typography.bodyLarge)
+            }
+        }
+    }
+}
+
+@Composable
 private fun NotesDrawer(
     visible: Boolean,
     state: NotesUiState,
     onDismiss: () -> Unit,
     onToggleSource: (SourceId) -> Unit,
+    onSync: () -> Unit,
     onDestination: (LibraryDestination) -> Unit,
+    onCategory: (String?) -> Unit,
+    onClosed: () -> Unit,
 ) {
     val motion = LocalKgsMotion.current
+    val closed by rememberUpdatedState(onClosed)
     val progress by animateFloatAsState(
         targetValue = if (visible) 1f else 0f,
-        animationSpec = if (visible) motion.defaultSpatialSpec() else motion.fastSpatialSpec(),
+        animationSpec = if (visible) motion.defaultSpatialSpec() else tween(220, easing = motion.standard),
         label = "drawer slide",
+        finishedListener = { if (!visible && it == 0f) closed() },
     )
     var dragOffset by remember { mutableFloatStateOf(0f) }
     val drawerWidth = 292.dp
@@ -1512,6 +2173,7 @@ private fun NotesDrawer(
                 shape = RoundedCornerShape(topEnd = 18.dp, bottomEnd = 18.dp),
                 shadowElevation = 0.dp,
                 modifier = Modifier
+                    .testTag("notes-drawer")
                     .width(drawerWidth)
                     .fillMaxHeight()
                     .offset {
@@ -1543,37 +2205,14 @@ private fun NotesDrawer(
                             bottom = navigationBottom + 14.dp,
                         ),
                 ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
-                        ) {
-                            Surface(
-                                color = MaterialTheme.colorScheme.primary,
-                                contentColor = MaterialTheme.colorScheme.onPrimary,
-                                shape = RoundedCornerShape(15.dp),
-                                modifier = Modifier.size(46.dp),
-                            ) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    Text("K", fontWeight = FontWeight.Black, fontSize = 21.sp)
-                                }
-                            }
-                            Column {
-                                Text("KGS Notes", style = MaterialTheme.typography.titleLarge)
-                                Text(
-                                    "Portable by design",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                        }
-                        Spacer(Modifier.height(24.dp))
-                        Text(
-                            "Sources",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        state.sources.forEach { source ->
+                    SidebarLogo()
+                    Spacer(Modifier.height(24.dp))
+                    LazyColumn(
+                        modifier = Modifier.weight(1f).fillMaxWidth().testTag("sidebar-locations"),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        item(key = "sources-heading") { DrawerSectionTitle("Sources") }
+                        items(state.sources, key = { "source:${it.id.value}" }) { source ->
                             DrawerRow(
                                 label = source.name,
                                 selected = source.visible,
@@ -1587,20 +2226,42 @@ private fun NotesDrawer(
                                 },
                             )
                         }
-                        Spacer(Modifier.weight(1f))
-                        DrawerRow(
-                            label = "Trash",
-                            selected = state.destination == LibraryDestination.TRASH,
-                            onClick = { onDestination(LibraryDestination.TRASH) },
-                            icon = { Icon(Icons.Default.Delete, contentDescription = null) },
-                        )
-                        Spacer(Modifier.height(4.dp))
-                        DrawerRow(
-                            label = "Settings",
-                            selected = state.destination == LibraryDestination.SETTINGS,
-                            onClick = { onDestination(LibraryDestination.SETTINGS) },
-                            icon = { Icon(Icons.Default.Settings, contentDescription = null) },
-                        )
+                        item(key = "sync") {
+                            DrawerSyncButton(state.syncingSources, onSync)
+                        }
+                        item(key = "notes-heading") { DrawerSectionTitle("Notes", topSpace = true) }
+                        item(key = "all-notes") {
+                            DrawerRow("All Notes", selected = state.destination == LibraryDestination.NOTES && state.libraryCategory == null,
+                                onClick = { onCategory(null) }, navigation = true, testTag = "sidebar-all-notes",
+                                icon = { AllNotesGlyph(MaterialTheme.colorScheme.onSurfaceVariant) })
+                        }
+                        item(key = "no-category") {
+                            DrawerRow("No Category", selected = state.destination == LibraryDestination.NOTES && state.libraryCategory == "",
+                                onClick = { onCategory("") }, navigation = true, testTag = "sidebar-no-category",
+                                icon = { CategoryIcon(false, MaterialTheme.colorScheme.onSurfaceVariant) })
+                        }
+                        items(state.categories.filter(String::isNotBlank).distinct().sortedBy(String::lowercase), key = { "category:$it" }) { category ->
+                            DrawerRow(category, selected = state.destination == LibraryDestination.NOTES && state.libraryCategory == category,
+                                onClick = { onCategory(category) }, navigation = true, testTag = "sidebar-category-$category",
+                                icon = { CategoryIcon(false, MaterialTheme.colorScheme.onSurfaceVariant) })
+                        }
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    DrawerRow(
+                        label = "Trash",
+                        selected = state.destination == LibraryDestination.TRASH,
+                        onClick = { onDestination(LibraryDestination.TRASH) },
+                        navigation = true,
+                        icon = { Icon(Icons.Default.Delete, contentDescription = null) },
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    DrawerRow(
+                        label = "Settings",
+                        selected = state.destination == LibraryDestination.SETTINGS,
+                        onClick = { onDestination(LibraryDestination.SETTINGS) },
+                        navigation = true,
+                        icon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                    )
                 }
             }
         }
@@ -1608,21 +2269,38 @@ private fun NotesDrawer(
 }
 
 @Composable
+private fun DrawerSectionTitle(label: String, topSpace: Boolean = false) {
+    Text(label, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(top = if (topSpace) 12.dp else 0.dp, start = 4.dp).semantics { heading() })
+}
+
+@Composable
 private fun DrawerRow(
     label: String,
     selected: Boolean,
     onClick: () -> Unit,
+    navigation: Boolean = false,
+    testTag: String? = null,
     icon: @Composable () -> Unit,
 ) {
+    val color by animateColorAsState(
+        targetValue = if (selected) {
+            if (navigation) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
+        } else Color.Transparent,
+        animationSpec = LocalKgsMotion.current.defaultEffectsSpec(),
+        label = "Sidebar row highlight",
+    )
     KgsTooltip(label) {
         KgsExpressiveSurface(
             onClick = onClick,
-            color = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
-            contentColor = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
+            color = color,
+            contentColor = if (selected && navigation) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
             restingCorners = KgsCornerRadii(14.dp),
+            showIndication = false,
             modifier = Modifier
                 .fillMaxWidth()
-                .testTag("modal-choice-$label"),
+                .testTag(testTag ?: "modal-choice-$label")
+                .semantics { this.selected = selected },
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -1635,13 +2313,23 @@ private fun DrawerRow(
                     style = MaterialTheme.typography.bodyLarge,
                     modifier = Modifier
                         .weight(1f)
-                        .testTag("modal-choice-label-$label"),
+                        .testTag(if (testTag == null) "modal-choice-label-$label" else "$testTag-label"),
                 )
-                if (selected) {
+                if (navigation) {
+                    if (selected) Box(Modifier.size(7.dp).background(LocalKgsAccentColors.current.focus, CircleShape))
+                    else Canvas(Modifier.size(18.dp)) {
+                        val color = Color.Gray
+                        val a = Offset(size.width * .38f, size.height * .28f)
+                        val b = Offset(size.width * .62f, size.height * .5f)
+                        val c = Offset(size.width * .38f, size.height * .72f)
+                        drawLine(color, a, b, 1.6.dp.toPx(), StrokeCap.Round)
+                        drawLine(color, b, c, 1.6.dp.toPx(), StrokeCap.Round)
+                    }
+                } else if (selected) {
                     Icon(
                         Icons.Default.Check,
                         contentDescription = "Selected",
-                        tint = MaterialTheme.colorScheme.primary,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.size(20.dp),
                     )
                 }
@@ -1651,446 +2339,523 @@ private fun DrawerRow(
 }
 
 @Composable
-private fun SettingsPane(
-    state: NotesUiState,
-    actions: NotesActions,
-    modifier: Modifier,
-) {
-    LazyColumn(
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-        modifier = modifier,
-    ) {
-        item {
-            Text(
-                "Sources",
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.primary,
-            )
-        }
-        items(state.sources, key = { it.id.value }) { source ->
-            SettingsCard(
-                title = source.name,
-                value = if (source.id == LocalSourceId) "On this device" else "Nextcloud Notes",
-            )
-        }
-        item {
-            AddSourceSettingsCard(onClick = actions.onAddSource)
-        }
-        item {
-            DefaultSourceSettingsCard(
-                sources = state.sources,
-                selectedId = state.defaultSourceId,
-                onSelect = actions.onDefaultSourceChange,
-            )
-        }
-        item {
-            NoteFormatSettingsCard(
-                preference = state.noteFormatPreference,
-                onPreferenceChange = actions.onNoteFormatPreferenceChange,
-            )
-        }
-        item { SettingsCard("Editor", "Rich Mode with Source Mode available") }
-        item {
-            AttachmentMetadataSettingsCard(
-                preference = state.attachmentMetadataPreference,
-                onPreferenceChange = actions.onAttachmentMetadataPreferenceChange,
-            )
-        }
-        item { Spacer(Modifier.height(24.dp)) }
-    }
-}
-
-@Composable
-private fun NoteFormatSettingsCard(
-    preference: NoteFormatPreference,
-    onPreferenceChange: (NoteFormatPreference) -> Unit,
-) {
-    var menuOpen by remember { mutableStateOf(false) }
-    Box {
-        KgsTooltip("Note format") {
-            KgsExpressiveSurface(
-                onClick = { menuOpen = true },
-                color = MaterialTheme.colorScheme.surface,
-                restingCorners = KgsCornerRadii(14.dp),
-                contentAlignment = Alignment.CenterStart,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .semantics { contentDescription = "Note format: ${preference.label}" },
-            ) {
-                Column(Modifier.padding(16.dp)) {
-                    Text("Note format", style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        preference.label,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-        }
-        val shape = RoundedCornerShape(20.dp)
-        DropdownMenu(
-            expanded = menuOpen,
-            onDismissRequest = { menuOpen = false },
-            offset = DpOffset(0.dp, 8.dp),
-            shape = shape,
-            containerColor = Color.White,
-            shadowElevation = 3.dp,
-            modifier = Modifier.kgsMenuShadow(shape),
-        ) {
-            NoteFormatPreference.entries.forEach { option ->
-                KgsDropdownMenuItem(
-                    text = option.label,
-                    selected = option == preference,
-                    icon = {
-                        NoteFormatGlyph(option, MaterialTheme.colorScheme.onSurfaceVariant)
-                    },
-                    onClick = {
-                        onPreferenceChange(option)
-                        menuOpen = false
-                    },
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun NoteFormatGlyph(format: NoteFormatPreference, color: Color) {
-    if (format == NoteFormatPreference.FOLLOW_SOURCE) {
-        CloudGlyph(color)
-        return
-    }
-    Canvas(Modifier.size(22.dp)) {
-        val stroke = size.minDimension * .09f
-        if (format == NoteFormatPreference.MARKDOWN) {
-            val yTop = size.height * .31f
-            val yBottom = size.height * .70f
-            val points = listOf(
-                Offset(size.width * .18f, yBottom),
-                Offset(size.width * .18f, yTop),
-                Offset(size.width * .40f, yBottom * .87f),
-                Offset(size.width * .62f, yTop),
-                Offset(size.width * .62f, yBottom),
-            )
-            points.zipWithNext().forEach { (start, end) ->
-                drawLine(color, start, end, stroke, StrokeCap.Round)
-            }
-            drawLine(
-                color,
-                Offset(size.width * .76f, yTop),
-                Offset(size.width * .76f, yBottom),
-                stroke,
-                StrokeCap.Round,
-            )
-            drawLine(
-                color,
-                Offset(size.width * .67f, yBottom * .86f),
-                Offset(size.width * .76f, yBottom),
-                stroke,
-                StrokeCap.Round,
-            )
-            drawLine(
-                color,
-                Offset(size.width * .85f, yBottom * .86f),
-                Offset(size.width * .76f, yBottom),
-                stroke,
-                StrokeCap.Round,
-            )
-        } else {
-            listOf(.30f to .76f, .50f to .62f, .70f to .46f).forEach { (y, endX) ->
-                drawLine(
-                    color,
-                    Offset(size.width * .18f, size.height * y),
-                    Offset(size.width * endX, size.height * y),
-                    stroke,
-                    StrokeCap.Round,
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun AddSourceSettingsCard(onClick: () -> Unit) {
-    KgsTooltip("Add Source") {
-        KgsExpressiveSurface(
-            onClick = onClick,
-            color = MaterialTheme.colorScheme.primaryContainer,
-            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-            restingCorners = KgsCornerRadii(14.dp),
-            contentAlignment = Alignment.CenterStart,
-            modifier = Modifier
-                .fillMaxWidth()
-                .semantics { contentDescription = "Add Nextcloud Source" },
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                modifier = Modifier.padding(16.dp),
-            ) {
-                Icon(Icons.Default.Add, contentDescription = null)
-                Column {
-                    Text("Add Source", style = MaterialTheme.typography.titleMedium)
-                    Text("Connect Nextcloud", style = MaterialTheme.typography.bodyMedium)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun DefaultSourceSettingsCard(
-    sources: List<SourceChoice>,
-    selectedId: SourceId,
-    onSelect: (SourceId) -> Unit,
-) {
-    var menuOpen by remember { mutableStateOf(false) }
-    val selected = sources.firstOrNull { it.id == selectedId } ?: sources.first()
-    Box {
-        KgsTooltip("Default Source") {
-            KgsExpressiveSurface(
-                onClick = { menuOpen = true },
-                color = MaterialTheme.colorScheme.surface,
-                restingCorners = KgsCornerRadii(14.dp),
-                contentAlignment = Alignment.CenterStart,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Column(Modifier.padding(16.dp)) {
-                    Text("Default Source", style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        selected.name,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-        }
-        val shape = RoundedCornerShape(20.dp)
-        DropdownMenu(
-            expanded = menuOpen,
-            onDismissRequest = { menuOpen = false },
-            offset = DpOffset(0.dp, 8.dp),
-            shape = shape,
-            containerColor = Color.White,
-            shadowElevation = 3.dp,
-            modifier = Modifier.kgsMenuShadow(shape),
-        ) {
-            sources.forEach { source ->
-                KgsDropdownMenuItem(
-                    text = source.name,
-                    selected = source.id == selected.id,
-                    icon = {
-                        if (source.id == LocalSourceId) {
-                            LocalNotesGlyph(MaterialTheme.colorScheme.onSurfaceVariant)
-                        } else {
-                            CloudGlyph(MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    },
-                    onClick = {
-                        onSelect(source.id)
-                        menuOpen = false
-                    },
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun AttachmentMetadataSettingsCard(
-    preference: AttachmentMetadataPreference,
-    onPreferenceChange: (AttachmentMetadataPreference) -> Unit,
-) {
-    var menuOpen by remember { mutableStateOf(false) }
-    Box {
-        KgsTooltip("Attachment metadata") {
-            KgsExpressiveSurface(
-                onClick = { menuOpen = true },
-                color = MaterialTheme.colorScheme.surface,
-                restingCorners = KgsCornerRadii(14.dp),
-                contentAlignment = Alignment.CenterStart,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .semantics {
-                        contentDescription = "Attachment metadata: ${preference.label}"
-                    },
-            ) {
-                Column(Modifier.padding(16.dp)) {
-                    Text("Attachment metadata", style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        preference.label,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-        }
-        val menuShape = RoundedCornerShape(20.dp)
-        DropdownMenu(
-            expanded = menuOpen,
-            onDismissRequest = { menuOpen = false },
-            offset = DpOffset(0.dp, 8.dp),
-            shape = menuShape,
-            containerColor = Color.White,
-            tonalElevation = 0.dp,
-            shadowElevation = 3.dp,
-            modifier = Modifier.kgsMenuShadow(menuShape),
-        ) {
-            AttachmentMetadataPreference.entries.forEach { option ->
-                KgsDropdownMenuItem(
-                    text = option.label,
-                    selected = option == preference,
-                    icon = {
-                        when (option) {
-                            AttachmentMetadataPreference.ASK_EVERY_TIME -> QuestionGlyph(MaterialTheme.colorScheme.onSurfaceVariant)
-                            AttachmentMetadataPreference.REMOVE_PRIVATE_METADATA -> PrivacyGlyph(MaterialTheme.colorScheme.onSurfaceVariant)
-                            AttachmentMetadataPreference.KEEP_ORIGINAL -> ImageGlyph(MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    },
-                    onClick = {
-                        onPreferenceChange(option)
-                        menuOpen = false
-                    },
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun SettingsCard(title: String, value: String) {
-    Surface(
-        color = MaterialTheme.colorScheme.surface,
-        shape = RoundedCornerShape(14.dp),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(Modifier.padding(16.dp)) {
-            Text(title, style = MaterialTheme.typography.titleMedium)
-            Text(value, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-    }
-}
-
-@Composable
 private fun NoteCard(
     note: NoteSummary,
+    previewMode: EditorMode,
+    trashed: Boolean,
     selected: Boolean,
+    highlighted: Boolean,
     onClick: () -> Unit,
+    onLongClick: () -> Unit,
+    cardView: Boolean = false,
+    noteMorph: NoteMorph? = null,
     modifier: Modifier,
 ) {
     val context = LocalContext.current
-    var previewOverflows by remember(note.id, note.snippet) { mutableStateOf(false) }
-    val container = if (selected) {
-        MaterialTheme.colorScheme.primaryContainer
-    } else {
-        MaterialTheme.colorScheme.surface
+    val previewMarkdown = note.previewMarkdown.ifBlank { note.snippet }
+    val linkColor = MaterialTheme.colorScheme.primary
+    val preview = remember(previewMarkdown, previewMode, linkColor) {
+        noteCardPreview(previewMarkdown, previewMode, linkColor)
     }
-    KgsTooltip("Open Note") {
-        KgsExpressiveSurface(
-            onClick = onClick,
-            color = container,
-            restingCorners = KgsCornerRadii(14.dp),
-            showIndication = false,
-            modifier = modifier
-                .fillMaxWidth()
-                .testTag("note-card-${note.id.value}"),
-        ) {
+    val motion = LocalKgsMotion.current
+    val container by animateColorAsState(
+        targetValue = when {
+            highlighted -> lerp(MaterialTheme.colorScheme.surface, MaterialTheme.colorScheme.primaryContainer, .55f)
+            selected -> MaterialTheme.colorScheme.primaryContainer
+            else -> MaterialTheme.colorScheme.surface
+        },
+        animationSpec = motion.defaultEffectsSpec(),
+        label = "Note selection background",
+    )
+    val timestampColor by animateColorAsState(
+        if (highlighted || selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+        animationSpec = motion.defaultEffectsSpec(), label = "Timestamp selection background",
+    )
+    val timestampTextColor by animateColorAsState(
+        if (highlighted || selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+        animationSpec = motion.defaultEffectsSpec(), label = "Timestamp selection text",
+    )
+    val borderColor by animateColorAsState(
+        targetValue = when {
+            highlighted -> MaterialTheme.colorScheme.primary
+            trashed -> if (MaterialTheme.colorScheme.surface.luminance() > .5f) Color(0xFFD2CECA) else MaterialTheme.colorScheme.outline
+            else -> Color.Transparent
+        },
+        animationSpec = motion.defaultEffectsSpec(),
+        label = "Note selection border",
+    )
+    val corner by animateDpAsState(
+        targetValue = if (highlighted) 24.dp else 14.dp,
+        animationSpec = motion.defaultSpatialSpec(),
+        label = "Note selection corner",
+    )
+    val surfaceCorner = noteMorphCorner(noteMorph, corner)
+    KgsExpressiveSurface(
+        onClick = onClick,
+        onLongClick = onLongClick,
+        color = container,
+        contentColor = if (trashed) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
+        restingCorners = KgsCornerRadii(surfaceCorner),
+        showIndication = false,
+        modifier = modifier
+            .fillMaxWidth()
+            .noteMorphBounds(noteMorph, note.id, "container", corner, 0.dp)
+            .border(2.dp, borderColor, RoundedCornerShape(surfaceCorner))
+            .testTag("note-card-${note.id.value}")
+            .semantics { contentDescription = if (highlighted) "Selected Note" else "Note" },
+    ) {
+        Box(Modifier.fillMaxSize().noteMorphStableLayout(noteMorph)) {
             Column(
-                verticalArrangement = Arrangement.spacedBy(7.dp),
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(17.dp),
+                    .fillMaxSize()
+                    .padding(start = 17.dp, top = 13.dp),
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.fillMaxWidth()) {
                     Text(
                         text = note.title,
-                        style = MaterialTheme.typography.titleMedium,
+                        style = noteMorphTitleStyle(noteMorph, editor = false),
+                        color = if (trashed) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
-                    )
-                    if (note.sourceId != LocalSourceId && note.syncState in pendingSyncStates) {
-                        Spacer(Modifier.width(7.dp))
-                        Surface(
-                            color = Color(0xFFF28C28),
-                            shape = CircleShape,
-                            modifier = Modifier
-                                .size(10.dp)
-                                .semantics { contentDescription = "Awaiting sync" },
-                        ) {}
-                    }
-                }
-                if (note.snippet.isNotBlank()) {
-                    Text(
-                        text = note.snippet,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 2,
+                        softWrap = false,
                         overflow = TextOverflow.Clip,
-                        onTextLayout = { previewOverflows = it.hasVisualOverflow },
-                        modifier = Modifier
-                            .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
-                            .drawWithContent {
-                                drawContent()
-                                if (previewOverflows) {
-                                    drawRect(
-                                        brush = Brush.verticalGradient(
-                                            colorStops = arrayOf(
-                                                0f to Color.White,
-                                                .62f to Color.White,
-                                                1f to Color.Transparent,
-                                            ),
-                                        ),
-                                        blendMode = BlendMode.DstIn,
-                                    )
-                                }
-                            },
+                        modifier = Modifier.fillMaxWidth()
+                            .noteMorphBounds(noteMorph, note.id, "title")
+                            .kgsHorizontalTextFade(end = 22.dp)
+                            .testTag("note-title-${note.id.value}"),
                     )
-                }
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    if (note.favorite) {
-                        Icon(
-                            Icons.Default.Favorite,
-                            contentDescription = "Favorite",
-                            tint = FavoriteRed,
-                            modifier = Modifier.size(18.dp),
-                        )
+                    PendingSyncIndicator(note.sourceId != LocalSourceId && note.syncState in pendingSyncStates,
+                        Modifier.align(Alignment.CenterEnd)) {
+                        Box(Modifier.background(container)
+                            .padding(start = 4.dp, end = 10.dp)) {
+                            Surface(color = Color(0xFFF28C28), shape = CircleShape,
+                                modifier = Modifier.size(10.dp).testTag("note-pending-sync-${note.id.value}")
+                                    .semantics { contentDescription = "Awaiting sync" }) {}
+                        }
                     }
-                    if (note.category.isNotBlank()) {
-                        Surface(
-                            color = MaterialTheme.colorScheme.surfaceVariant,
-                            shape = RoundedCornerShape(8.dp),
+                }
+                Spacer(Modifier.height(4.dp))
+                Box(
+                    Modifier.fillMaxWidth().padding(end = 17.dp)
+                        .weight(1f)
+                        .noteMorphBounds(noteMorph, note.id, "body")
+                        .notePreviewBottomFade(if (cardView) 38.dp else 28.dp)
+                        .testTag("note-preview-${note.id.value}"),
+                ) {
+                    if (preview.isNotEmpty()) {
+                        Text(
+                            text = preview,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = if (trashed) .72f else 1f),
+                            overflow = TextOverflow.Clip,
+                            maxLines = 32,
+                            modifier = Modifier.fillMaxWidth().wrapContentHeight(Alignment.Top, unbounded = true),
+                        )
+                    } else {
+                        Spacer(Modifier.height(NoteCardFooterHeight))
+                    }
+                }
+            }
+            Row(
+                verticalAlignment = Alignment.Bottom,
+                modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(NoteCardFooterHeight)
+                    .noteMorphFooter(noteMorph),
+            ) {
+                // This slot owns all remaining width, keeping the timestamp anchored at the edge.
+                Row(Modifier.weight(1f).fillMaxHeight(), verticalAlignment = Alignment.CenterVertically) {
+                    if (note.favorite) {
+                        Box(
+                            Modifier.fillMaxHeight().background(container)
+                                .padding(start = 17.dp, end = 8.dp, top = 6.dp, bottom = 8.dp),
+                            contentAlignment = Alignment.Center,
                         ) {
-                            Text(
-                                note.category,
-                                style = MaterialTheme.typography.labelLarge,
-                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp),
+                            Icon(
+                                Icons.Default.Favorite,
+                                contentDescription = "Favorite",
+                                tint = if (trashed) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .65f) else FavoriteRed,
+                                modifier = Modifier.size(18.dp),
                             )
                         }
                     }
-                    Spacer(Modifier.weight(1f))
-                    Text(
-                        remember(note.updatedAt, context) {
-                            val updated = Date.from(note.updatedAt)
-                            val zone = java.time.ZoneId.systemDefault()
-                            if (note.updatedAt.atZone(zone).toLocalDate() == java.time.LocalDate.now(zone)) {
-                                android.text.format.DateFormat.getTimeFormat(context).format(updated)
-                            } else {
-                                android.text.format.DateFormat.getDateFormat(context).format(updated)
-                            }
-                        },
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                }
+                Box(
+                    Modifier.fillMaxHeight()
+                        .testTag("note-timestamp-backing-${note.id.value}")
+                        .background(container, RoundedCornerShape(topStart = 18.dp))
+                        .padding(start = 6.dp, top = 6.dp, end = 11.dp, bottom = 8.dp),
+                ) {
+                    Surface(
+                        color = timestampColor,
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.height(28.dp).testTag("note-timestamp-${note.id.value}"),
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text(
+                                remember(note.updatedAt, context) {
+                                    val updated = Date.from(note.updatedAt)
+                                    val zone = java.time.ZoneId.systemDefault()
+                                    if (note.updatedAt.atZone(zone).toLocalDate() == java.time.LocalDate.now(zone)) {
+                                        android.text.format.DateFormat.getTimeFormat(context).format(updated)
+                                    } else {
+                                        android.text.format.DateFormat.getDateFormat(context).format(updated)
+                                    }
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                color = timestampTextColor,
+                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+                            )
+                        }
+                    }
                 }
             }
         }
     }
 }
+
+/** Fixed length, always present, so spring overshoot never reveals a hard text edge. */
+private fun Modifier.notePreviewBottomFade(height: androidx.compose.ui.unit.Dp): Modifier = this
+    .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+    .drawWithContent {
+        drawContent()
+        val fadeHeight = height.toPx().coerceAtMost(size.height)
+        if (fadeHeight > 0f) {
+            drawRect(
+                brush = Brush.verticalGradient(
+                    colorStops = arrayOf(0f to Color.White, .65f to Color.White.copy(alpha = .18f), 1f to Color.Transparent),
+                    startY = size.height - fadeHeight,
+                    endY = size.height,
+                ),
+                blendMode = BlendMode.DstIn,
+            )
+        }
+    }
+
+private fun Modifier.noteViewportTopFade(): Modifier = this
+    .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+    .drawWithContent {
+        drawContent()
+        drawRect(
+            brush = Brush.verticalGradient(
+                colors = listOf(Color.Transparent, Color.White),
+                startY = 0f,
+                endY = 12.dp.toPx(),
+            ),
+            blendMode = BlendMode.DstIn,
+        )
+    }
+
+private enum class SelectionPanel { NONE, RENAME, CATEGORY, SOURCE }
+private val LocalSelectionActionWidth = staticCompositionLocalOf { 40.dp }
+
+@Composable
+private fun NoteSelectionBar(
+    expansion: KgsSheetExpansion,
+    count: Int,
+    selectedTitles: List<String>,
+    selectedTitle: String,
+    allFavorite: Boolean,
+    moveStatus: EditorSaveStatus,
+    currentCategory: String?,
+    currentSource: SourceId?,
+    destination: LibraryDestination,
+    categories: List<String>,
+    sources: List<SourceChoice>,
+    onDismiss: () -> Unit,
+    onRename: (String) -> Unit,
+    onAction: (NoteSelectionOperation, String) -> Unit,
+    modifier: Modifier = Modifier,
+    interactive: Boolean = true,
+) {
+    var panel by remember { mutableStateOf(SelectionPanel.NONE) }
+    var deleteConfirmationOpen by remember { mutableStateOf(false) }
+    val motion = LocalKgsMotion.current
+    val focus = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    val renameFraction by animateFloatAsState(
+        if (count == 1 && destination != LibraryDestination.TRASH) 1f else 0f,
+        tween(260, easing = motion.standard), label = "Rename action availability",
+    )
+    var title by remember(selectedTitle) { mutableStateOf(selectedTitle) }
+    LaunchedEffect(expansion.expanded, panel) {
+        if (!expansion.expanded) {
+            focus.clearFocus()
+            keyboard?.hide()
+        }
+    }
+    LaunchedEffect(count, panel) {
+        expansion.available = panel != SelectionPanel.NONE && (panel != SelectionPanel.RENAME || count == 1)
+        if (!expansion.available) expansion.expanded = false
+    }
+    fun togglePanel(next: SelectionPanel) {
+        expansion.available = true
+        expansion.expanded = panel != next || !expansion.expanded
+        panel = next
+    }
+    BackHandler(enabled = interactive && expansion.expanded) { expansion.expanded = false }
+    CompositionLocalProvider(LocalKgsInlineSheet provides true) {
+        Surface(
+            color = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(20.dp),
+            shadowElevation = 0.dp,
+            modifier = modifier
+                .fillMaxWidth()
+                .testTag("note-selection-bar"),
+        ) {
+            Column(Modifier.padding(start = 14.dp, end = 14.dp, bottom = 16.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("$count selected", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                    KgsExpressiveSurface(
+                        onClick = onDismiss,
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        contentColor = MaterialTheme.colorScheme.primary,
+                        showIndication = false,
+                        restingCorners = KgsCornerRadii(16.dp),
+                        modifier = Modifier
+                            .width(72.dp)
+                            .height(40.dp)
+                            .semantics { contentDescription = "Done" },
+                    ) {
+                        Text("Done", style = MaterialTheme.typography.labelLarge)
+                    }
+                }
+                Spacer(Modifier.height(14.dp))
+                BoxWithConstraints(Modifier.fillMaxWidth()) {
+                    val slotWidth = maxWidth / ((if (destination == LibraryDestination.TRASH) 2f else 4f) + renameFraction)
+                    CompositionLocalProvider(LocalSelectionActionWidth provides slotWidth) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            // Interpolate slot widths together so removing an action
+                            // never changes the remaining gaps on the final frame.
+                            Box(
+                                Modifier.width(slotWidth * renameFraction).clipToBounds()
+                                    .graphicsLayer { alpha = renameFraction }
+                                    .then(if (renameFraction <= .001f) Modifier.clearAndSetSemantics {} else Modifier),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Box(Modifier.requiredWidth(slotWidth), contentAlignment = Alignment.Center) {
+                                    SelectionActionButton("Rename", { if (count == 1) togglePanel(SelectionPanel.RENAME) }) {
+                                        Icon(Icons.Default.Edit, contentDescription = null)
+                                    }
+                                }
+                            }
+                            if (destination == LibraryDestination.TRASH) {
+                                SelectionActionButton("Restore", { onAction(NoteSelectionOperation.RESTORE, "") }) {
+                                    Icon(Icons.Default.Refresh, contentDescription = null)
+                                }
+                                SelectionActionButton("Delete permanently", { deleteConfirmationOpen = true }) {
+                                    Icon(Icons.Default.Delete, contentDescription = null, tint = DestructiveRed)
+                                }
+                            } else {
+                                SelectionActionButton(if (allFavorite) "Unfavourite" else "Favourite", {
+                                    onAction(NoteSelectionOperation.FAVORITE, if (allFavorite) "remove" else "add")
+                                }) {
+                                    Icon(
+                                        if (allFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                                        contentDescription = null,
+                                        tint = FavoriteRed,
+                                    )
+                                }
+                                SelectionActionButton("Category", { togglePanel(SelectionPanel.CATEGORY) }) {
+                                    CategoryIcon(false, MaterialTheme.colorScheme.onSurface)
+                                }
+                                SelectionActionButton("Location", { togglePanel(SelectionPanel.SOURCE) }) {
+                                    SaveStatusGlyph(moveStatus)
+                                }
+                                SelectionActionButton("Delete", { deleteConfirmationOpen = true }) {
+                                    Icon(Icons.Default.Delete, contentDescription = null, tint = DestructiveRed)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        KgsExpandableSheetPanel(expansion) {
+            if (panel != SelectionPanel.NONE) {
+                AnimatedContent(
+                    targetState = panel,
+                    contentAlignment = Alignment.BottomStart,
+                    transitionSpec = {
+                        (fadeIn(tween(220, easing = motion.standard)) + slideInVertically(tween(300, easing = motion.standard)) { it / 8 }) togetherWith
+                            (fadeOut(tween(160, easing = motion.standard)) + slideOutVertically(tween(300, easing = motion.standard)) { it / 8 }) using
+                            SizeTransform(clip = true) { _, _ -> tween(300, easing = motion.standard) }
+                    },
+                    label = "Selected Note menu",
+                    modifier = Modifier.fillMaxWidth(),
+                ) { shownPanel ->
+                    when (shownPanel) {
+                        SelectionPanel.RENAME -> KgsSheetDialog(
+                            expanded = true,
+                            onDismissRequest = { expansion.expanded = false },
+                            title = { Text("Rename Note") },
+                            text = {
+                                KgsTextField(
+                                    value = title,
+                                    onValueChange = { title = it },
+                                    modifier = Modifier.testTag("rename-note-field"),
+                                )
+                            },
+                            confirmButton = {
+                                SelectionTextButton("Rename", primary = true, enabled = interactive && count == 1 && title.isNotBlank() && expansion.expanded && panel == shownPanel, onClick = {
+                                    onRename(title)
+                                    expansion.expanded = false
+                                })
+                            },
+                            dismissButton = { SelectionTextButton("Cancel", onClick = { expansion.expanded = false }) },
+                        )
+                        SelectionPanel.CATEGORY -> CategoryDialog(
+                            expanded = true,
+                            current = currentCategory,
+                            categories = categories,
+                            onSelect = { onAction(NoteSelectionOperation.CATEGORY, it); expansion.expanded = false },
+                            onDismiss = { expansion.expanded = false },
+                        )
+                        SelectionPanel.SOURCE -> SourceDialog(
+                            expanded = true,
+                            current = currentSource,
+                            sources = sources,
+                            onSelect = { onAction(NoteSelectionOperation.MOVE, it.value); expansion.expanded = false },
+                            onDismiss = { expansion.expanded = false },
+                        )
+                        SelectionPanel.NONE -> Spacer(Modifier.fillMaxWidth().height(0.dp))
+                    }
+                }
+            }
+        }
+    }
+    NoteDeleteConfirmationDialog(
+        expanded = deleteConfirmationOpen && interactive,
+        permanently = destination == LibraryDestination.TRASH,
+        titles = selectedTitles,
+        onConfirm = {
+            if (interactive) {
+                onAction(if (destination == LibraryDestination.TRASH) NoteSelectionOperation.DELETE else NoteSelectionOperation.TRASH, "")
+                onDismiss()
+            }
+            deleteConfirmationOpen = false
+        },
+        onDismiss = { deleteConfirmationOpen = false },
+    )
+}
+
+@Composable
+private fun SelectionTextButton(label: String, primary: Boolean = false, enabled: Boolean = true, onClick: () -> Unit) {
+    KgsExpressiveSurface(
+        onClick = onClick,
+        enabled = enabled,
+        color = if (primary) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+        contentColor = if (primary) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+        showIndication = false,
+        restingCorners = KgsCornerRadii(14.dp),
+        modifier = Modifier.height(44.dp).widthIn(min = 96.dp),
+    ) { Text(label, style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(horizontal = 18.dp)) }
+}
+
+@Composable
+private fun SelectionActionButton(
+    label: String,
+    onClick: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    Box(Modifier.width(LocalSelectionActionWidth.current), contentAlignment = Alignment.Center) {
+        KgsTooltip(label) {
+            KgsExpressiveSurface(
+                onClick = onClick,
+                color = Color.Transparent,
+                showIndication = false,
+                restingCorners = KgsCornerRadii(16.dp),
+                modifier = Modifier.size(40.dp)
+                    .semantics { contentDescription = label },
+            ) { content() }
+        }
+    }
+}
+
+@Composable
+private fun NoteDeleteConfirmationDialog(
+    expanded: Boolean,
+    permanently: Boolean,
+    titles: List<String>,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var displayed by remember { mutableStateOf(permanently to titles) }
+    if (expanded) displayed = permanently to titles
+    val shownPermanently = displayed.first
+    val shownTitles = displayed.second
+    KgsConfirmationDialog(expanded = expanded, onDismissRequest = onDismiss) {
+
+        Surface(
+            color = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(26.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                Box(
+                    Modifier.size(44.dp).background(DestructiveRed.copy(alpha = .1f), CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(Icons.Default.Delete, contentDescription = null, tint = DestructiveRed)
+                }
+                Text(
+                    if (shownPermanently) "Delete permanently?" else "Move to Trash?",
+                    style = MaterialTheme.typography.headlineSmall,
+                )
+                Text(
+                    if (shownPermanently) {
+                        if (shownTitles.size == 1) "This Note cannot be restored after deletion."
+                        else "These Notes cannot be restored after deletion."
+                    } else {
+                        if (shownTitles.size == 1) "You can restore this Note from Trash later."
+                        else "You can restore these Notes from Trash later."
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    "${shownTitles.size} ${if (shownTitles.size == 1) "Note" else "Notes"}",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = RoundedCornerShape(14.dp)) {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxWidth().heightIn(max = 180.dp).testTag("delete-note-titles"),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        items(shownTitles.size) { index ->
+                            Text(
+                                shownTitles[index].ifBlank { "Untitled Note" },
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.testTag("delete-note-title-$index"),
+                            )
+                        }
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp, Alignment.End),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TextButton(onClick = onDismiss) { Text("Cancel") }
+                    Button(
+                        onClick = onConfirm,
+                        colors = androidx.compose.material3.ButtonDefaults.buttonColors(containerColor = DestructiveRed),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                        modifier = Modifier.testTag("confirm-note-delete"),
+                    ) { Text(if (shownPermanently) "Delete" else "Move to Trash", maxLines = 1, style = MaterialTheme.typography.labelMedium) }
+                }
+            }
+        }
+    }
+}
+
 
 @Composable
 private fun EmptyLibrary(
@@ -2098,6 +2863,7 @@ private fun EmptyLibrary(
     destination: LibraryDestination,
     query: String,
     modifier: Modifier,
+    category: String? = null,
 ) {
     Box(modifier, contentAlignment = Alignment.Center) {
         Column(
@@ -2121,6 +2887,8 @@ private fun EmptyLibrary(
                     filter == LibraryFilter.FAVORITES -> "No favorites yet"
                     filter == LibraryFilter.LOCAL -> "No local notes"
                     filter == LibraryFilter.SERVER -> "No synced server notes"
+                    category == "" -> "No Notes without a Category"
+                    category != null -> "No Notes in this Category"
                     else -> "A quiet place for your thoughts"
                 },
                 style = MaterialTheme.typography.titleLarge,
@@ -2130,6 +2898,8 @@ private fun EmptyLibrary(
                     query.isNotBlank() -> "Try another search term."
                     destination == LibraryDestination.TRASH -> "Deleted notes stay recoverable here."
                     filter == LibraryFilter.SERVER -> "Synced notes from connected Sources appear here."
+                    category == "" -> "Notes without an assigned Category appear here."
+                    category != null -> "New Notes you create here will use this Category."
                     else -> "Create a note and it will be stored as portable Markdown."
                 },
                 style = MaterialTheme.typography.bodyMedium,
@@ -2140,19 +2910,26 @@ private fun EmptyLibrary(
 }
 
 @Composable
+@OptIn(ExperimentalSharedTransitionApi::class)
 private fun EditorPane(
     state: NotesUiState,
     note: Note,
     actions: NotesActions,
     showBack: Boolean,
     modifier: Modifier,
+    noteMorph: NoteMorph? = null,
+    stableLayoutScope: SharedTransitionScope? = noteMorph?.scope,
 ) {
+    val fallbackDock = remember { KgsSheetDock() }
+    val dock = LocalKgsSheetDock.current ?: fallbackDock
+    CompositionLocalProvider(LocalKgsSheetDock provides dock) {
     Column(
         modifier
             .background(MaterialTheme.colorScheme.surface)
+            .then(if (stableLayoutScope == null) Modifier else with(stableLayoutScope) { Modifier.skipToLookaheadSize() })
             .testTag("note-editor"),
     ) {
-        EditorHeader(state, note, actions, showBack)
+        EditorHeader(state, note, actions, showBack, noteMorph)
         if (note.state == NoteState.TRASHED) {
             TrashedNote(note, actions, Modifier.fillMaxSize())
         } else {
@@ -2162,10 +2939,26 @@ private fun EditorPane(
                 onMarkdownChange = actions.onContentChange,
                 onModeChange = actions.onEditorModeChange,
                 onAddImage = actions.onAddImage,
+                canAddImage = state.sources.firstOrNull { it.id == note.sourceId }?.supportsAttachments
+                    ?: (note.sourceId == LocalSourceId),
                 openManagedAttachment = actions.openManagedAttachment,
                 modifier = Modifier.fillMaxSize(),
+                bodyModifier = Modifier.noteMorphBounds(noteMorph, note.id, "body"),
+                richLoadingContent = {
+                    // An empty hint shares the editor's body metrics. Formatted
+                    // content is drawn only by the actual Rich Mode renderer.
+                    if (note.markdown.isBlank()) {
+                        var hintVisible by remember(note.id) { mutableStateOf(false) }
+                        LaunchedEffect(note.id) { hintVisible = true }
+                        val hintAlpha by animateFloatAsState(if (hintVisible) 1f else 0f, tween(180), label = "Empty Note hint")
+                        Text("Start writing…", style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 20.dp, vertical = 24.dp).graphicsLayer { alpha = hintAlpha })
+                    }
+                },
             )
         }
+    }
     }
 }
 
@@ -2175,19 +2968,26 @@ private fun EditorHeader(
     note: Note,
     actions: NotesActions,
     showBack: Boolean,
+    noteMorph: NoteMorph? = null,
 ) {
     var categoryDialogOpen by remember { mutableStateOf(false) }
     var sourceDialogOpen by remember { mutableStateOf(false) }
     var actionsMenuOpen by remember { mutableStateOf(false) }
+    var deleteConfirmationOpen by remember { mutableStateOf(false) }
+    val dismissSheets = rememberKgsDismissSheets()
+    fun toggleSheet(open: Boolean, setOpen: (Boolean) -> Unit) {
+        dismissSheets()
+        setOpen(!open)
+    }
     val statusTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
 
-    Column(modifier = Modifier.padding(start = 6.dp, top = statusTop + 2.dp, end = 6.dp, bottom = 2.dp)) {
+    Column(modifier = Modifier.kgsSheetControls(LocalKgsSheetDock.current).padding(start = 6.dp, top = statusTop + 2.dp, end = 6.dp, bottom = 2.dp)) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(1.dp),
+            horizontalArrangement = Arrangement.spacedBy(0.dp),
         ) {
             if (showBack) {
-                ExpressiveIconButton(label = "Back", onClick = actions.onCloseEditor) {
+                ExpressiveIconButton(label = "Back", onClick = actions.onCloseEditor, modifier = Modifier.zIndex(1f)) {
                     Icon(
                         Icons.AutoMirrored.Filled.ArrowBack,
                         contentDescription = "Back to Notes",
@@ -2195,45 +2995,30 @@ private fun EditorHeader(
                     )
                 }
             }
-            BasicTextField(
+            KgsNoteTitleField(
                 value = note.title,
                 onValueChange = actions.onRename,
-                singleLine = true,
-                textStyle = MaterialTheme.typography.titleLarge.copy(
-                    color = MaterialTheme.colorScheme.onSurface,
-                ),
-                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                textStyle = noteMorphTitleStyle(noteMorph, editor = true),
+                height = 40.dp,
                 modifier = Modifier
                     .weight(1f)
-                    .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
-                    .drawWithContent {
-                        drawContent()
-                        val fadeWidth = 30.dp.toPx()
-                        drawRect(
-                            brush = Brush.horizontalGradient(
-                                colorStops = arrayOf(
-                                    0f to Color.White,
-                                    ((size.width - fadeWidth) / size.width).coerceIn(0f, 1f) to Color.White,
-                                    1f to Color.Transparent,
-                                ),
-                            ),
-                            blendMode = BlendMode.DstIn,
-                        )
-                    },
+                    .editorTitleBackOverlap(if (showBack) 6.dp else 0.dp)
+                    .noteMorphBounds(noteMorph, note.id, "title")
+                    .testTag("editor-title"),
             )
             SaveStatusIndicator(
                 status = when {
-                    state.saving -> EditorSaveStatus.SAVING
+                    state.changingSource -> EditorSaveStatus.SYNCING
                     note.syncState == NoteSyncState.SYNCING -> EditorSaveStatus.SYNCING
-                    note.syncState == NoteSyncState.SYNCED -> EditorSaveStatus.SYNCED
-                    else -> EditorSaveStatus.SAVED_LOCALLY
+                    state.saving -> EditorSaveStatus.SAVING
+                    else -> noteSaveStatus(note.syncState)
                 },
-                onClick = { sourceDialogOpen = true },
+                onClick = { toggleSheet(sourceDialogOpen) { sourceDialogOpen = it } },
             )
             if (note.state != NoteState.TRASHED) {
                 KgsTooltip("Category") {
                     KgsExpressiveSurface(
-                        onClick = { categoryDialogOpen = true },
+                        onClick = { toggleSheet(categoryDialogOpen) { categoryDialogOpen = it } },
                         restingCorners = KgsCornerRadii(12.dp),
                         modifier = Modifier
                             .size(40.dp)
@@ -2248,7 +3033,7 @@ private fun EditorHeader(
                         CategoryIcon(
                             filled = note.category.isNotBlank(),
                             color = if (note.category.isNotBlank()) {
-                                MaterialTheme.colorScheme.primary
+                                LocalKgsAccentColors.current.focus
                             } else {
                                 MaterialTheme.colorScheme.onSurfaceVariant
                             },
@@ -2258,7 +3043,7 @@ private fun EditorHeader(
                 Box {
                     ExpressiveIconButton(
                         label = "More",
-                        onClick = { actionsMenuOpen = true },
+                        onClick = { toggleSheet(actionsMenuOpen) { actionsMenuOpen = it } },
                         selected = actionsMenuOpen,
                     ) {
                         Icon(
@@ -2267,16 +3052,10 @@ private fun EditorHeader(
                             tint = MaterialTheme.colorScheme.onSurface,
                         )
                     }
-                    val actionsMenuShape = RoundedCornerShape(20.dp)
-                    DropdownMenu(
+                    KgsBottomSheet(
                         expanded = actionsMenuOpen,
+                        title = "Note actions",
                         onDismissRequest = { actionsMenuOpen = false },
-                        offset = DpOffset(0.dp, 8.dp),
-                        shape = actionsMenuShape,
-                        containerColor = Color.White,
-                        tonalElevation = 0.dp,
-                        shadowElevation = 3.dp,
-                        modifier = Modifier.kgsMenuShadow(actionsMenuShape),
                     ) {
                         val favoriteLabel = if (note.favorite) "Unfavourite" else "Favourite"
                         KgsTooltip(favoriteLabel) {
@@ -2307,8 +3086,8 @@ private fun EditorHeader(
                                     )
                                 },
                                 onClick = {
-                                    actions.onMoveToTrash()
                                     actionsMenuOpen = false
+                                    deleteConfirmationOpen = true
                                 },
                             )
                         }
@@ -2318,41 +3097,56 @@ private fun EditorHeader(
         }
     }
 
-    if (categoryDialogOpen) {
-        CategoryDialog(
-            current = note.category,
-            categories = state.categories,
-            onSelect = {
-                actions.onCategoryChange(it)
-                categoryDialogOpen = false
-            },
-            onDismiss = { categoryDialogOpen = false },
-        )
-    }
-    if (sourceDialogOpen) {
-        SourceDialog(
-            current = note.sourceId,
-            sources = state.sources,
-            onSelect = {
-                actions.onSourceChange(it)
-                sourceDialogOpen = false
-            },
-            onDismiss = { sourceDialogOpen = false },
-        )
-    }
+    CategoryDialog(
+        expanded = categoryDialogOpen,
+        current = note.category,
+        categories = state.categories,
+        onSelect = {
+            actions.onCategoryChange(it)
+            categoryDialogOpen = false
+        },
+        onDismiss = { categoryDialogOpen = false },
+    )
+
+    SourceDialog(
+        expanded = sourceDialogOpen,
+        current = note.sourceId,
+        sources = state.sources,
+        onSelect = {
+            actions.onSourceChange(it)
+            sourceDialogOpen = false
+        },
+        onDismiss = { sourceDialogOpen = false },
+    )
+
+    NoteDeleteConfirmationDialog(
+        expanded = deleteConfirmationOpen,
+        permanently = false,
+        titles = listOf(note.title),
+        onConfirm = {
+            deleteConfirmationOpen = false
+            actions.onMoveToTrash()
+        },
+        onDismiss = { deleteConfirmationOpen = false },
+    )
+
 }
 
 @Composable
 private fun CategoryDialog(
-    current: String,
+    expanded: Boolean,
+    current: String?,
     categories: List<String>,
     onSelect: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    var query by rememberSaveable { mutableStateOf("") }
-    val candidate = query.trim()
-    val createCategory = rememberKgsHapticClick { onSelect(candidate) }
-    Dialog(onDismissRequest = onDismiss) {
+    KgsBottomSheet(expanded = expanded, onDismissRequest = onDismiss, title = "Choose Category") {
+        var query by rememberSaveable { mutableStateOf("") }
+        var creating by rememberSaveable { mutableStateOf(false) }
+        var name by rememberSaveable { mutableStateOf("") }
+        val nameFocus = remember { FocusRequester() }
+        val candidate = query.trim()
+
         Surface(
             color = MaterialTheme.colorScheme.surface,
             shape = RoundedCornerShape(26.dp),
@@ -2364,61 +3158,85 @@ private fun CategoryDialog(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
                 modifier = Modifier.padding(20.dp),
             ) {
-                Text("Choose Category", style = MaterialTheme.typography.titleLarge)
-                KgsSearchField(
-                    value = query,
-                    onValueChange = { query = it },
-                    placeholder = "Search Categories",
-                    containerColor = MaterialTheme.colorScheme.background,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("category-search"),
-                )
-                LazyColumn(
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                    modifier = Modifier.heightIn(max = 320.dp),
-                ) {
-                    item {
-                        ModalChoiceRow(
-                            label = "No Category",
-                            selected = current.isBlank(),
-                            onClick = { onSelect("") },
-                            icon = {
-                                CategoryIcon(false, MaterialTheme.colorScheme.onSurfaceVariant)
-                            },
-                        )
+                if (creating) {
+                    LaunchedEffect(Unit) { nameFocus.requestFocus() }
+                    Text("New Category", style = MaterialTheme.typography.titleLarge)
+                    KgsTextField(
+                        value = name,
+                        onValueChange = { name = it },
+                        placeholder = "Category name",
+                        containerColor = MaterialTheme.colorScheme.background,
+                        modifier = Modifier.fillMaxWidth().focusRequester(nameFocus).testTag("new-category-name"),
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(16.dp), modifier = Modifier.fillMaxWidth()) {
+                        TextButton(onClick = rememberKgsHapticClick { creating = false }) { Text("Cancel") }
+                        Spacer(Modifier.weight(1f))
+                        Button(
+                            enabled = name.isNotBlank() && categories.none { it.equals(name.trim(), ignoreCase = true) },
+                            onClick = rememberKgsHapticClick { onSelect(name.trim()) },
+                        ) { Text("Create") }
                     }
-                    items(
-                        items = categories.filter { it.contains(candidate, ignoreCase = true) },
-                        key = { it },
-                    ) { category ->
-                        ModalChoiceRow(
-                            label = category,
-                            selected = category == current,
-                            onClick = { onSelect(category) },
-                            icon = {
-                                CategoryIcon(
-                                    filled = category == current,
-                                    color = if (category == current) {
-                                        MaterialTheme.colorScheme.primary
-                                    } else {
-                                        MaterialTheme.colorScheme.onSurfaceVariant
-                                    },
-                                )
-                            },
-                        )
-                    }
-                }
-                KgsTooltip("Create Category") {
-                    Button(
-                        enabled = candidate.isNotEmpty() && categories.none { it.equals(candidate, ignoreCase = true) },
-                        onClick = createCategory,
-                        shape = RoundedCornerShape(13.dp),
-                        modifier = Modifier.fillMaxWidth(),
+                } else {
+                    Text("Choose Category", style = MaterialTheme.typography.titleLarge)
+                    KgsSearchField(
+                        value = query,
+                        onValueChange = { query = it },
+                        placeholder = "Search Categories",
+                        containerColor = MaterialTheme.colorScheme.background,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("category-search"),
+                    )
+                    LazyColumn(
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                        modifier = Modifier.heightIn(max = (LocalKgsSheetContentHeight.current - 220.dp).coerceAtLeast(120.dp)),
                     ) {
-                        Icon(Icons.Default.Add, contentDescription = null)
-                        Spacer(Modifier.width(8.dp))
-                        Text(if (candidate.isBlank()) "New Category" else "Create “$candidate”")
+                        item {
+                            ModalChoiceRow(
+                                label = "No Category",
+                                selected = current?.isBlank() == true,
+                                onClick = { onSelect("") },
+                                icon = {
+                                    CategoryIcon(false, MaterialTheme.colorScheme.onSurfaceVariant)
+                                },
+                            )
+                        }
+                        items(
+                            items = (categories + listOfNotNull(current)).filter(String::isNotBlank).distinct()
+                                .filter { it.contains(candidate, ignoreCase = true) },
+                            key = { it },
+                        ) { category ->
+                            ModalChoiceRow(
+                                label = category,
+                                selected = category == current,
+                                onClick = { onSelect(category) },
+                                icon = {
+                                    CategoryIcon(
+                                        filled = category == current,
+                                        color = if (category == current) {
+                                            LocalKgsAccentColors.current.focus
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                        },
+                                    )
+                                },
+                            )
+                        }
+                    }
+                    KgsTooltip("Create Category") {
+                        Button(
+                            enabled = candidate.isBlank() || categories.none { it.equals(candidate, ignoreCase = true) },
+                            onClick = rememberKgsHapticClick {
+                                if (candidate.isNotBlank()) onSelect(candidate)
+                                else { name = ""; creating = true }
+                            },
+                            shape = RoundedCornerShape(13.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Icon(Icons.Default.Add, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text(if (candidate.isBlank()) "New Category" else "Create “$candidate”")
+                        }
                     }
                 }
             }
@@ -2427,13 +3245,16 @@ private fun CategoryDialog(
 }
 
 @Composable
-private fun SourceDialog(
-    current: SourceId,
+internal fun SourceDialog(
+    expanded: Boolean,
+    current: SourceId?,
     sources: List<SourceChoice>,
     onSelect: (SourceId) -> Unit,
     onDismiss: () -> Unit,
+    explanation: String = "The Working Copy stays available offline.",
 ) {
-    Dialog(onDismissRequest = onDismiss) {
+    KgsBottomSheet(expanded = expanded, onDismissRequest = onDismiss, title = "Save Note to") {
+
         Surface(
             color = MaterialTheme.colorScheme.surface,
             shape = RoundedCornerShape(26.dp),
@@ -2447,7 +3268,7 @@ private fun SourceDialog(
             ) {
                 Text("Save Note to", style = MaterialTheme.typography.titleLarge)
                 Text(
-                    "The Working Copy stays available offline.",
+                    explanation,
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -2478,13 +3299,15 @@ private fun ModalChoiceRow(
     onClick: () -> Unit,
     icon: @Composable () -> Unit,
 ) {
+    val contentColor = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
     KgsTooltip(label) {
         KgsExpressiveSurface(
             onClick = onClick,
             color = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
             contentColor = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
             restingCorners = KgsCornerRadii(14.dp),
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth().testTag("single-choice-$label")
+                .semantics { role = Role.RadioButton; this.selected = selected },
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -2493,65 +3316,14 @@ private fun ModalChoiceRow(
             ) {
                 Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) { icon() }
                 Text(label, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
-                if (selected) {
-                    Icon(
-                        Icons.Default.Check,
-                        contentDescription = "Selected",
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(20.dp),
-                    )
+                Canvas(Modifier.size(20.dp)) {
+                    val indicator = if (selected) contentColor else contentColor.copy(alpha = .45f)
+                    drawCircle(indicator, radius = size.minDimension / 2 - 1.dp.toPx(), style = Stroke(2.dp.toPx()))
+                    if (selected) drawCircle(indicator, radius = 5.dp.toPx())
                 }
             }
         }
     }
-}
-
-@Composable
-private fun KgsSearchField(
-    value: String,
-    onValueChange: (String) -> Unit,
-    placeholder: String,
-    modifier: Modifier = Modifier,
-    interactionSource: MutableInteractionSource = remember { MutableInteractionSource() },
-    containerColor: Color = Color.White,
-) {
-    val focused by interactionSource.collectIsFocusedAsState()
-    val haptics = LocalHapticFeedback.current
-    LaunchedEffect(interactionSource, haptics) {
-        interactionSource.interactions.collect { interaction ->
-            if (interaction is PressInteraction.Press) {
-                haptics.performHapticFeedback(HapticFeedbackType.VirtualKey)
-            }
-        }
-    }
-    val motion = LocalKgsMotion.current
-    val corner by animateDpAsState(
-        targetValue = if (focused) 28.dp else 12.dp,
-        animationSpec = motion.defaultSpatialSpec(),
-        label = "$placeholder search shape",
-    )
-    val borderColor by animateColorAsState(
-        targetValue = if (focused) MaterialTheme.colorScheme.primary else Color.Transparent,
-        animationSpec = motion.defaultEffectsSpec(),
-        label = "$placeholder search border",
-    )
-    val shape = RoundedCornerShape(corner)
-    TextField(
-        value = value,
-        onValueChange = onValueChange,
-        placeholder = { Text(placeholder) },
-        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-        singleLine = true,
-        interactionSource = interactionSource,
-        shape = shape,
-        colors = TextFieldDefaults.colors(
-            focusedContainerColor = containerColor,
-            unfocusedContainerColor = containerColor,
-            focusedIndicatorColor = Color.Transparent,
-            unfocusedIndicatorColor = Color.Transparent,
-        ),
-        modifier = modifier.border(2.dp, borderColor, shape),
-    )
 }
 
 private enum class EditorSaveStatus(val description: String) {
@@ -2559,17 +3331,41 @@ private enum class EditorSaveStatus(val description: String) {
     SAVED_LOCALLY("Saved locally"),
     SYNCING("Saved locally, syncing"),
     SYNCED("Synced"),
+    NEEDS_ATTENTION("Needs attention"),
+}
+
+private fun noteSaveStatus(syncState: NoteSyncState): EditorSaveStatus = when (syncState) {
+    NoteSyncState.SYNCING -> EditorSaveStatus.SYNCING
+    NoteSyncState.NEEDS_ATTENTION -> EditorSaveStatus.NEEDS_ATTENTION
+    NoteSyncState.SYNCED -> EditorSaveStatus.SYNCED
+    else -> EditorSaveStatus.SAVED_LOCALLY
 }
 
 @Composable
 private fun SaveStatusIndicator(status: EditorSaveStatus, onClick: () -> Unit) {
+    KgsTooltip("Location") {
+        KgsExpressiveSurface(
+            onClick = onClick,
+            restingCorners = KgsCornerRadii(19.dp),
+            modifier = Modifier
+                .size(38.dp)
+                .semantics { contentDescription = status.description },
+        ) {
+            SaveStatusGlyph(status)
+        }
+    }
+}
+
+@Composable
+private fun SaveStatusGlyph(status: EditorSaveStatus) {
     val motion = LocalKgsMotion.current
     val blue = Color(0xFF2878D0)
     val orange = Color(0xFFF28C28)
     val green = Color(0xFF2E9B62)
+    val loading = status == EditorSaveStatus.SAVING || status == EditorSaveStatus.SYNCING
     val color by animateColorAsState(
         targetValue = when (status) {
-            EditorSaveStatus.SAVING -> orange
+            EditorSaveStatus.SAVING, EditorSaveStatus.NEEDS_ATTENTION -> orange
             EditorSaveStatus.SAVED_LOCALLY, EditorSaveStatus.SYNCING -> blue
             EditorSaveStatus.SYNCED -> green
         },
@@ -2577,12 +3373,12 @@ private fun SaveStatusIndicator(status: EditorSaveStatus, onClick: () -> Unit) {
         label = "save status color",
     )
     val glyphProgress by animateFloatAsState(
-        targetValue = if (status == EditorSaveStatus.SAVING) 0f else 1f,
+        targetValue = if (loading) 0f else 1f,
         animationSpec = motion.defaultSpatialSpec(),
         label = "save status glyph",
     )
     val sweep by animateFloatAsState(
-        targetValue = if (status == EditorSaveStatus.SAVING) 270f else 360f,
+        targetValue = if (loading) 270f else 360f,
         animationSpec = motion.defaultSpatialSpec(),
         label = "save status sweep",
     )
@@ -2594,30 +3390,22 @@ private fun SaveStatusIndicator(status: EditorSaveStatus, onClick: () -> Unit) {
         label = "saving rotation",
     )
 
-    KgsTooltip(status.description) {
-        KgsExpressiveSurface(
-            onClick = onClick,
-            restingCorners = KgsCornerRadii(19.dp),
-            modifier = Modifier
-                .size(38.dp)
-                .semantics { contentDescription = status.description },
-        ) {
-            Canvas(Modifier.size(24.dp)) {
-                val stroke = size.minDimension * .09f
-                val inset = stroke / 2
-                rotate(if (status == EditorSaveStatus.SAVING) rotation else 0f) {
-                    drawArc(
-                        color = color,
-                        startAngle = -90f,
-                        sweepAngle = sweep,
-                        useCenter = false,
-                        topLeft = Offset(inset, inset),
-                        size = Size(size.width - stroke, size.height - stroke),
-                        style = Stroke(width = stroke, cap = StrokeCap.Round),
-                    )
-                }
-                when (status) {
-            EditorSaveStatus.SAVING -> Unit
+    Canvas(Modifier.size(24.dp)) {
+        val stroke = size.minDimension * .09f
+        val inset = stroke / 2
+        rotate(if (loading) rotation else 0f) {
+            drawArc(
+                color = color,
+                startAngle = -90f,
+                sweepAngle = sweep,
+                useCenter = false,
+                topLeft = Offset(inset, inset),
+                size = Size(size.width - stroke, size.height - stroke),
+                style = Stroke(width = stroke, cap = StrokeCap.Round),
+            )
+        }
+        when (status) {
+            EditorSaveStatus.SAVING, EditorSaveStatus.SYNCING -> Unit
             EditorSaveStatus.SAVED_LOCALLY -> {
                 val glyph = blue.copy(alpha = glyphProgress.coerceIn(0f, 1f))
                 val scale = .72f + .28f * glyphProgress
@@ -2632,10 +3420,9 @@ private fun SaveStatusIndicator(status: EditorSaveStatus, onClick: () -> Unit) {
                 )
                 drawCircle(glyph, stroke * .32f, Offset(size.width * .5f, size.height * (.5f + .19f * scale)))
             }
-            EditorSaveStatus.SYNCING -> {
-                drawLine(orange, Offset(size.width * .5f, size.height * .72f), Offset(size.width * .5f, size.height * .3f), stroke, StrokeCap.Round)
-                drawLine(orange, Offset(size.width * .5f, size.height * .3f), Offset(size.width * .32f, size.height * .48f), stroke, StrokeCap.Round)
-                drawLine(orange, Offset(size.width * .5f, size.height * .3f), Offset(size.width * .68f, size.height * .48f), stroke, StrokeCap.Round)
+            EditorSaveStatus.NEEDS_ATTENTION -> {
+                drawLine(color, Offset(size.width * .5f, size.height * .3f), Offset(size.width * .5f, size.height * .55f), stroke, StrokeCap.Round)
+                drawCircle(color, stroke * .6f, Offset(size.width * .5f, size.height * .7f))
             }
             EditorSaveStatus.SYNCED -> {
                 val glyph = green.copy(alpha = glyphProgress.coerceIn(0f, 1f))
@@ -2644,10 +3431,9 @@ private fun SaveStatusIndicator(status: EditorSaveStatus, onClick: () -> Unit) {
                     cubicTo(size.width * .13f, size.height * .64f, size.width * .13f, size.height * .44f, size.width * .3f, size.height * .43f)
                     cubicTo(size.width * .36f, size.height * .22f, size.width * .66f, size.height * .24f, size.width * .7f, size.height * .46f)
                     cubicTo(size.width * .86f, size.height * .47f, size.width * .86f, size.height * .65f, size.width * .72f, size.height * .65f)
+                    close()
                 }
                 drawPath(path, glyph, style = Stroke(stroke * .78f, cap = StrokeCap.Round))
-            }
-                }
             }
         }
     }
@@ -2688,12 +3474,14 @@ private fun CategoryIcon(filled: Boolean, color: Color) {
 
 @Composable
 private fun TrashedNote(note: Note, actions: NotesActions, modifier: Modifier) {
+    var deleteConfirmationOpen by remember { mutableStateOf(false) }
     Column(
         verticalArrangement = Arrangement.spacedBy(18.dp),
-        modifier = modifier.padding(24.dp),
+        modifier = modifier.verticalScroll(rememberScrollState()).padding(24.dp),
     ) {
         Surface(
             color = MaterialTheme.colorScheme.surfaceVariant,
+            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
             shape = MaterialTheme.shapes.medium,
         ) {
             Text(
@@ -2702,16 +3490,17 @@ private fun TrashedNote(note: Note, actions: NotesActions, modifier: Modifier) {
                 modifier = Modifier.padding(18.dp),
             )
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             KgsTooltip("Restore") {
                 KgsExpressiveSurface(
                     onClick = actions.onRestore,
                     color = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
                     restingCorners = KgsCornerRadii(20.dp),
+                    modifier = Modifier.fillMaxWidth().height(48.dp).testTag("trash-restore-action"),
                 ) {
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
                     ) {
                         Icon(Icons.Default.Refresh, contentDescription = null)
                         Text("Restore", style = MaterialTheme.typography.labelLarge)
@@ -2720,26 +3509,39 @@ private fun TrashedNote(note: Note, actions: NotesActions, modifier: Modifier) {
             }
             KgsTooltip("Delete Permanently") {
                 KgsExpressiveSurface(
-                    onClick = actions.onDeletePermanently,
+                    onClick = { deleteConfirmationOpen = true },
                     color = MaterialTheme.colorScheme.errorContainer,
                     contentColor = MaterialTheme.colorScheme.onErrorContainer,
                     restingCorners = KgsCornerRadii(20.dp),
+                    modifier = Modifier.fillMaxWidth().height(48.dp).testTag("trash-delete-action"),
                 ) {
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
                     ) {
                         Icon(Icons.Default.Delete, contentDescription = null, tint = DestructiveRed)
                         Text(
                             "Delete permanently",
                             style = MaterialTheme.typography.labelLarge,
                             color = DestructiveRed,
+                            maxLines = 1,
+                            softWrap = false,
                         )
                     }
                 }
             }
         }
     }
+    NoteDeleteConfirmationDialog(
+        expanded = deleteConfirmationOpen,
+        permanently = true,
+        titles = listOf(note.title),
+        onConfirm = {
+            deleteConfirmationOpen = false
+            actions.onDeletePermanently()
+        },
+        onDismiss = { deleteConfirmationOpen = false },
+    )
+
 }
 
 @Composable
@@ -2780,4 +3582,20 @@ private val pendingSyncStates = setOf(
 )
 
 private val FavoriteRed = Color(0xFFD13B4B)
+
+/** Favorite gestures share the Favorites filter's red palette in either app theme. */
+@Composable
+internal fun favoriteContainerColor(): Color = if (LocalKgsDarkTheme.current) {
+    lerp(MaterialTheme.colorScheme.surface, Color(0xFFFF8A9A), .18f)
+} else Color(0xFFFFE9E9)
 private val DestructiveRed = Color(0xFFBA1A1A)
+
+private fun Modifier.editorTitleBackOverlap(overlap: androidx.compose.ui.unit.Dp) = layout { measurable, constraints ->
+    val extra = overlap.roundToPx()
+    val placeable = measurable.measure(androidx.compose.ui.unit.Constraints(
+        minWidth = constraints.minWidth + extra,
+        maxWidth = if (constraints.hasBoundedWidth) constraints.maxWidth + extra else androidx.compose.ui.unit.Constraints.Infinity,
+        minHeight = constraints.minHeight, maxHeight = constraints.maxHeight,
+    ))
+    layout(placeable.width - extra, placeable.height) { placeable.placeRelative(-extra, 0) }
+}

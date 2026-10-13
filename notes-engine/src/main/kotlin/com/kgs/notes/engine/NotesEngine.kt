@@ -33,6 +33,8 @@ data class Note(
     val createdAt: Instant,
     val updatedAt: Instant,
     val trashedAt: Instant? = null,
+    /** Device-local prominence; independent of the Source Favorite flag. */
+    val pinned: Boolean = false,
 )
 
 data class NoteSummary(
@@ -45,6 +47,9 @@ data class NoteSummary(
     val favorite: Boolean,
     val createdAt: Instant,
     val updatedAt: Instant,
+    /** Bounded canonical Markdown used only to render a library card preview. */
+    val previewMarkdown: String = snippet,
+    val pinned: Boolean = false,
 )
 
 data class LibrarySnapshot(
@@ -83,14 +88,21 @@ interface NotesEngine {
 
     suspend fun attachSource(source: Source)
 
+    /** Removes a Source from this device after all Working Copies are confirmed by it. */
+    suspend fun removeSource(id: SourceId)
+
+    /** Attempts every connected Source, retaining unavailable Working Copies; reports failures after the other Sources finish. */
     suspend fun refreshSources()
 
     suspend fun synchronize(id: NoteId)
 
-    /** Moves the durable Note ownership to another Source and returns its resulting local identity. */
+    /** Moves durable Note ownership after destination confirmation, preserving its local identity. */
     suspend fun moveToSource(id: NoteId, sourceId: SourceId): NoteId
 
     suspend fun note(id: NoteId): Note?
+
+    /** Keeps an editor's displayed base stable until [close], so external refreshes cannot hide concurrent changes. */
+    suspend fun openEditingSession(id: NoteId): Note? = note(id)
 
     suspend fun updateContent(id: NoteId, markdown: String)
 
@@ -108,6 +120,8 @@ interface NotesEngine {
     fun openManagedAttachment(id: AttachmentId): InputStream?
 
     suspend fun toggleFavorite(id: NoteId)
+
+    suspend fun togglePin(id: NoteId) { throw UnsupportedOperationException("Pinning is unavailable") }
 
     suspend fun moveToTrash(id: NoteId)
 

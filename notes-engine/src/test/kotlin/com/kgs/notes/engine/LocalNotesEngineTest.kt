@@ -16,6 +16,43 @@ import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.io.TempDir
 
 class LocalNotesEngineTest {
+    @Test
+    fun `pins survive restart and Trash Restore without changing content or Favorite`() = runBlocking {
+        val engine: NotesEngine = LocalNotesEngine.open(root)
+        val id = engine.createDraft()
+        engine.updateContent(id, "Preserved Markdown")
+        val before = assertNotNull(engine.note(id))
+        engine.togglePin(id)
+        assertTrue(engine.library.value.active.single().pinned)
+        engine.moveToTrash(id)
+        val reopened: NotesEngine = LocalNotesEngine.open(root)
+        reopened.restore(id)
+        assertTrue(assertNotNull(reopened.note(id)).pinned)
+        assertEquals(before.markdown, reopened.note(id)?.markdown)
+        assertEquals(before.favorite, reopened.note(id)?.favorite)
+        reopened.togglePin(id)
+        assertEquals(false, LocalNotesEngine.open(root).note(id)?.pinned)
+    }
+
+    @Test
+    fun `a renamed one line Note still includes its content in the library preview`() = runBlocking {
+        val engine: NotesEngine = LocalNotesEngine.open(root)
+        val id = engine.createDraft()
+        engine.updateContent(id, "The actual content")
+        engine.rename(id, "A different title")
+        assertEquals("The actual content", engine.library.value.active.single().previewMarkdown)
+    }
+    @Test
+    fun `library previews retain more content for cards without replacing canonical Markdown`() = runBlocking {
+        val engine: NotesEngine = LocalNotesEngine.open(root)
+        val id = engine.createDraft()
+        val markdown = (1..100).joinToString("\n") { "Line $it with preview content" }
+        engine.updateContent(id, markdown)
+        val preview = engine.library.value.active.single().previewMarkdown
+        assertTrue(preview.contains("Line 12 with preview content"))
+        assertTrue(preview.length <= 4096)
+        assertEquals(markdown, engine.note(id)?.markdown)
+    }
     @TempDir
     lateinit var root: Path
 
@@ -40,7 +77,7 @@ class LocalNotesEngineTest {
         assertEquals(markdown, reopened.markdown)
 
         val markdownFiles = Files.walk(root).use { paths ->
-            paths.filter { it.extension == "md" }.toList()
+            paths.iterator().asSequence().filter { it.extension == "md" }.toList()
         }
         assertEquals(1, markdownFiles.size)
         assertEquals(markdown, markdownFiles.single().readText())
@@ -57,7 +94,7 @@ class LocalNotesEngineTest {
         assertTrue(engine.library.value.active.isEmpty())
         assertTrue(engine.library.value.trash.isEmpty())
         val durableFiles = Files.walk(root).use { paths ->
-            paths.filter { Files.isRegularFile(it) }.toList()
+            paths.iterator().asSequence().filter { Files.isRegularFile(it) }.toList()
         }
         assertTrue(durableFiles.isEmpty())
     }
@@ -90,7 +127,7 @@ class LocalNotesEngineTest {
         }
 
         val markdownFiles = Files.walk(root).use { paths ->
-            paths.filter { it.extension == "md" }.map { it.fileName.toString() }.sorted().toList()
+            paths.iterator().asSequence().filter { it.extension == "md" }.map { it.fileName.toString() }.sorted().toList()
         }
         assertEquals(listOf("Reading list (2).md", "Reading list.md"), markdownFiles)
     }
