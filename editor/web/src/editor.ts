@@ -5,6 +5,7 @@ import TaskItem from '@tiptap/extension-task-item'
 import TaskList from '@tiptap/extension-task-list'
 import { Markdown } from '@tiptap/markdown'
 import StarterKit from '@tiptap/starter-kit'
+import { preservingMarked, SourceBlock, SourceFootnoteReference, SourceHtmlBlock, SourceHtmlInline } from './source-capsules'
 import './style.css'
 
 declare global {
@@ -14,7 +15,8 @@ declare global {
       load(markdown: string): void
       markdown(): string
       setDarkMode(enabled: boolean): void
-      run(command: string): string[]
+      run(command: string): void
+      focus(): void
     }
   }
 }
@@ -162,6 +164,7 @@ const attachmentImage = Image.extend({
 let originalMarkdown = ''
 let dirty = false
 let suppressUpdates = false
+let loadedSuccessfully = true
 
 const editor = new Editor({
   element: document.querySelector('#editor') as HTMLElement,
@@ -171,7 +174,12 @@ const editor = new Editor({
     TaskList,
     TaskItem.configure({ nested: true }),
     attachmentImage,
+    SourceHtmlBlock,
+    SourceHtmlInline,
+    SourceBlock,
+    SourceFootnoteReference,
     Markdown.configure({
+      marked: preservingMarked(),
       markedOptions: { gfm: true, breaks: false, pedantic: false },
       indentation: { style: 'space', size: 2 },
     }),
@@ -190,8 +198,35 @@ const editor = new Editor({
     dirty = true
     post({ type: 'changed', markdown: editor.getMarkdown() })
   },
-  onTransaction: ({ editor: currentEditor }) => postActiveFormatting(currentEditor),
+  onTransaction: ({ editor: currentEditor }) => {
+    if (currentEditor.isFocused) postActiveFormatting(currentEditor)
+  },
 })
+
+// Android blurs contenteditable when a blank page margin receives the tap.
+// Preserve focus on pointer down, then move the caret only for a real tap;
+// vertical drags still belong to the browser's normal scrolling gesture.
+const paper = document.querySelector('.paper') as HTMLElement
+let blankTap: { id: number; x: number; y: number } | null = null
+paper.addEventListener('pointerdown', event => {
+  const target = event.target as HTMLElement
+  const paragraph = target.closest('p')
+  const emptyParagraph = paragraph?.textContent === '' && !paragraph.querySelector('img, input, video')
+  if (target !== paper && target !== editor.view.dom && target !== editor.options.element && !emptyParagraph) return
+  blankTap = { id: event.pointerId, x: event.clientX, y: event.clientY }
+  event.preventDefault()
+})
+paper.addEventListener('pointerup', event => {
+  const tap = blankTap
+  blankTap = null
+  if (!tap || tap.id !== event.pointerId || Math.hypot(event.clientX - tap.x, event.clientY - tap.y) > 8) return
+  const position = editor.view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos ?? 'end'
+  editor.commands.focus(position, { scrollIntoView: false })
+})
+paper.addEventListener('pointermove', event => {
+  if (blankTap && Math.hypot(event.clientX - blankTap.x, event.clientY - blankTap.y) > 8) blankTap = null
+})
+paper.addEventListener('pointercancel', () => { blankTap = null })
 
 function post(payload: Record<string, unknown>) {
   window.KgsNotesEditor?.postMessage(JSON.stringify(payload))
@@ -220,13 +255,21 @@ function activeFormatting(currentEditor: Editor = editor) {
 }
 
 function load(markdown: string) {
-  if (markdown === exactMarkdown()) return
+  if (loadedSuccessfully && markdown === exactMarkdown()) return
   originalMarkdown = markdown
   dirty = false
   suppressUpdates = true
-  editor.commands.setContent(markdown, { contentType: 'markdown', emitUpdate: false })
-  suppressUpdates = false
-  postActiveFormatting()
+  try {
+    loadedSuccessfully = editor.commands.setContent(markdown, { contentType: 'markdown', emitUpdate: false })
+    if (!loadedSuccessfully) post({ type: 'fallback' })
+    else postActiveFormatting()
+  } catch {
+    loadedSuccessfully = false
+    // Never forward parser exceptions or Note contents through diagnostic messages.
+    post({ type: 'fallback' })
+  } finally {
+    suppressUpdates = false
+  }
 }
 
 function setDarkMode(enabled: boolean) {
@@ -259,8 +302,11 @@ function run(command: string) {
   // that frame lets the later focus transaction clear it again.
   editor.commands.focus()
   window.requestAnimationFrame(() => execute(command))
-  return activeFormatting()
 }
 
-window.kgsEditor = { load, markdown: exactMarkdown, setDarkMode, run }
+function focus() {
+  editor.view.focus()
+}
+
+window.kgsEditor = { load, markdown: exactMarkdown, setDarkMode, run, focus }
 post({ type: 'ready' })

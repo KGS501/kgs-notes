@@ -63,7 +63,9 @@ class HttpNextcloudNotesApi(
     }
 
     override suspend fun notes(): List<RemoteNote> = withContext(Dispatchers.IO) {
-        val result = mutableListOf<RemoteNote>()
+        val result = linkedMapOf<Long, RemoteNote>()
+        val referencedIds = linkedSetOf<Long>()
+        val cursors = hashSetOf<String>()
         var cursor: String? = null
         var chunks = 0
         do {
@@ -74,15 +76,27 @@ class HttpNextcloudNotesApi(
             val request = authenticatedRequest(endpointBuilder.build()).get().build()
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) throw NextcloudApiException(response.code)
-                result += parseNotes(response.body.string())
-                cursor = response.header("X-Notes-Chunk-Cursor")
+                parseNotes(response.body.string()).forEach { element ->
+                    val id = element.requiredLong("id")
+                    referencedIds += id
+                    // The terminal chunk also includes id-only references to
+                    // Notes returned by preceding chunks. Keep their full data.
+                    if (element.keys != setOf("id")) result[id] = parseNote(element)
+                }
+                cursor = response.header("X-Notes-Chunk-Cursor")?.takeIf(String::isNotBlank)
+                if (cursor != null && !cursors.add(requireNotNull(cursor))) {
+                    throw NextcloudConnectionException(NextcloudConnectionFailure.INVALID_RESPONSE)
+                }
             }
             chunks += 1
             if (chunks > MAX_CHUNKS) {
                 throw NextcloudConnectionException(NextcloudConnectionFailure.INVALID_RESPONSE)
             }
         } while (cursor != null)
-        result
+        // An id-only record must never silently remove a Note from a snapshot.
+        // If the server did not include its full data, obtain it explicitly.
+        referencedIds.filterNot(result::containsKey).forEach { id -> result[id] = note(id) }
+        result.values.toList()
     }
 
     override suspend fun note(id: Long): RemoteNote = withContext(Dispatchers.IO) {
@@ -104,7 +118,13 @@ class HttpNextcloudNotesApi(
     ): RemoteNote = withContext(Dispatchers.IO) {
         val endpoint = requireNotNull(serverUrl.resolve("index.php/apps/notes/api/v1/notes/$id"))
         val request = authenticatedRequest(endpoint)
-            .header("If-Match", expectedEtag)
+            // Notes returns an unquoted JSON token, but HTTP conditional writes
+            // compare quoted entity tags. Sending the token raw yields HTTP 412.
+            .header("If-Match", if (expectedEtag.startsWith('"') && expectedEtag.endsWith('"')) {
+                expectedEtag
+            } else {
+                "\"$expectedEtag\""
+            })
             .put(note.requestBody())
             .build()
         parseNote(executeObject(request))
@@ -146,13 +166,17 @@ class HttpNextcloudNotesApi(
         parseElement(response.body.string()).jsonObject
     }
 
-    private fun parseNotes(value: String): List<RemoteNote> {
+    private fun parseNotes(value: String): List<JsonObject> {
         val notes = try {
             parseElement(value).jsonArray
         } catch (failure: Exception) {
             throw NextcloudConnectionException(NextcloudConnectionFailure.INVALID_RESPONSE, failure)
         }
-        return notes.map(::parseNote)
+        return try {
+            notes.map { it.jsonObject }
+        } catch (failure: Exception) {
+            throw NextcloudConnectionException(NextcloudConnectionFailure.INVALID_RESPONSE, failure)
+        }
     }
 
     private fun parseNote(element: kotlinx.serialization.json.JsonElement): RemoteNote {
@@ -189,7 +213,7 @@ class HttpNextcloudNotesApi(
 
     private fun JsonObject.optionalString(name: String): String = get(name)?.jsonPrimitive?.content.orEmpty()
 
-    private fun JsonObject.requiredLong(name: String): Long = getValue(name).jsonPrimitive.longOrNull
+    private fun JsonObject.requiredLong(name: String): Long = get(name)?.jsonPrimitive?.longOrNull
         ?: throw NextcloudConnectionException(NextcloudConnectionFailure.INVALID_RESPONSE)
 
     private companion object {

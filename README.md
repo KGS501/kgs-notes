@@ -1,40 +1,38 @@
 # KGS Notes
 
-> **ALPHA:** KGS Notes is an early prototype intended for testing and dogfooding.
+> **ALPHA:** KGS Notes is an early prototype intended for testing.
 > Features, storage formats, and synchronization behavior may still change.
 
 KGS Notes is an Android-first, local-first Markdown notes app built for open and
-self-hosted Sources. Its Local Source and first Nextcloud Notes Source are usable
-for early dogfooding.
+self-hosted Sources. Its Local Source and Nextcloud Notes Source are available
+for early testing.
 
-## Current development slice
+## Features
 
 - exact Markdown files in app-private Local Source storage;
 - multiple Nextcloud Notes Sources with offline Working Copies and conflict-safe synchronization;
 - automatic titles, search, favorites, Trash, restore, and permanent deletion;
+- list and card views with content previews and shared transitions into the editor;
 - privacy-aware Inline Image import into a durable Local Source Attachment Vault;
 - bundled Tiptap Rich Mode with native Source Mode fallback;
 - phone and two-pane tablet/foldable layouts;
 - light and dark KGS visual themes with reduced, purposeful motion; and
 - no analytics, advertisements, runtime downloads, or proprietary services.
 
-## Build and run
+## Build and test
 
-Use JDK 17 and the shared Android SDK configured in `local.properties`.
+Build with JDK 17, the Android SDK, and the checked-in Gradle wrapper:
 
 ```bash
 ./gradlew :app:assembleDebug
-tools/android-emulator.sh create
-tools/android-emulator.sh start
-tools/android-emulator.sh install app/build/outputs/apk/debug/app-debug.apk
-tools/android-emulator.sh launch
 ```
 
 Build the pinned rich-editor assets after editing `editor/web`:
 
 ```bash
-pnpm --dir editor/web install --frozen-lockfile
-pnpm --dir editor/web build
+cd editor/web
+corepack pnpm install --frozen-lockfile
+corepack pnpm build
 ```
 
 Run the focused behavioral suites with:
@@ -55,9 +53,15 @@ Run the focused behavioral suites with:
 
 ## Delivery roadmap
 
-1. **Local Dogfood** — polished Local Source, editor, categories, search, attachments, Trash, import/export, themes, and accessibility.
-2. **Nextcloud Dogfood** — multiple Sources, authentication, fast offline synchronization, conflicts, transfers, attachment lifecycle, and reconnect.
+1. **Local experience** — polished Local Source, editor, categories, search, attachments, Trash, import/export, themes, and accessibility.
+2. **Nextcloud integration** — multiple Sources, authentication, offline synchronization, conflicts, transfers, attachment lifecycle, and reconnect.
+
+## Privacy
+
+The privacy policy is available in [index.html](index.html). It describes local device storage, Nextcloud sync and credential protection, photo metadata handling, the editor, backup exclusions, deletion behavior, and contact information.
 
 ## License
 
 KGS Notes is licensed under `GPL-3.0-or-later`. See [LICENSE](LICENSE).
+
+The app bundles the license texts of its open-source dependencies under `app/src/main/assets/licenses/`. After changing editor dependencies, run `pnpm install` in `editor/web` and then `python3 tools/generate_open_source_notices.py`.

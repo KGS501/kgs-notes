@@ -15,6 +15,7 @@ android {
 }
 
 dependencies {
+    implementation(libs.activity.compose)
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.foundation)
     implementation(libs.compose.material.icons.core)

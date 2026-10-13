@@ -7,7 +7,44 @@ class MarkdownEditorSafetyTest {
     private val editor: MarkdownEditor = DefaultMarkdownEditor()
 
     @Test
-    fun `unknown source syntax selects byte-preserving Source Mode`() {
+    fun `CommonMark angle autolinks are not raw HTML`() {
+        val markdown = """
+            # Reference
+
+            <https://example.org/reference>
+            <reader@example.org>
+            <mailto:reader@example.org>
+
+            | Reference | Description |
+            | --- | --- |
+            | <https://example.org/specification> | **Specification** |
+        """.trimIndent()
+        assertEquals(EditorSafety.RichMode, editor.safetyFor(markdown))
+    }
+
+    @Test
+    fun `code and escaped syntax never trigger the unsupported markup warning`() {
+        val examples = listOf(
+            "Example `<section>text</section>` and `<!-- comment -->`.",
+            "```html\n<section>text</section>\n<!-- comment -->\n```",
+            "~~~text\n$$\n[^one]: text\n:::warning\n~~~",
+            "    <section>text</section>\n    <!-- comment -->",
+            "Literal \\<section> and &lt;section&gt;.",
+            "```mermaid\ngraph TD; A-->B\n```",
+        )
+        examples.forEachIndexed { index, markdown ->
+            assertEquals("Code example $index", EditorSafety.RichMode, editor.safetyFor(markdown))
+        }
+    }
+
+    @Test
+    fun `unmatched code delimiters still allow preserved HTML fragments`() {
+        assertEquals(EditorSafety.RichMode,
+            editor.safetyFor("Unmatched ` then <section>text</section>"))
+    }
+
+    @Test
+    fun `extension syntax stays in Rich Mode with byte-preserving Source Capsules`() {
         val markdown = """
             # Calculation
 
@@ -17,9 +54,25 @@ class MarkdownEditorSafetyTest {
         """.trimIndent()
 
         assertEquals(
-            EditorSafety.SourceMode("Math blocks are not safe in Rich Mode yet"),
+            EditorSafety.RichMode,
             editor.safetyFor(markdown),
         )
+    }
+
+    @Test
+    fun `HTML comments metadata and footnotes do not force the whole Note to Source Mode`() {
+        listOf("<!-- comment -->\n\n# Title", "<details><summary>Details</summary>Content</details>",
+            "[^one]: Footnote", ":::warning\nContent\n:::", "---\ntitle: Sample\n---")
+            .forEach { assertEquals(EditorSafety.RichMode, editor.safetyFor(it)) }
+    }
+
+    @Test
+    fun `oversized Notes and nonportable null characters retain Source Mode protection`() {
+        assertEquals(EditorSafety.RichMode, editor.safetyFor("x".repeat(200_000)))
+        assertEquals(EditorSafety.SourceMode("This Note is large. Source Mode keeps editing responsive."),
+            editor.safetyFor("x".repeat(200_001)))
+        assertEquals(EditorSafety.SourceMode("This Note contains characters that need Source Mode to stay intact."),
+            editor.safetyFor("Before\u0000after"))
     }
 
     @Test

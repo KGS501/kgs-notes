@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from logo/logo.svg by tools/generate_logo_resources.py. -->
+<resources>
+    <color name="logo_mark">#FFFFFF</color>
+    <color name="logo_background">#FFC217</color>
+</resources>

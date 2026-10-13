@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.PlainTooltip
 import androidx.compose.material3.Text
 import androidx.compose.material3.TooltipBox
@@ -25,7 +26,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.Immutable
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -65,8 +65,8 @@ fun Modifier.kgsClickable(
             enabled = enabled,
             interactionSource = interactions,
             indication = if (showIndication) ripple(bounded = true) else null,
+            hapticFeedbackEnabled = false,
             onClick = hapticClick,
-            onLongClick = {},
         )
 }
 
@@ -90,6 +90,7 @@ data class KgsCornerRadii(
 @Composable
 fun KgsExpressiveSurface(
     onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
     color: Color = Color.Transparent,
     contentColor: Color = LocalContentColor.current,
@@ -102,6 +103,7 @@ fun KgsExpressiveSurface(
     content: @Composable BoxScope.() -> Unit,
 ) {
     val hapticClick = rememberKgsHapticClick(onClick)
+    val haptics = LocalHapticFeedback.current
     val pressed by interactionSource.collectIsVisuallyPressedAsState()
     val progress by animateFloatAsState(
         targetValue = if (pressed) 1f else 0f,
@@ -127,8 +129,14 @@ fun KgsExpressiveSurface(
                 enabled = enabled,
                 interactionSource = interactionSource,
                 indication = if (showIndication) ripple(bounded = true) else null,
+                hapticFeedbackEnabled = false,
                 onClick = hapticClick,
-                onLongClick = {},
+                onLongClick = onLongClick?.let { action ->
+                    {
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        action()
+                    }
+                },
             ),
     ) {
         CompositionLocalProvider(LocalContentColor provides contentColor) {
@@ -181,18 +189,9 @@ fun MutableInteractionSource.collectIsVisuallyPressedAsState(
     return visible
 }
 
-/** Adds the same short, restrained feedback to every app-owned button action. */
+/** Ordinary taps stay silent; long presses are handled by surfaces and tooltips. */
 @Composable
-fun rememberKgsHapticClick(onClick: () -> Unit): () -> Unit {
-    val haptics = LocalHapticFeedback.current
-    val currentOnClick by rememberUpdatedState(onClick)
-    return remember(haptics) {
-        {
-            haptics.performHapticFeedback(HapticFeedbackType.VirtualKey)
-            currentOnClick()
-        }
-    }
-}
+fun rememberKgsHapticClick(onClick: () -> Unit): () -> Unit = onClick
 
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
@@ -200,10 +199,20 @@ fun KgsTooltip(
     label: String,
     content: @Composable () -> Unit,
 ) {
+    val tooltipState = rememberTooltipState()
+    val haptics = LocalHapticFeedback.current
+    LaunchedEffect(tooltipState.isVisible) {
+        if (tooltipState.isVisible) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+    }
     TooltipBox(
         positionProvider = TooltipDefaults.rememberTooltipPositionProvider(TooltipAnchorPosition.Above),
-        tooltip = { PlainTooltip { Text(label) } },
-        state = rememberTooltipState(),
+        tooltip = {
+            PlainTooltip(
+                containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                contentColor = MaterialTheme.colorScheme.onSurface,
+            ) { Text(label) }
+        },
+        state = tooltipState,
         content = content,
     )
 }

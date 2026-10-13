@@ -74,7 +74,7 @@ class NextcloudNotesSource(
             markdown = true,
             categories = true,
             favorites = true,
-            attachments = true,
+            attachments = false,
             writable = true,
         ),
     )
@@ -201,6 +201,7 @@ class NextcloudNotesSource(
     }
 
     private companion object {
-        val MINIMUM_API_VERSION = NotesApiVersion("1.4")
+        // ETags, conditional updates, read-only flags, and settings arrived in 1.2.
+        val MINIMUM_API_VERSION = NotesApiVersion("1.2")
     }
 }

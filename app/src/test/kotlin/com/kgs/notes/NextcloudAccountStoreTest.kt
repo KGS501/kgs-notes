@@ -13,6 +13,23 @@ class NextcloudAccountStoreTest {
     val temporary = TemporaryFolder()
 
     @Test
+    fun renamingSourceKeepsIdentityAndCredentials() {
+        val root = temporary.newFolder("rename-accounts").toPath()
+        val credentials = NextcloudCredentials("https://cloud.invalid/", "river", "secret")
+        val store = NextcloudAccountStore(root, ReversibleTestSecretBox)
+        val original = store.save("Home", credentials)
+
+        val renamed = store.rename(original.profile.id, "Travel")
+        val restored = NextcloudAccountStore(root, ReversibleTestSecretBox).loadAll().single()
+
+        assertEquals(original.profile.id, renamed.id)
+        assertEquals("Travel", restored.profile.name)
+        assertEquals(credentials.serverUrl, restored.credentials.serverUrl)
+        assertEquals(credentials.loginName, restored.credentials.loginName)
+        assertEquals(credentials.appPassword, restored.credentials.appPassword)
+    }
+
+    @Test
     fun reconnectingTheSameAccountRestoresOneEncryptedSource() {
         val root = temporary.newFolder("accounts").toPath()
         val credentials = NextcloudCredentials(

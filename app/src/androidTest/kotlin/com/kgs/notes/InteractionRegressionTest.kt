@@ -14,6 +14,7 @@ import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.runtime.getValue
@@ -41,6 +42,26 @@ class InteractionRegressionTest {
     val compose = createAndroidComposeRule<MainActivity>()
 
     @Test
+    fun clearingSearchEmptiesTheQueryAndDismissesFocus() {
+        var query by mutableStateOf("")
+        compose.activityRule.scenario.onActivity { activity ->
+            activity.setContent {
+                KgsNotesTheme { KgsNotesScreen(NotesUiState(query = query),
+                    NotesActions(onQueryChange = { query = it })) }
+            }
+        }
+        compose.onNodeWithContentDescription("Clear search").assertDoesNotExist()
+        compose.onNodeWithTag("notes-search").performClick().performTextInput("Find this")
+        val search = compose.onNodeWithTag("notes-search").fetchSemanticsNode().boundsInRoot
+        val clear = compose.onNodeWithContentDescription("Clear search").fetchSemanticsNode().boundsInRoot
+        assertTrue("Clear search should sit close to the field's right edge", search.right - clear.right < search.height * .1f)
+        compose.onNodeWithContentDescription("Clear search").performClick()
+        compose.onNodeWithTag("notes-search").assertIsNotFocused()
+        compose.runOnIdle { assertEquals("", query) }
+        compose.onNodeWithContentDescription("Clear search").assertDoesNotExist()
+    }
+
+    @Test
     fun tappingOutsideSearchClearsItsFocus() {
         showLibrary()
 
@@ -51,11 +72,21 @@ class InteractionRegressionTest {
     }
 
     @Test
-    fun tappingTheLibraryHeaderClearsSearchFocus() {
+    fun tappingAFilterClearsSearchFocus() {
         showLibrary()
 
         compose.onNodeWithTag("notes-search").performClick().assertIsFocused()
-        compose.onNodeWithText("Notes").performTouchInput { click(center) }
+        compose.onNodeWithContentDescription("All notes").performTouchInput { click(center) }
+
+        compose.onNodeWithTag("notes-search").assertIsNotFocused()
+    }
+
+    @Test
+    fun openingSidebarClearsSearchFocus() {
+        showLibrary()
+
+        compose.onNodeWithTag("notes-search").performClick().assertIsFocused()
+        compose.onNodeWithContentDescription("Open menu").performClick()
 
         compose.onNodeWithTag("notes-search").assertIsNotFocused()
     }
@@ -93,6 +124,24 @@ class InteractionRegressionTest {
         Espresso.pressBack()
 
         compose.onNodeWithTag("notes-search").assertIsDisplayed().assertIsNotFocused()
+    }
+
+    @Test
+    fun systemBackReturnsFromASubpageBeforeClosingSettings() {
+        var destination by mutableStateOf(LibraryDestination.SETTINGS)
+        compose.activityRule.scenario.onActivity { activity ->
+            activity.setContent {
+                KgsNotesTheme { KgsNotesScreen(NotesUiState(destination = destination),
+                    NotesActions(onDestinationChange = { destination = it })) }
+            }
+        }
+        compose.onNodeWithTag("settings-open-SOURCES").performClick()
+        Espresso.pressBack()
+        compose.onNodeWithTag("settings-page-HOME").assertIsDisplayed()
+        compose.runOnIdle { assertEquals(LibraryDestination.SETTINGS, destination) }
+        Espresso.pressBack()
+        compose.onNodeWithTag("notes-search").assertIsDisplayed()
+        compose.runOnIdle { assertEquals(LibraryDestination.NOTES, destination) }
     }
 
     @Test
@@ -390,6 +439,58 @@ class InteractionRegressionTest {
         createdAt = Instant.parse("2026-08-22T08:00:00Z"),
         updatedAt = Instant.parse("2026-08-22T09:00:00Z"),
     )
+
+    @Test
+    fun editorMenusKeepTheKeyboardOpenAndStopAboveTheToolbar() {
+        compose.activityRule.scenario.onActivity { activity ->
+            activity.setContent {
+                KgsNotesTheme {
+                    KgsNotesScreen(NotesUiState(selectedNote = sampleNote("Text"), editorMode = EditorMode.SOURCE), NotesActions())
+                }
+            }
+        }
+        compose.onNodeWithTag("source-editor").performClick()
+        compose.waitUntil(5_000) { keyboardVisible() }
+        for (control in listOf("More note actions", "Choose Category", "Saved locally", "Lists")) {
+            compose.onNodeWithContentDescription(control).performTouchInput { click() }
+            compose.waitForIdle()
+            assertTrue("Opening $control must preserve the keyboard", keyboardVisible())
+            val toolbar = compose.onNodeWithTag("editor-toolbar").fetchSemanticsNode().boundsInRoot
+            val frame = compose.onNodeWithTag("kgs-sheet-frame").fetchSemanticsNode().boundsInRoot
+            assertEquals(toolbar.top, frame.bottom, 1f)
+            compose.onNodeWithContentDescription(control).performTouchInput { click() }
+            compose.onNodeWithTag("kgs-sheet-frame").assertDoesNotExist()
+            assertTrue("Closing $control must preserve the keyboard", keyboardVisible())
+        }
+    }
+
+    @Test
+    fun tappingBlankSpaceAtTheEndOfRichContentKeepsTheKeyboardOpen() {
+        compose.activityRule.scenario.onActivity { activity ->
+            activity.setContent {
+                KgsNotesTheme {
+                    KgsNotesScreen(NotesUiState(selectedNote = sampleNote("A short paragraph"), editorMode = EditorMode.RICH), NotesActions())
+                }
+            }
+        }
+        compose.waitUntil(15_000) { compose.onAllNodesWithTag("rich-editor-ready").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag("note-editor").performTouchInput { click(center) }
+        compose.waitUntil(5_000) { keyboardVisible() }
+        val root = compose.onNodeWithTag("note-editor").fetchSemanticsNode().boundsInRoot
+        val toolbar = compose.onNodeWithTag("editor-toolbar").fetchSemanticsNode().boundsInRoot
+        compose.onNodeWithTag("note-editor").performTouchInput {
+            click(androidx.compose.ui.geometry.Offset(width / 2f, toolbar.top - root.top - 16f))
+        }
+        compose.waitForIdle()
+        assertTrue("A blank line or bottom page margin must keep the keyboard open", keyboardVisible())
+        val webView = AtomicReference<WebView>()
+        compose.runOnIdle { webView.set(requireNotNull(findWebView(compose.activity.window.decorView))) }
+        assertEquals("true", evaluateJavascript(webView.get(), "document.activeElement === document.querySelector('.rich-editor')"))
+    }
+
+    private fun keyboardVisible(): Boolean =
+        androidx.core.view.ViewCompat.getRootWindowInsets(compose.activity.window.decorView)
+            ?.isVisible(androidx.core.view.WindowInsetsCompat.Type.ime()) == true
 
     private fun findWebView(view: View): WebView? {
         if (view is WebView) return view

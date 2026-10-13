@@ -1,5 +1,8 @@
 package com.kgs.notes.editor
 
+import com.kgs.notes.design.LocalKgsSheetDock
+import com.kgs.notes.design.kgsSheetDock
+import com.kgs.notes.design.rememberKgsDismissSheets
 import android.annotation.SuppressLint
 import android.graphics.Color as AndroidColor
 import android.net.Uri
@@ -12,10 +15,11 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.webkit.MimeTypeMap
-import androidx.compose.animation.AnimatedContent
+import com.kgs.notes.design.LocalKgsDarkTheme
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
@@ -24,7 +28,6 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -40,6 +43,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.input.rememberTextFieldState
@@ -64,19 +70,21 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawWithContent
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
@@ -85,15 +93,8 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.IntRect
-import androidx.compose.ui.unit.IntSize
-import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.window.Popup
-import androidx.compose.ui.window.PopupPositionProvider
-import androidx.compose.ui.window.PopupProperties
-import androidx.compose.ui.platform.LocalDensity
+import com.kgs.notes.design.KgsBottomSheet
 import com.kgs.notes.design.KgsTooltip
 import com.kgs.notes.design.KgsCornerRadii
 import com.kgs.notes.design.KgsDropdownMenuItem
@@ -108,7 +109,10 @@ import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import kotlinx.coroutines.flow.collect
 import org.json.JSONObject
+import org.json.JSONTokener
 import java.io.InputStream
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
 
 enum class EditorMode {
     RICH,
@@ -116,18 +120,27 @@ enum class EditorMode {
 }
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 fun KgsMarkdownEditor(
     markdown: String,
     requestedMode: EditorMode,
     onMarkdownChange: (String) -> Unit,
     onModeChange: (EditorMode) -> Unit,
     onAddImage: () -> Unit = {},
+    canAddImage: Boolean = true,
     openManagedAttachment: (String) -> InputStream? = { null },
     modifier: Modifier = Modifier,
+    bodyModifier: Modifier = Modifier,
+    richLoadingContent: @Composable () -> Unit = {},
     editor: MarkdownEditor = remember { DefaultMarkdownEditor() },
+    readOnly: Boolean = false,
+    allowRemoteResources: Boolean = true,
+    onSnapshotReaderReady: (suspend () -> String?) -> Unit = {},
 ) {
     val safety = remember(markdown, editor) { editor.safetyFor(markdown) }
+    var rendererFailure by remember(editor) { mutableStateOf<String?>(null) }
     val richModeBlocker = when {
+        rendererFailure != null -> rendererFailure
         !WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER) ->
             "This Android WebView requires Source Mode"
         safety is EditorSafety.SourceMode -> safety.reason
@@ -142,6 +155,15 @@ fun KgsMarkdownEditor(
     val commands = remember { EditorCommandDispatcher() }
     var activeCommands by remember { mutableStateOf(emptySet<MarkdownCommand>()) }
     var richEditorReady by remember { mutableStateOf(false) }
+    val richOpacity by animateFloatAsState(if (richEditorReady) 1f else 0f, tween(180), label = "Rich editor ready")
+    var restoreKeyboardMode by remember { mutableStateOf<EditorMode?>(null) }
+    val keyboardWasOpen = WindowInsets.isImeVisible
+    val currentMarkdown by rememberUpdatedState(markdown)
+    SideEffect {
+        onSnapshotReaderReady {
+            if (commands.hasReader) commands.readCurrentMarkdown() else if (!richEditorReady) currentMarkdown else null
+        }
+    }
 
     LaunchedEffect(effectiveMode) {
         if (effectiveMode == EditorMode.SOURCE) activeCommands = emptySet()
@@ -159,25 +181,43 @@ fun KgsMarkdownEditor(
         Box(
             modifier = Modifier
                 .weight(1f)
+                .then(bodyModifier)
                 .clipToBounds(),
         ) {
             when (effectiveMode) {
-                EditorMode.RICH -> RichMarkdownEditor(
-                    markdown = markdown,
-                    onMarkdownChange = onMarkdownChange,
-                    onActiveCommandsChange = { activeCommands = it },
-                    onReady = { richEditorReady = true },
-                    commands = commands,
-                    openManagedAttachment = openManagedAttachment,
-                    modifier = Modifier.fillMaxSize(),
-                )
+                EditorMode.RICH -> {
+                    // The real editor measures at the final body size from the
+                    // first transition frame; a different text layout never replaces it.
+                    RichMarkdownEditor(
+                        markdown = markdown,
+                        onMarkdownChange = onMarkdownChange,
+                        onActiveCommandsChange = { activeCommands = it },
+                        onReady = { richEditorReady = true },
+                        onFallback = { rendererFailure = "This Note couldn't be rendered reliably. Source Mode keeps its contents intact." },
+                        restoreFocus = restoreKeyboardMode == EditorMode.RICH,
+                        onFocusRestored = { restoreKeyboardMode = null },
+                        commands = commands,
+                        openManagedAttachment = openManagedAttachment,
+                        modifier = Modifier.fillMaxSize().graphicsLayer { alpha = richOpacity },
+                        readOnly = readOnly,
+                        allowRemoteResources = allowRemoteResources,
+                    )
+                    androidx.compose.animation.AnimatedVisibility(!richEditorReady, enter = fadeIn(tween(120)), exit = fadeOut(tween(180))) {
+                        Box(Modifier.fillMaxSize().testTag("rich-editor-loading-preview")) {
+                            richLoadingContent()
+                        }
+                    }
+                }
 
                 EditorMode.SOURCE -> SourceMarkdownEditor(
                     markdown = markdown,
                     onMarkdownChange = onMarkdownChange,
                     commands = commands,
                     editor = editor,
+                    restoreFocus = restoreKeyboardMode == EditorMode.SOURCE,
+                    onFocusRestored = { restoreKeyboardMode = null },
                     modifier = Modifier.fillMaxSize(),
+                    readOnly = readOnly,
                 )
             }
             if (richEditorReady) {
@@ -188,12 +228,20 @@ fun KgsMarkdownEditor(
                 )
             }
         }
-        EditorToolbar(
+        if (readOnly) {
+            // Read-only previews still provide a safe edge for their Source chooser sheet.
+            Spacer(Modifier.fillMaxWidth().height(1.dp).kgsSheetDock(LocalKgsSheetDock.current))
+        } else EditorToolbar(
             mode = effectiveMode,
             activeCommands = activeCommands,
-            onModeChange = onModeChange,
+            onModeChange = { nextMode ->
+                rendererFailure = null
+                restoreKeyboardMode = if (keyboardWasOpen) nextMode else null
+                onModeChange(nextMode)
+            },
             onCommand = commands::dispatch,
             onAddImage = onAddImage,
+            canAddImage = canAddImage,
         )
     }
 }
@@ -224,8 +272,20 @@ private fun SourceMarkdownEditor(
     onMarkdownChange: (String) -> Unit,
     commands: EditorCommandDispatcher,
     editor: MarkdownEditor,
+    restoreFocus: Boolean,
+    onFocusRestored: () -> Unit,
     modifier: Modifier,
+    readOnly: Boolean = false,
 ) {
+    val focusRequester = remember { FocusRequester() }
+    val keyboard = LocalSoftwareKeyboardController.current
+    LaunchedEffect(restoreFocus) {
+        if (restoreFocus && !readOnly) {
+            focusRequester.requestFocus()
+            keyboard?.show()
+            onFocusRestored()
+        }
+    }
     val field = rememberTextFieldState(markdown)
     val latestOnMarkdownChange by rememberUpdatedState(onMarkdownChange)
     val commandOwner = remember { Any() }
@@ -265,7 +325,7 @@ private fun SourceMarkdownEditor(
             }
     }
     SideEffect {
-        commands.connect(commandOwner) { command ->
+        commands.connect(commandOwner, reader = { field.text.toString() }) { command ->
             when (command) {
                 MarkdownCommand.UNDO -> undo.removeLastOrNull()?.let { previous ->
                     redo.addLast(lastObserved)
@@ -310,6 +370,7 @@ private fun SourceMarkdownEditor(
     ) {
         BasicTextField(
             state = field,
+            readOnly = readOnly,
             textStyle = MaterialTheme.typography.bodyLarge.copy(
                 color = MaterialTheme.colorScheme.onSurface,
                 fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
@@ -317,6 +378,7 @@ private fun SourceMarkdownEditor(
             cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
             modifier = Modifier
                 .fillMaxSize()
+                .focusRequester(focusRequester)
                 .testTag("source-editor"),
         )
     }
@@ -330,18 +392,38 @@ private fun RichMarkdownEditor(
     onMarkdownChange: (String) -> Unit,
     onActiveCommandsChange: (Set<MarkdownCommand>) -> Unit,
     onReady: () -> Unit,
+    onFallback: () -> Unit,
+    restoreFocus: Boolean,
+    onFocusRestored: () -> Unit,
     commands: EditorCommandDispatcher,
     openManagedAttachment: (String) -> InputStream?,
     modifier: Modifier,
+    readOnly: Boolean = false,
+    allowRemoteResources: Boolean = true,
 ) {
     val context = LocalContext.current
-    val darkMode = isSystemInDarkTheme()
+    val keyboard = LocalSoftwareKeyboardController.current
+    // Follows the app's chosen dark mode, which may differ from the system's.
+    val darkMode = LocalKgsDarkTheme.current
+    val colors = MaterialTheme.colorScheme
+    val themeColors = mapOf(
+        "primary" to colors.primary, "on-primary" to colors.onPrimary,
+        "primary-container" to colors.primaryContainer, "surface" to colors.surface,
+        "on-surface" to colors.onSurface, "surface-variant" to colors.surfaceVariant,
+        "on-surface-variant" to colors.onSurfaceVariant, "outline" to colors.outline,
+    ).mapValues { (_, color) -> "#%06X".format(color.toArgb() and 0xFFFFFF) }
+    val latestThemeColors by rememberUpdatedState(themeColors)
     val latestMarkdown by rememberUpdatedState(markdown)
     val latestDarkMode by rememberUpdatedState(darkMode)
     val latestOnMarkdownChange by rememberUpdatedState(onMarkdownChange)
     val latestOnActiveCommandsChange by rememberUpdatedState(onActiveCommandsChange)
     val latestOnReady by rememberUpdatedState(onReady)
+    val latestOnFallback by rememberUpdatedState(onFallback)
+    val latestRestoreFocus by rememberUpdatedState(restoreFocus)
+    val latestOnFocusRestored by rememberUpdatedState(onFocusRestored)
     val latestOpenManagedAttachment by rememberUpdatedState(openManagedAttachment)
+    val latestReadOnly by rememberUpdatedState(readOnly)
+    val latestAllowRemoteResources by rememberUpdatedState(allowRemoteResources)
     var rendererGeneration by remember { mutableIntStateOf(0) }
     var editorMarkdown by remember { mutableStateOf(markdown) }
     var connectedWebView by remember(rendererGeneration) { mutableStateOf<WebView?>(null) }
@@ -353,8 +435,14 @@ private fun RichMarkdownEditor(
             webView.loadMarkdown(markdown)
         }
     }
+    LaunchedEffect(themeColors, connectedWebView) {
+        connectedWebView?.setThemeColors(themeColors)
+    }
     LaunchedEffect(darkMode, connectedWebView) {
         connectedWebView?.setDarkMode(darkMode)
+    }
+    LaunchedEffect(readOnly, connectedWebView) {
+        connectedWebView?.setReadOnly(readOnly)
     }
 
     key(rendererGeneration) {
@@ -391,6 +479,7 @@ private fun RichMarkdownEditor(
                                 )
                             }
                             return assetLoader.shouldInterceptRequest(request.url)
+                                ?: if (!latestAllowRemoteResources) WebResourceResponse("text/plain", "UTF-8", java.io.ByteArrayInputStream(byteArrayOf())) else null
                         }
 
                         override fun shouldOverrideUrlLoading(
@@ -433,22 +522,54 @@ private fun RichMarkdownEditor(
                                 JSONObject(message.data ?: return@addWebMessageListener)
                             }.getOrNull() ?: return@addWebMessageListener
                             when (payload.optString("type")) {
+                                "fallback" -> if (connectedWebView === view) latestOnFallback()
                                 "ready" -> {
+                                    view.setThemeColors(latestThemeColors)
                                     view.setDarkMode(latestDarkMode)
+                                    view.setReadOnly(latestReadOnly)
                                     editorMarkdown = latestMarkdown
-                                    view.loadMarkdown(latestMarkdown)
-                                    commands.connect(view) { command ->
-                                        view.runCommand(command, latestOnActiveCommandsChange)
+                                    view.loadMarkdown(latestMarkdown) {
+                                        // JavaScript readiness precedes the rendered Note.
+                                        // Reveal only a frame containing the loaded Markdown.
+                                        view.setReadOnly(latestReadOnly, force = latestReadOnly) {
+                                            view.postVisualStateCallback(0L, object : WebView.VisualStateCallback() {
+                                                override fun onComplete(requestId: Long) {
+                                                    if (connectedWebView === view) latestOnReady()
+                                                }
+                                            })
+                                        }
+                                    }
+                                    commands.connect(view, reader = {
+                                        suspendCancellableCoroutine<String?> { continuation ->
+                                            try {
+                                                view.evaluateJavascript("window.kgsEditor?.markdown()") { encoded ->
+                                                    if (continuation.isActive) {
+                                                        val text = runCatching { JSONTokener(encoded).nextValue() as? String }.getOrNull()
+                                                        if (text != null) editorMarkdown = text
+                                                        continuation.resume(text)
+                                                    }
+                                                }
+                                            } catch (_: Exception) {
+                                                if (continuation.isActive) continuation.resume(null)
+                                            }
+                                        }
+                                    }) { command ->
+                                        if (!latestReadOnly) view.runCommand(command)
                                     }
                                     connectedWebView = view
-                                    latestOnReady()
+                                    if (latestRestoreFocus && !latestReadOnly) {
+                                        view.requestFocus()
+                                        view.evaluateJavascript("window.kgsEditor?.focus()") { keyboard?.show() }
+                                        latestOnFocusRestored()
+                                    }
                                 }
                                 "changed" -> {
+                                    if (connectedWebView !== view) return@addWebMessageListener
                                     val changed = payload.optString("markdown")
                                     editorMarkdown = changed
-                                    latestOnMarkdownChange(changed)
+                                    if (!latestReadOnly) latestOnMarkdownChange(changed)
                                 }
-                                "formatting" -> latestOnActiveCommandsChange(
+                                "formatting" -> if (connectedWebView === view) latestOnActiveCommandsChange(
                                     buildSet {
                                         val active = payload.optJSONArray("commands") ?: return@buildSet
                                         for (index in 0 until active.length()) {
@@ -495,11 +616,14 @@ private fun WebResourceRequest.managedAttachmentRequest(): ManagedAttachmentRequ
 private class EditorCommandDispatcher {
     private var owner: Any? = null
     private var action: ((MarkdownCommand) -> Unit)? = null
+    private var reader: (suspend () -> String?)? = null
     private val pending = ArrayDeque<MarkdownCommand>()
+    val hasReader: Boolean get() = reader != null
 
-    fun connect(owner: Any, action: (MarkdownCommand) -> Unit) {
+    fun connect(owner: Any, reader: (suspend () -> String?)? = null, action: (MarkdownCommand) -> Unit) {
         this.owner = owner
         this.action = action
+        this.reader = reader
         while (pending.isNotEmpty()) action(pending.removeFirst())
     }
 
@@ -507,8 +631,11 @@ private class EditorCommandDispatcher {
         if (this.owner === owner) {
             this.owner = null
             action = null
+            reader = null
         }
     }
+
+    suspend fun readCurrentMarkdown(): String? = reader?.invoke()
 
     fun dispatch(command: MarkdownCommand) {
         action?.invoke(command) ?: pending.addLast(command)
@@ -522,11 +649,11 @@ private fun EditorToolbar(
     onModeChange: (EditorMode) -> Unit,
     onCommand: (MarkdownCommand) -> Unit,
     onAddImage: () -> Unit,
+    canAddImage: Boolean,
 ) {
     val motion = LocalKgsMotion.current
     var listMenuOpen by remember { mutableStateOf(false) }
-    val listMenuVisibility = remember { MutableTransitionState(false) }
-    listMenuVisibility.targetState = listMenuOpen
+    val dismissSheets = rememberKgsDismissSheets()
     val toolsScroll = rememberScrollState()
     val leftFade by animateFloatAsState(
         targetValue = if (toolsScroll.canScrollBackward) 1f else 0f,
@@ -539,10 +666,11 @@ private fun EditorToolbar(
         label = "toolbar right edge fade",
     )
     Surface(
-        color = Color.White,
+        color = MaterialTheme.colorScheme.surface,
         tonalElevation = 0.dp,
         modifier = Modifier
             .fillMaxWidth()
+            .kgsSheetDock(LocalKgsSheetDock.current)
             .testTag("editor-toolbar"),
     ) {
         Column {
@@ -633,7 +761,11 @@ private fun EditorToolbar(
                         ToolbarButton(
                             description = "Lists",
                             selected = listMenuOpen || activeList != null,
-                            onClick = { listMenuOpen = true },
+                            onClick = {
+                                val wasOpen = listMenuOpen
+                                dismissSheets()
+                                listMenuOpen = !wasOpen
+                            },
                         ) {
                             ToolbarGlyph(
                                 type = when (activeList) {
@@ -648,98 +780,42 @@ private fun EditorToolbar(
                                 },
                             )
                         }
-                        val density = LocalDensity.current
-                        if (listMenuVisibility.currentState || listMenuVisibility.targetState) {
-                            val positionProvider = remember(density) {
-                                AboveAnchorPopupPositionProvider(
-                                    horizontalOffset = with(density) { 4.dp.roundToPx() },
-                                    verticalGap = with(density) { 6.dp.roundToPx() },
-                                    windowMargin = with(density) { 8.dp.roundToPx() },
-                                )
+                        KgsBottomSheet(
+                            expanded = listMenuOpen,
+                            onDismissRequest = { listMenuOpen = false },
+                            focusable = false,
+                            modifier = Modifier.testTag("list-style-menu"),
+                            title = "Lists",
+                        ) {
+                            ListMenuItem("Bulleted list", ToolbarGlyphType.LIST,
+                                selected = MarkdownCommand.BULLET_LIST in activeCommands) {
+                                onCommand(MarkdownCommand.BULLET_LIST)
+                                listMenuOpen = false
                             }
-                            Popup(
-                                popupPositionProvider = positionProvider,
-                                onDismissRequest = { listMenuOpen = false },
-                                properties = PopupProperties(
-                                    focusable = false,
-                                    dismissOnBackPress = true,
-                                    dismissOnClickOutside = true,
-                                    clippingEnabled = false,
-                                ),
-                            ) {
-                                ListStyleMenuPopupContent(
-                                    visibleState = listMenuVisibility,
-                                    activeCommands = activeCommands,
-                                    onSelect = { command ->
-                                        onCommand(command)
-                                        listMenuOpen = false
-                                    },
-                                )
+                            ListMenuItem("Checklist", ToolbarGlyphType.CHECKLIST,
+                                selected = MarkdownCommand.TASK_LIST in activeCommands) {
+                                onCommand(MarkdownCommand.TASK_LIST)
+                                listMenuOpen = false
+                            }
+                            ListMenuItem("Numbered list", ToolbarGlyphType.NUMBERED_LIST,
+                                selected = MarkdownCommand.NUMBERED_LIST in activeCommands) {
+                                onCommand(MarkdownCommand.NUMBERED_LIST)
+                                listMenuOpen = false
                             }
                         }
                         }
                         ToolbarIconButton(ToolbarGlyphType.QUOTE, "Quote", MarkdownCommand.BLOCKQUOTE in activeCommands) { onCommand(MarkdownCommand.BLOCKQUOTE) }
                         ToolbarIconButton(ToolbarGlyphType.CODE, "Code block", MarkdownCommand.CODE_BLOCK in activeCommands) { onCommand(MarkdownCommand.CODE_BLOCK) }
                         ToolbarIconButton(ToolbarGlyphType.TABLE, "Insert table", MarkdownCommand.TABLE in activeCommands) { onCommand(MarkdownCommand.TABLE) }
-                        ToolbarIconButton(ToolbarGlyphType.IMAGE, "Add image") { onAddImage() }
+                        if (canAddImage) {
+                            ToolbarIconButton(ToolbarGlyphType.IMAGE, "Add image") { onAddImage() }
+                        }
                     }
                 }
                 Spacer(Modifier.width(4.dp))
                 ToolbarIconButton(ToolbarGlyphType.UNDO, "Undo") { onCommand(MarkdownCommand.UNDO) }
                 ToolbarIconButton(ToolbarGlyphType.REDO, "Redo") { onCommand(MarkdownCommand.REDO) }
                 Spacer(Modifier.width(2.dp))
-            }
-        }
-    }
-}
-
-@Composable
-private fun ListStyleMenuPopupContent(
-    visibleState: MutableTransitionState<Boolean>,
-    activeCommands: Set<MarkdownCommand>,
-    onSelect: (MarkdownCommand) -> Unit,
-) {
-    val motion = LocalKgsMotion.current
-    AnimatedVisibility(
-        visibleState = visibleState,
-        enter = scaleIn(
-            animationSpec = motion.fastSpatialSpec(),
-            initialScale = .8f,
-            transformOrigin = TransformOrigin(0f, 1f),
-        ) + fadeIn(motion.fastEffectsSpec()),
-        exit = scaleOut(
-            animationSpec = motion.fastSpatialSpec(),
-            targetScale = .8f,
-            transformOrigin = TransformOrigin(0f, 1f),
-        ) + fadeOut(motion.fastEffectsSpec()),
-    ) {
-        val listMenuShape = RoundedCornerShape(18.dp)
-        Surface(
-            color = Color.White,
-            shape = listMenuShape,
-            tonalElevation = 0.dp,
-            shadowElevation = 3.dp,
-            modifier = Modifier
-                .width(238.dp)
-                .testTag("list-style-menu")
-                .kgsMenuShadow(listMenuShape),
-        ) {
-            Column {
-                ListMenuItem(
-                    "Bulleted list",
-                    ToolbarGlyphType.LIST,
-                    selected = MarkdownCommand.BULLET_LIST in activeCommands,
-                ) { onSelect(MarkdownCommand.BULLET_LIST) }
-                ListMenuItem(
-                    "Checklist",
-                    ToolbarGlyphType.CHECKLIST,
-                    selected = MarkdownCommand.TASK_LIST in activeCommands,
-                ) { onSelect(MarkdownCommand.TASK_LIST) }
-                ListMenuItem(
-                    "Numbered list",
-                    ToolbarGlyphType.NUMBERED_LIST,
-                    selected = MarkdownCommand.NUMBERED_LIST in activeCommands,
-                ) { onSelect(MarkdownCommand.NUMBERED_LIST) }
             }
         }
     }
@@ -794,6 +870,7 @@ private fun ToolbarButton(
             onClick = onClick,
             color = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
             restingCorners = KgsCornerRadii(corner),
+            showIndication = false,
             modifier = Modifier
                 .size(38.dp)
                 .semantics {
@@ -806,39 +883,6 @@ private fun ToolbarButton(
 
 private enum class ToolbarGlyphType {
     RICH, SOURCE, BOLD, ITALIC, HEADING, LIST, CHECKLIST, NUMBERED_LIST, QUOTE, CODE, TABLE, IMAGE, UNDO, REDO,
-}
-
-private fun Modifier.kgsMenuShadow(shape: RoundedCornerShape): Modifier = shadow(
-    elevation = 18.dp,
-    shape = shape,
-    clip = false,
-    ambientColor = Color.Black.copy(alpha = .065f),
-    spotColor = Color.Black.copy(alpha = .1f),
-)
-
-private class AboveAnchorPopupPositionProvider(
-    private val horizontalOffset: Int,
-    private val verticalGap: Int,
-    private val windowMargin: Int,
-) : PopupPositionProvider {
-    override fun calculatePosition(
-        anchorBounds: IntRect,
-        windowSize: IntSize,
-        layoutDirection: LayoutDirection,
-        popupContentSize: IntSize,
-    ): IntOffset {
-        val desiredX = if (layoutDirection == LayoutDirection.Ltr) {
-            anchorBounds.left + horizontalOffset
-        } else {
-            anchorBounds.right - popupContentSize.width - horizontalOffset
-        }
-        val maxX = (windowSize.width - popupContentSize.width - windowMargin)
-            .coerceAtLeast(windowMargin)
-        val x = desiredX.coerceIn(windowMargin, maxX)
-        val y = (anchorBounds.top - popupContentSize.height - verticalGap)
-            .coerceAtLeast(windowMargin)
-        return IntOffset(x, y)
-    }
 }
 
 @Composable
@@ -908,15 +952,39 @@ private fun ToolbarGlyph(type: ToolbarGlyphType, color: Color) {
     )
 }
 
-private fun WebView.loadMarkdown(markdown: String) {
+private fun WebView.loadMarkdown(markdown: String, onLoaded: (() -> Unit)? = null) {
     evaluateJavascript(
         "window.kgsEditor?.load(${JSONObject.quote(markdown)})",
+    ) { onLoaded?.invoke() }
+}
+
+private fun WebView.setThemeColors(colors: Map<String, String>) {
+    val properties = JSONObject(colors).toString()
+    evaluateJavascript(
+        "Object.entries($properties).forEach(([name, value]) => document.documentElement.style.setProperty('--kgs-' + name, value))",
         null,
     )
 }
 
 private fun WebView.setDarkMode(enabled: Boolean) {
     evaluateJavascript("window.kgsEditor?.setDarkMode($enabled)", null)
+}
+
+private fun WebView.setReadOnly(readOnly: Boolean, force: Boolean = false, onApplied: (() -> Unit)? = null) {
+    // Ordinary writable editors need no extra bridge round-trip during startup.
+    if (!force && (tag == readOnly || (tag == null && !readOnly))) {
+        tag = readOnly
+        onApplied?.invoke()
+        return
+    }
+    tag = readOnly
+    // The pinned Tiptap Editor attaches itself to its root DOM element. Avoid
+    // rebuilding the renderer or replacing rich text with a source-only preview.
+    evaluateJavascript(
+        "document.querySelector('.rich-editor')?.editor?.setEditable(${!readOnly}, false);" +
+            "document.querySelectorAll('.rich-editor img, .rich-editor input').forEach(el => el.style.pointerEvents = ${JSONObject.quote(if (readOnly) "none" else "")})",
+        { onApplied?.invoke() },
+    )
 }
 
 private fun markdownCommandForBridgeName(name: String): MarkdownCommand? = when (name) {
@@ -934,7 +1002,6 @@ private fun markdownCommandForBridgeName(name: String): MarkdownCommand? = when 
 
 private fun WebView.runCommand(
     command: MarkdownCommand,
-    onActiveCommandsChange: (Set<MarkdownCommand>) -> Unit,
 ) {
     val name = when (command) {
         MarkdownCommand.BOLD -> "bold"
@@ -949,17 +1016,7 @@ private fun WebView.runCommand(
         MarkdownCommand.UNDO -> "undo"
         MarkdownCommand.REDO -> "redo"
     }
-    evaluateJavascript("window.kgsEditor?.run(${JSONObject.quote(name)})") { result ->
-        val activeCommands = runCatching {
-            val values = org.json.JSONArray(result)
-            buildSet {
-                for (index in 0 until values.length()) {
-                    markdownCommandForBridgeName(values.optString(index))?.let(::add)
-                }
-            }
-        }.getOrNull() ?: return@evaluateJavascript
-        onActiveCommandsChange(activeCommands)
-    }
+    evaluateJavascript("window.kgsEditor?.run(${JSONObject.quote(name)})", null)
 }
 
 private const val ASSET_HOST = "appassets.androidplatform.net"

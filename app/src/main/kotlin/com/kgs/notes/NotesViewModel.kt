@@ -3,6 +3,7 @@ package com.kgs.notes
 import android.app.Application
 import android.content.SharedPreferences
 import android.net.Uri
+import com.kgs.notes.design.NotesTheme
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.kgs.notes.editor.DefaultMarkdownEditor
@@ -14,6 +15,7 @@ import com.kgs.notes.engine.AttachmentId
 import com.kgs.notes.engine.LibrarySnapshot
 import com.kgs.notes.engine.ConnectedNotesEngine
 import com.kgs.notes.engine.Note
+import com.kgs.notes.engine.NoteState
 import com.kgs.notes.engine.NoteId
 import com.kgs.notes.engine.NoteSummary
 import com.kgs.notes.engine.NoteSyncState
@@ -21,6 +23,7 @@ import com.kgs.notes.engine.NotesEngine
 import com.kgs.notes.engine.LocalSourceId
 import com.kgs.notes.engine.SourceId
 import com.kgs.notes.engine.SourceDescriptor
+import com.kgs.notes.engine.SourceConflictException
 import com.kgs.notes.nextcloud.HttpNextcloudLoginFlow
 import com.kgs.notes.nextcloud.HttpNextcloudNotesApi
 import com.kgs.notes.nextcloud.NextcloudApiException
@@ -41,9 +44,11 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.withContext
 
 enum class LibraryFilter {
@@ -59,16 +64,27 @@ enum class LibrarySort {
     ALPHABETICAL,
 }
 
+enum class LibraryView { LIST, CARDS }
+
 enum class LibraryDestination {
     NOTES,
     TRASH,
     SETTINGS,
 }
 
+enum class NoteSelectionOperation { FAVORITE, CATEGORY, MOVE, TRASH, RESTORE, DELETE }
+
 enum class AttachmentMetadataPreference {
     ASK_EVERY_TIME,
     REMOVE_PRIVATE_METADATA,
     KEEP_ORIGINAL,
+}
+
+/** Whether KGS Notes follows the system's dark theme or keeps its own. */
+enum class DarkModePreference(val label: String) {
+    SYSTEM("System"),
+    LIGHT("Light"),
+    DARK("Dark"),
 }
 
 enum class NoteFormatPreference(val label: String, val nextcloudSuffix: String?) {
@@ -77,7 +93,14 @@ enum class NoteFormatPreference(val label: String, val nextcloudSuffix: String?)
     FOLLOW_SOURCE("Follow Source", null),
 }
 
-data class SourceChoice(val id: SourceId, val name: String, val visible: Boolean)
+data class SourceChoice(
+    val id: SourceId,
+    val name: String,
+    val visible: Boolean,
+    val connected: Boolean = true,
+    val supportsAttachments: Boolean = id == LocalSourceId,
+    val writable: Boolean = true,
+)
 
 enum class SourceConnectionPhase {
     READY,
@@ -93,6 +116,10 @@ data class SourceConnectionUiState(
     val phase: SourceConnectionPhase = SourceConnectionPhase.READY,
     val browserUrl: String? = null,
     val message: String? = null,
+    val editingSourceId: SourceId? = null,
+    val initialName: String = "Nextcloud",
+    val initialServerUrl: String = "",
+    val initialLoginName: String = "",
 )
 
 data class NotesUiState(
@@ -103,16 +130,28 @@ data class NotesUiState(
     val filter: LibraryFilter = LibraryFilter.ALL,
     val query: String = "",
     val sort: LibrarySort = LibrarySort.LAST_EDITED,
+    val libraryView: LibraryView = LibraryView.LIST,
+    val groupByDate: Boolean = false,
     val ascending: Boolean = false,
     val destination: LibraryDestination = LibraryDestination.NOTES,
+    /** null shows every Category; an empty path shows Notes without a Category. */
+    val libraryCategory: String? = null,
     val pendingSyncCount: Int = 0,
+    val syncingSources: Boolean = false,
     val editorMode: EditorMode = EditorMode.RICH,
+    val previewModes: Map<NoteId, EditorMode> = emptyMap(),
     val attachmentMetadataPreference: AttachmentMetadataPreference = AttachmentMetadataPreference.ASK_EVERY_TIME,
     val saving: Boolean = false,
+    val changingSource: Boolean = false,
     val userMessage: String? = null,
     val defaultSourceId: SourceId = LocalSourceId,
     val sourceConnection: SourceConnectionUiState = SourceConnectionUiState(),
     val noteFormatPreference: NoteFormatPreference = NoteFormatPreference.MARKDOWN,
+    val theme: NotesTheme = NotesTheme.KGS_NOTES,
+    val darkMode: DarkModePreference = DarkModePreference.SYSTEM,
+    /** The mode for new Notes and for Notes whose mode was never switched. */
+    val defaultEditorMode: EditorMode = EditorMode.RICH,
+    val externalFile: ExternalFileUiState? = null,
 )
 
 class NotesViewModel internal constructor(
@@ -137,6 +176,19 @@ class NotesViewModel internal constructor(
     private val selected = MutableStateFlow<Note?>(null)
     private val controls = MutableStateFlow(
         UiControls(
+            groupByDate = preferences.getBoolean(GROUP_BY_DATE_KEY, false),
+            theme = preferences.getString(THEME_KEY, null)
+                ?.let { stored -> NotesTheme.entries.firstOrNull { it.name == stored } }
+                ?: NotesTheme.KGS_NOTES,
+            darkMode = preferences.getString(DARK_MODE_KEY, null)
+                ?.let { stored -> DarkModePreference.entries.firstOrNull { it.name == stored } }
+                ?: DarkModePreference.SYSTEM,
+            defaultEditorMode = preferences.getString(DEFAULT_EDITOR_MODE_KEY, null)
+                ?.let { stored -> EditorMode.entries.firstOrNull { it.name == stored } }
+                ?: EditorMode.RICH,
+            libraryView = preferences.getString(LIBRARY_VIEW_KEY, null)
+                ?.let { stored -> LibraryView.entries.firstOrNull { it.name == stored } }
+                ?: LibraryView.LIST,
             attachmentMetadataPreference = preferences
                 .getString(ATTACHMENT_METADATA_PREFERENCE_KEY, null)
                 ?.let { stored ->
@@ -160,12 +212,14 @@ class NotesViewModel internal constructor(
     private var metadataDirty = false
     private var connectionJob: Job? = null
     private var foregroundRefreshJob: Job? = null
+    private var manualSyncJob: Job? = null
     private val syncJobs = mutableMapOf<NoteId, Job>()
     private val nextcloudSources = linkedMapOf<SourceId, NextcloudNotesSource>()
     private val sourcesReady = CompletableDeferred<Unit>()
     private val markdownEditor = DefaultMarkdownEditor()
+    private val externalFiles = ExternalFileSession(application, viewModelScope)
 
-    val state: StateFlow<NotesUiState> = combine(
+    private val libraryUi = combine(
         engine.library,
         engine.sources,
         selected,
@@ -187,14 +241,15 @@ class NotesViewModel internal constructor(
             LibraryDestination.SETTINGS -> emptyList()
         }
         val notes = candidates.filter(visible).filter { note ->
+            controls.destination != LibraryDestination.NOTES || controls.libraryCategory == null || note.category == controls.libraryCategory
+        }.filter { note ->
             controls.query.isBlank() || listOf(note.title, note.snippet, note.category)
                 .any { it.contains(controls.query, ignoreCase = true) }
         }.sortedWith(controls.comparator())
         NotesUiState(
             notes = notes,
             selectedNote = selectedNote,
-            categories = library.active
-                .map(NoteSummary::category)
+            categories = (library.active.map(NoteSummary::category) + listOfNotNull(selectedNote?.category))
                 .filter(String::isNotBlank)
                 .distinct(),
             sources = allSourceIds.map { id ->
@@ -203,31 +258,63 @@ class NotesViewModel internal constructor(
                     name = descriptorsById[id]?.name
                         ?: if (id == LocalSourceId) "Local Source" else "Disconnected Source",
                     visible = id !in controls.hiddenSourceIds,
+                    connected = id in descriptorsById,
+                    supportsAttachments = descriptorsById[id]?.capabilities?.attachments == true,
+                    writable = descriptorsById[id]?.capabilities?.writable == true,
                 )
             },
             filter = controls.filter,
             query = controls.query,
             sort = controls.sort,
+            libraryView = controls.libraryView,
+            groupByDate = controls.groupByDate,
             ascending = controls.ascending,
             destination = controls.destination,
+            libraryCategory = controls.libraryCategory,
             pendingSyncCount = library.active.count { note ->
                 visible(note) && note.sourceId != LocalSourceId && note.syncState in pendingSyncStates
             },
+            syncingSources = controls.syncingSources,
             editorMode = controls.editorMode,
+            previewModes = notes.associate { it.id to previewModeFor(it.id, controls.defaultEditorMode) },
             attachmentMetadataPreference = controls.attachmentMetadataPreference,
             saving = controls.saving,
+            changingSource = controls.movingNoteId != null && controls.movingNoteId == selectedNote?.id,
             userMessage = controls.userMessage,
             defaultSourceId = controls.defaultSourceId,
             sourceConnection = controls.sourceConnection,
             noteFormatPreference = controls.noteFormatPreference,
+            theme = controls.theme,
+            darkMode = controls.darkMode,
+            defaultEditorMode = controls.defaultEditorMode,
         )
+    }
+
+    // Typing in an External File does not rebuild or sort the entire Note library.
+    val state: StateFlow<NotesUiState> = combine(libraryUi, externalFiles.state) { library, file ->
+        library.copy(externalFile = file)
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000),
-        initialValue = NotesUiState(notes = engine.library.value.active),
+        initialValue = NotesUiState(
+            theme = controls.value.theme,
+            darkMode = controls.value.darkMode,
+            defaultEditorMode = controls.value.defaultEditorMode,
+            libraryView = controls.value.libraryView,
+            groupByDate = controls.value.groupByDate,
+            notes = engine.library.value.active,
+            previewModes = engine.library.value.active.associate { it.id to previewModeFor(it.id) },
+        ),
     )
 
     init {
+        viewModelScope.launch {
+            engine.library.collect {
+                val id = selected.value?.id ?: return@collect
+                val current = engine.note(id) ?: return@collect
+                if (selected.value?.id == id) selected.value = current.withPendingDisplayMetadata()
+            }
+        }
         if (engine is ConnectedNotesEngine) {
             viewModelScope.launch {
                 try {
@@ -244,20 +331,91 @@ class NotesViewModel internal constructor(
     fun createNote() {
         viewModelScope.launch {
             sourcesReady.await()
+            flushSelectedContent()
+            selected.value?.id?.let { engine.close(it) }
             val sourceId = controls.value.defaultSourceId.takeIf { preferred ->
                 engine.sources.value.any { it.id == preferred }
             } ?: LocalSourceId
-            val id = engine.createDraft(sourceId = sourceId)
-            selected.value = engine.note(id)
-            controls.update { it.copy(editorMode = EditorMode.RICH) }
+            val id = engine.createDraft(category = controls.value.libraryCategory.orEmpty(), sourceId = sourceId)
+            selected.value = engine.openEditingSession(id)
+            controls.update { it.copy(editorMode = it.defaultEditorMode) }
         }
     }
 
     fun selectNote(id: NoteId) {
         viewModelScope.launch {
             flushSelectedContent()
-            selected.value = engine.note(id)
-            controls.update { it.copy(editorMode = EditorMode.RICH) }
+            selected.value?.id?.takeIf { it != id }?.let { engine.close(it) }
+            selected.value = engine.openEditingSession(id)
+            controls.update { it.copy(editorMode = previewModeFor(id)) }
+        }
+    }
+
+    internal fun openExternalFile(request: ExternalFileRequest) {
+        viewModelScope.launch {
+            try {
+                externalFiles.open(request, controls.value.defaultEditorMode) {
+                    flushSelectedContent()
+                    selected.value?.id?.let { engine.close(it) }
+                    selected.value = null
+                }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { controls.update { it.copy(userMessage = "The file couldn't be opened safely. Your current Note was kept.") } }
+        }
+    }
+
+    fun updateExternalText(sessionKey: String, text: String) = externalFiles.updateText(sessionKey, text)
+
+    fun setExternalEditorMode(sessionKey: String, mode: EditorMode) = externalFiles.setMode(sessionKey, mode)
+
+    fun retryExternalSave(sessionKey: String) = externalFiles.flush(sessionKey)
+
+    fun dismissExternalCloseWarning(sessionKey: String) = externalFiles.dismissCloseWarning(sessionKey)
+
+    fun grantExternalEditing(sessionKey: String, uri: Uri) {
+        viewModelScope.launch {
+            externalFiles.enableEditing(sessionKey, ExternalFileRequest(uri, null,
+                android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                    android.content.Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION))
+        }
+    }
+
+    fun closeExternalFile(sessionKey: String, discard: Boolean = false, onClosed: () -> Unit = {}) {
+        viewModelScope.launch { if (externalFiles.close(sessionKey, discard)) onClosed() }
+    }
+
+    fun copyExternalFileToSource(sessionKey: String, sourceId: SourceId) {
+        viewModelScope.launch {
+            externalFiles.copyIntoNotes(sessionKey) { existingId, previousText, previousTitle, title, text, mode, rememberId ->
+                if (sourceId != LocalSourceId) sourcesReady.await()
+                flushSelectedContent()
+                selected.value?.id?.let { engine.close(it) }
+                selected.value = null
+                val destination = engine.sources.value.firstOrNull { it.id == sourceId }
+                require(destination?.capabilities?.writable == true) { "Choose a connected, writable Source" }
+                // Retain the new identity before subsequent writes so retrying never duplicates a copy.
+                val existing = existingId?.let { engine.note(it) }
+                // An independently edited copy must survive a retry of the file operation.
+                val reusable = existing?.takeIf { candidate ->
+                    candidate.syncState != NoteSyncState.NEEDS_ATTENTION &&
+                        (candidate.state == NoteState.DRAFT ||
+                            ((candidate.markdown == previousText || candidate.markdown == text) &&
+                                (previousTitle == null || candidate.title == previousTitle)))
+                }
+                val id = reusable?.id
+                    ?: engine.createDraft(sourceId = sourceId).also { rememberId(it, null) }
+                engine.updateContent(id, text)
+                engine.rename(id, title.ifBlank { "Untitled Note" })
+                rememberId(id, engine.note(id)?.title)
+                engine.close(id)
+                val finalId = if (engine.note(id)?.sourceId != sourceId) engine.moveToSource(id, sourceId) else id
+                if (finalId != id) rememberId(finalId, engine.note(finalId)?.title)
+                preferences.edit().putString(previewModeKey(finalId), mode.name).apply()
+                selected.value = requireNotNull(engine.openEditingSession(finalId))
+                controls.update { it.copy(editorMode = mode, destination = LibraryDestination.NOTES, libraryCategory = null) }
+                if (sourceId != LocalSourceId) scheduleSynchronization(finalId)
+            }
         }
     }
 
@@ -298,11 +456,11 @@ class NotesViewModel internal constructor(
     fun setCategory(category: String) {
         val current = selected.value ?: return
         if (category == current.category) return
-        selected.value = current.copy(category = category)
         pendingCategory = category
+        selected.value = current.copy(category = category)
         metadataDirty = true
         showSaving()
-        scheduleMetadataSave()
+        scheduleMetadataSave(immediate = true)
     }
 
     fun importImage(uri: Uri, removePrivateMetadata: Boolean) {
@@ -369,6 +527,28 @@ class NotesViewModel internal constructor(
         }
     }
 
+    fun editSourceConnection(id: SourceId) {
+        viewModelScope.launch {
+            val account = withContext(Dispatchers.IO) {
+                accountStore.loadAll().firstOrNull { it.profile.id == id }
+            }
+            if (account == null) {
+                controls.update { it.copy(userMessage = "Reconnect this Source by adding its account again.") }
+                showSourceConnection()
+                return@launch
+            }
+            controls.update {
+                it.copy(sourceConnection = SourceConnectionUiState(
+                    visible = true,
+                    editingSourceId = id,
+                    initialName = account.profile.name,
+                    initialServerUrl = account.credentials.serverUrl,
+                    initialLoginName = account.credentials.loginName,
+                ))
+            }
+        }
+    }
+
     fun dismissSourceConnection() {
         connectionJob?.cancel()
         connectionJob = null
@@ -385,7 +565,7 @@ class NotesViewModel internal constructor(
         connectionJob?.cancel()
         controls.update {
             it.copy(
-                sourceConnection = SourceConnectionUiState(
+                sourceConnection = it.sourceConnection.copy(
                     visible = true,
                     phase = SourceConnectionPhase.STARTING,
                     message = "Contacting Nextcloud…",
@@ -397,7 +577,7 @@ class NotesViewModel internal constructor(
                 val challenge = loginFlow.begin(serverUrl)
                 controls.update {
                     it.copy(
-                        sourceConnection = SourceConnectionUiState(
+                        sourceConnection = it.sourceConnection.copy(
                             visible = true,
                             phase = SourceConnectionPhase.WAITING_FOR_BROWSER,
                             browserUrl = challenge.loginUrl,
@@ -424,7 +604,7 @@ class NotesViewModel internal constructor(
         connectionJob?.cancel()
         controls.update {
             it.copy(
-                sourceConnection = SourceConnectionUiState(
+                sourceConnection = it.sourceConnection.copy(
                     visible = true,
                     phase = SourceConnectionPhase.VERIFYING,
                     message = "Checking Notes access…",
@@ -450,8 +630,27 @@ class NotesViewModel internal constructor(
     }
 
     fun refreshSources() {
-        viewModelScope.launch {
-            runCatching { engine.refreshSources() }
+        if (manualSyncJob?.isActive == true) return
+        manualSyncJob = viewModelScope.launch {
+            controls.update { it.copy(syncingSources = true) }
+            try {
+                sourcesReady.await()
+                flushSelectedContent()
+                val refreshed = refreshAndRetrySources(awaitWrites = true)
+                val snapshot = engine.library.value
+                val pending = (snapshot.active + snapshot.trash).any {
+                    it.sourceId != LocalSourceId && it.syncState in pendingSyncStates
+                }
+                if (!refreshed || pending) controls.update {
+                    it.copy(userMessage = "Some Sources couldn't finish syncing. Your changes remain saved on this device.")
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                controls.update { it.copy(userMessage = "KGS Notes couldn't finish syncing. Please try again.") }
+            } finally {
+                controls.update { it.copy(syncingSources = false) }
+            }
         }
     }
 
@@ -459,7 +658,7 @@ class NotesViewModel internal constructor(
         if (foregroundRefreshJob?.isActive == true) return
         foregroundRefreshJob = viewModelScope.launch {
             while (isActive) {
-                runCatching { engine.refreshSources() }
+                refreshAndRetrySources()
                 delay(SOURCE_REFRESH_INTERVAL_MILLIS)
             }
         }
@@ -473,6 +672,57 @@ class NotesViewModel internal constructor(
     fun setDefaultSource(id: SourceId) {
         preferences.edit().putString(DEFAULT_SOURCE_KEY, id.value).apply()
         controls.update { it.copy(defaultSourceId = id) }
+    }
+
+    fun renameSource(id: SourceId, name: String) {
+        viewModelScope.launch {
+            runCatching {
+                val profile = accountStore.rename(id, name)
+                val account = accountStore.loadAll().first { it.profile.id == id }
+                val source = NextcloudNotesSource(
+                    sourceName = profile.name,
+                    api = HttpNextcloudNotesApi(account.credentials),
+                    sourceId = id,
+                )
+                nextcloudSources[id] = source
+                engine.attachSource(source)
+                runCatching { engine.refreshSources() }
+            }.onFailure { failure ->
+                controls.update { it.copy(userMessage = failure.message ?: "Couldn't rename this Source.") }
+            }
+        }
+    }
+
+    fun removeSource(id: SourceId) {
+        viewModelScope.launch {
+            runCatching {
+                require(id != LocalSourceId)
+                engine.removeSource(id)
+                accountStore.remove(id)
+                nextcloudSources.remove(id)
+                if (controls.value.defaultSourceId == id) setDefaultSource(LocalSourceId)
+                controls.update { it.copy(hiddenSourceIds = it.hiddenSourceIds - id) }
+            }.onFailure { failure ->
+                controls.update {
+                    it.copy(userMessage = failure.message ?: "Couldn't remove this Source.")
+                }
+            }
+        }
+    }
+
+    fun setTheme(theme: NotesTheme) {
+        preferences.edit().putString(THEME_KEY, theme.name).apply()
+        controls.update { it.copy(theme = theme) }
+    }
+
+    fun setDarkMode(mode: DarkModePreference) {
+        preferences.edit().putString(DARK_MODE_KEY, mode.name).apply()
+        controls.update { it.copy(darkMode = mode) }
+    }
+
+    fun setDefaultEditorMode(mode: EditorMode) {
+        preferences.edit().putString(DEFAULT_EDITOR_MODE_KEY, mode.name).apply()
+        controls.update { it.copy(defaultEditorMode = mode) }
     }
 
     fun setNoteFormatPreference(preference: NoteFormatPreference) {
@@ -496,17 +746,28 @@ class NotesViewModel internal constructor(
 
     fun changeSource(id: SourceId) {
         val current = selected.value ?: return
-        if (current.sourceId == id) return
-        showSaving()
+        if (current.sourceId == id || controls.value.movingNoteId != null) return
+        controls.update { it.copy(movingNoteId = current.id) }
         viewModelScope.launch {
             try {
                 flushSelectedContent()
                 val movedId = engine.moveToSource(current.id, id)
-                selected.value = engine.note(movedId)
+                carryPreviewMode(current.id, movedId)
+                if (selected.value?.id == current.id) {
+                    selected.value = engine.openEditingSession(movedId)?.withPendingDisplayMetadata()
+                }
                 if (id != LocalSourceId) scheduleSynchronization(movedId)
-            } catch (_: Exception) {
-                controls.update { it.copy(userMessage = "KGS Notes couldn't change this Note's Source.") }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                val message = when (failure) {
+                    is SourceConflictException -> "The Note changed on the server. Its Source stayed the same, and your edits were kept."
+                    is IllegalArgumentException -> failure.message ?: "KGS Notes couldn't change this Note's Source."
+                    else -> "KGS Notes couldn't change this Note's Source. Your Note was kept."
+                }
+                controls.update { it.copy(userMessage = message) }
             } finally {
+                controls.update { it.copy(movingNoteId = null) }
                 refreshSavingState()
             }
         }
@@ -534,7 +795,8 @@ class NotesViewModel internal constructor(
         val id = selected.value?.id ?: return
         viewModelScope.launch {
             engine.restore(id)
-            selected.value = engine.note(id)
+            selected.value = engine.openEditingSession(id)
+            scheduleSynchronization(id)
         }
     }
 
@@ -542,7 +804,54 @@ class NotesViewModel internal constructor(
         val id = selected.value?.id ?: return
         viewModelScope.launch {
             engine.deletePermanently(id)
+            preferences.edit().remove(previewModeKey(id)).apply()
             selected.value = null
+        }
+    }
+
+    fun renameNote(id: NoteId, title: String) {
+        viewModelScope.launch {
+            runCatching { engine.rename(id, title) }
+                .onSuccess { scheduleSynchronization(id) }
+                .onFailure { controls.update { it.copy(userMessage = "KGS Notes couldn't rename this Note.") } }
+        }
+    }
+
+    fun applyToNotes(ids: Set<NoteId>, operation: NoteSelectionOperation, value: String = "") {
+        viewModelScope.launch {
+            var failures = 0
+            ids.forEach { id ->
+                runCatching {
+                    val note = engine.note(id) ?: return@runCatching
+                    when (operation) {
+                        NoteSelectionOperation.FAVORITE -> {
+                            val desiredFavorite = value != "remove"
+                            if (note.favorite != desiredFavorite) engine.toggleFavorite(id)
+                        }
+                        NoteSelectionOperation.CATEGORY -> engine.setCategory(id, value)
+                        NoteSelectionOperation.MOVE -> {
+                            val movedId = engine.moveToSource(id, SourceId(value))
+                            carryPreviewMode(id, movedId)
+                        }
+                        NoteSelectionOperation.TRASH -> engine.moveToTrash(id)
+                        NoteSelectionOperation.RESTORE -> engine.restore(id)
+                        NoteSelectionOperation.DELETE -> {
+                            engine.deletePermanently(id)
+                            preferences.edit().remove(previewModeKey(id)).apply()
+                        }
+                    }
+                    if (operation in setOf(
+                            NoteSelectionOperation.FAVORITE,
+                            NoteSelectionOperation.CATEGORY,
+                            NoteSelectionOperation.TRASH,
+                            NoteSelectionOperation.RESTORE,
+                        ) && note.sourceId != LocalSourceId
+                    ) scheduleSynchronization(id)
+                }.onFailure { failures++ }
+            }
+            if (failures > 0) controls.update {
+                it.copy(userMessage = "$failures Note action${if (failures == 1) "" else "s"} couldn't be completed.")
+            }
         }
     }
 
@@ -555,7 +864,23 @@ class NotesViewModel internal constructor(
     }
 
     fun setEditorMode(value: EditorMode) {
+        selected.value?.id?.let { id ->
+            preferences.edit().putString(previewModeKey(id), value.name).apply()
+        }
         controls.update { it.copy(editorMode = value) }
+    }
+
+    private fun previewModeFor(id: NoteId, fallback: EditorMode = controls.value.defaultEditorMode): EditorMode = preferences
+        .getString(previewModeKey(id), null)
+        ?.let { stored -> EditorMode.entries.firstOrNull { it.name == stored } }
+        ?: fallback
+
+    private fun previewModeKey(id: NoteId) = "$PREVIEW_MODE_KEY_PREFIX${id.value}"
+
+    private fun carryPreviewMode(from: NoteId, to: NoteId) {
+        if (from == to) return
+        val mode = preferences.getString(previewModeKey(from), null) ?: return
+        preferences.edit().putString(previewModeKey(to), mode).remove(previewModeKey(from)).apply()
     }
 
     fun setAttachmentMetadataPreference(value: AttachmentMetadataPreference) {
@@ -565,6 +890,17 @@ class NotesViewModel internal constructor(
 
     fun setSort(value: LibrarySort) {
         controls.update { it.copy(sort = value) }
+    }
+
+    fun setGroupByDate(enabled: Boolean) {
+        preferences.edit().putBoolean(GROUP_BY_DATE_KEY, enabled).apply()
+        controls.update { it.copy(groupByDate = enabled) }
+    }
+
+    fun toggleLibraryView() {
+        val next = if (controls.value.libraryView == LibraryView.LIST) LibraryView.CARDS else LibraryView.LIST
+        preferences.edit().putString(LIBRARY_VIEW_KEY, next.name).apply()
+        controls.update { it.copy(libraryView = next) }
     }
 
     fun toggleSortDirection() {
@@ -583,10 +919,15 @@ class NotesViewModel internal constructor(
     }
 
     fun openDestination(destination: LibraryDestination) {
-        controls.update { it.copy(destination = destination) }
+        controls.update { it.copy(destination = destination, libraryCategory = if (destination == LibraryDestination.NOTES) null else it.libraryCategory) }
+    }
+
+    fun openCategory(category: String?) {
+        controls.update { it.copy(destination = LibraryDestination.NOTES, libraryCategory = category, filter = LibraryFilter.ALL, query = "") }
     }
 
     fun flushPendingContent() {
+        externalFiles.flush()
         if (selected.value == null) return
         contentSave?.cancel()
         metadataSave?.cancel()
@@ -619,11 +960,17 @@ class NotesViewModel internal constructor(
         scheduleSynchronization(current.id)
     }
 
-    private fun scheduleMetadataSave() {
+    private fun scheduleMetadataSave(immediate: Boolean = false) {
         metadataSave?.cancel()
         metadataSave = viewModelScope.launch {
-            delay(METADATA_SAVE_DELAY_MILLIS)
-            savePendingMetadata()
+            if (!immediate) delay(METADATA_SAVE_DELAY_MILLIS)
+            try {
+                savePendingMetadata()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                controls.update { it.copy(userMessage = "KGS Notes couldn't save this change. Please try again.") }
+            }
         }
     }
 
@@ -645,14 +992,42 @@ class NotesViewModel internal constructor(
         scheduleSynchronization(id)
     }
 
-    private fun scheduleSynchronization(id: NoteId) {
-        val note = runCatching { engine.library.value.active.firstOrNull { it.id == id } }.getOrNull()
-        if (note?.sourceId == null || note.sourceId == LocalSourceId) return
-        syncJobs[id]?.cancel()
-        syncJobs[id] = viewModelScope.launch {
-            engine.synchronize(id)
-            if (selected.value?.id == id) selected.value = engine.note(id)?.withPendingDisplayMetadata()
+    private fun scheduleSynchronization(id: NoteId): Job? {
+        val snapshot = engine.library.value
+        val note = (snapshot.active + snapshot.trash).firstOrNull { it.id == id }
+        if (note?.sourceId == null || note.sourceId == LocalSourceId) return null
+        // An issued create must finish and retain its remote identity. Subsequent
+        // edits are picked up by this job after the current request completes.
+        syncJobs[id]?.takeIf { it.isActive }?.let { return it }
+        return viewModelScope.launch {
+            while (isActive) {
+                val before = engine.note(id) ?: break
+                engine.synchronize(id)
+                val after = engine.note(id) ?: break
+                if (selected.value?.id == id) selected.value = after.withPendingDisplayMetadata()
+                // Stop after a network failure; foreground refresh retries it.
+                // Continue when an edit arrived while the preceding upload ran.
+                if (after.syncState != NoteSyncState.SAVED_LOCALLY || after == before) break
+            }
+        }.also { syncJobs[id] = it }
+    }
+
+    private suspend fun refreshAndRetrySources(awaitWrites: Boolean = false): Boolean {
+        val refreshed = try {
+            engine.refreshSources()
+            true
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // Durable pending changes can still be retried on connected Sources.
+            false
         }
+        val snapshot = engine.library.value
+        val jobs = (snapshot.active + snapshot.trash)
+            .filter { it.sourceId != LocalSourceId && it.syncState == NoteSyncState.SAVED_LOCALLY }
+            .mapNotNull { scheduleSynchronization(it.id) }
+        if (awaitWrites) (jobs + syncJobs.values.toList()).distinct().joinAll()
+        return refreshed
     }
 
     private suspend fun restoreConnectedSources() {
@@ -663,7 +1038,7 @@ class NotesViewModel internal constructor(
             engine.attachSource(source)
         }
         if (accounts.isNotEmpty()) {
-            runCatching { engine.refreshSources() }
+            refreshAndRetrySources()
             applyPreferredNoteFormat(nextcloudSources.values)
         }
     }
@@ -687,6 +1062,10 @@ class NotesViewModel internal constructor(
             )
         }
         val profile = accountStore.profileFor(sourceName, credentials)
+        val editingSourceId = controls.value.sourceConnection.editingSourceId
+        require(editingSourceId == null || editingSourceId == profile.id) {
+            "The account belongs to a different Source"
+        }
         val source = NextcloudNotesSource(
             sourceName = profile.name,
             api = HttpNextcloudNotesApi(credentials),
@@ -697,10 +1076,10 @@ class NotesViewModel internal constructor(
         withContext(Dispatchers.IO) { accountStore.save(profile.name, credentials) }
         nextcloudSources[profile.id] = source
         engine.attachSource(source)
-        engine.refreshSources()
+        refreshAndRetrySources()
         controls.update { current ->
             current.copy(
-                sourceConnection = SourceConnectionUiState(
+                sourceConnection = current.sourceConnection.copy(
                     visible = true,
                     phase = SourceConnectionPhase.CONNECTED,
                     message = "${profile.name} is connected.",
@@ -711,7 +1090,7 @@ class NotesViewModel internal constructor(
 
     private fun showConnectionFailure(failure: Exception) {
         val message = when (failure) {
-            is UnsupportedNotesApi -> "This server needs Nextcloud Notes API 1.4 or newer."
+            is UnsupportedNotesApi -> "This server needs Nextcloud Notes API ${failure.minimumVersion} or newer."
             is NextcloudApiException -> if (failure.statusCode == 401) {
                 "Nextcloud rejected these credentials."
             } else {
@@ -724,11 +1103,12 @@ class NotesViewModel internal constructor(
                     "Enter a valid Nextcloud server address."
                 else -> "KGS Notes couldn't connect to this server."
             }
+            is IllegalArgumentException -> failure.message ?: "KGS Notes couldn't update this Source."
             else -> "KGS Notes couldn't connect to this server."
         }
         controls.update { current ->
             current.copy(
-                sourceConnection = SourceConnectionUiState(
+                sourceConnection = current.sourceConnection.copy(
                     visible = true,
                     phase = SourceConnectionPhase.ERROR,
                     message = message,
@@ -791,6 +1171,12 @@ class NotesViewModel internal constructor(
         const val ATTACHMENT_METADATA_PREFERENCE_KEY = "attachment_metadata_preference"
         const val DEFAULT_SOURCE_KEY = "default_source"
         const val NOTE_FORMAT_PREFERENCE_KEY = "note_format_preference"
+        const val PREVIEW_MODE_KEY_PREFIX = "preview_mode_"
+        const val LIBRARY_VIEW_KEY = "library_view"
+        const val GROUP_BY_DATE_KEY = "group_by_date"
+        const val THEME_KEY = "app_theme"
+        const val DARK_MODE_KEY = "dark_mode"
+        const val DEFAULT_EDITOR_MODE_KEY = "default_editor_mode"
         const val CONTENT_SAVE_DELAY_MILLIS = 120L
         const val METADATA_SAVE_DELAY_MILLIS = 300L
         const val LOGIN_POLL_INTERVAL_MILLIS = 1_000L
@@ -802,16 +1188,24 @@ class NotesViewModel internal constructor(
         val filter: LibraryFilter = LibraryFilter.ALL,
         val query: String = "",
         val sort: LibrarySort = LibrarySort.LAST_EDITED,
+        val libraryView: LibraryView = LibraryView.LIST,
+        val groupByDate: Boolean = false,
         val ascending: Boolean = false,
         val destination: LibraryDestination = LibraryDestination.NOTES,
+        val libraryCategory: String? = null,
         val hiddenSourceIds: Set<SourceId> = emptySet(),
         val editorMode: EditorMode = EditorMode.RICH,
         val attachmentMetadataPreference: AttachmentMetadataPreference = AttachmentMetadataPreference.ASK_EVERY_TIME,
         val saving: Boolean = false,
+        val syncingSources: Boolean = false,
+        val movingNoteId: NoteId? = null,
         val userMessage: String? = null,
         val defaultSourceId: SourceId = LocalSourceId,
         val sourceConnection: SourceConnectionUiState = SourceConnectionUiState(),
         val noteFormatPreference: NoteFormatPreference = NoteFormatPreference.MARKDOWN,
+        val theme: NotesTheme = NotesTheme.KGS_NOTES,
+        val darkMode: DarkModePreference = DarkModePreference.SYSTEM,
+        val defaultEditorMode: EditorMode = EditorMode.RICH,
     ) {
         fun comparator(): Comparator<NoteSummary> {
             val base = when (sort) {

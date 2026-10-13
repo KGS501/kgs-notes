@@ -36,5 +36,8 @@ jobs:
           pnpm --dir editor/web install --frozen-lockfile
           pnpm --dir editor/web build
           git diff --exit-code -- editor/src/main/assets
+      - name: Test rich Markdown renderer
+        working-directory: editor/web
+        run: node --test test/rich-markdown.test.mjs
       - name: Test, lint, and assemble
         run: ./gradlew :notes-engine:test :source:nextcloud:test :editor:testDebugUnitTest :app:testDebugUnitTest :app:lintDebug :app:assembleDebug

@@ -19,15 +19,55 @@ import okhttp3.tls.HeldCertificate
 
 class NextcloudNotesSourceTest {
     @Test
+    fun `the final chunk can reference Notes already returned in earlier chunks`() = runBlocking {
+        val certificate = HeldCertificate.Builder().addSubjectAlternativeName("localhost").build()
+        val serverTrust = HandshakeCertificates.Builder().heldCertificate(certificate).build()
+        val clientTrust = HandshakeCertificates.Builder().addTrustedCertificate(certificate.certificate).build()
+        val server = MockWebServer().apply { useHttps(serverTrust.sslSocketFactory(), false); start() }
+        try {
+            server.enqueue(MockResponse().setBody("""{"ocs":{"data":{"capabilities":{"notes":{"api_version":["1.3"]}}}}}"""))
+            server.enqueue(MockResponse().setHeader("X-Notes-Chunk-Cursor", "next-page").setBody(
+                """[{"id":1,"etag":"first","title":"First","content":"One","category":"","modified":1787558400}]""",
+            ))
+            server.enqueue(MockResponse().setBody(
+                """[{"id":2,"etag":"second","title":"Second","content":"Two","category":"","modified":1787558400},{"id":1}]""",
+            ))
+            val client = OkHttpClient.Builder().sslSocketFactory(clientTrust.sslSocketFactory(), clientTrust.trustManager).build()
+            val source = NextcloudNotesSource("Paged Source", HttpNextcloudNotesApi(
+                NextcloudCredentials(server.url("/").toString(), "test-user", "test-password"), client,
+            ))
+
+            source.refresh()
+
+            assertEquals(listOf("1", "2"), source.notes.value.map { it.remoteId })
+            server.takeRequest(1, TimeUnit.SECONDS)
+            server.takeRequest(1, TimeUnit.SECONDS)
+            assertEquals("/index.php/apps/notes/api/v1/notes?chunkSize=100&chunkCursor=next-page", server.takeRequest(1, TimeUnit.SECONDS)?.path)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
     fun `stock servers must expose the conflict-safe Notes API before refresh`() = runBlocking {
         val source = NextcloudNotesSource(
             sourceName = "Home cloud",
-            api = FakeNotesApi(apiVersion = "1.3"),
+            api = FakeNotesApi(apiVersion = "1.1"),
         )
 
         val error = assertFailsWith<UnsupportedNotesApi> { source.refresh() }
 
-        assertEquals("1.4", error.minimumVersion)
+        assertEquals("1.2", error.minimumVersion)
+    }
+
+    @Test
+    fun `API 1_2 and 1_3 already support safe Note editing`() = runBlocking {
+        for (version in listOf("1.2", "1.3")) {
+            val source = NextcloudNotesSource("Compatible cloud", FakeNotesApi(apiVersion = version))
+            source.refresh()
+            source.createNote(SourceNoteDraft("Test", "Synthetic content", "", false, Instant.now()))
+            assertEquals(1, source.notes.value.size)
+        }
     }
 
     @Test
@@ -193,7 +233,7 @@ class NextcloudNotesSourceTest {
             val request = server.takeRequest(1, TimeUnit.SECONDS)
             assertEquals("PUT", request?.method)
             assertEquals("/cloud/index.php/apps/notes/api/v1/notes/42", request?.path)
-            assertEquals("etag-old", request?.getHeader("If-Match"))
+            assertEquals("\"etag-old\"", request?.getHeader("If-Match"))
         } finally {
             server.shutdown()
         }

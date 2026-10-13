@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.KgsNotes.Starting" parent="Theme.KgsNotes.StartingBase">
+        <item name="android:navigationBarColor">@color/logo_background</item>
+        <item name="android:windowLightNavigationBar">true</item>
+    </style>
+</resources>
