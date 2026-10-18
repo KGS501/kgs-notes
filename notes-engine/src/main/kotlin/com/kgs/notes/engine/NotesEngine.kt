@@ -35,6 +35,8 @@ data class Note(
     val trashedAt: Instant? = null,
     /** Device-local prominence; independent of the Source Favorite flag. */
     val pinned: Boolean = false,
+    /** The latest attempt to reach this Note's Source failed; pending changes stay Saved Locally. */
+    val syncFailed: Boolean = false,
 )
 
 data class NoteSummary(
@@ -50,11 +52,15 @@ data class NoteSummary(
     /** Bounded canonical Markdown used only to render a library card preview. */
     val previewMarkdown: String = snippet,
     val pinned: Boolean = false,
+    /** The latest attempt to reach this Note's Source failed; pending changes stay Saved Locally. */
+    val syncFailed: Boolean = false,
 )
 
 data class LibrarySnapshot(
     val active: List<NoteSummary> = emptyList(),
     val trash: List<NoteSummary> = emptyList(),
+    /** Categories each Source keeps even while no Note uses them. */
+    val categories: Map<SourceId, Set<String>> = emptyMap(),
 ) {
     val favorites: List<NoteSummary> get() = active.filter(NoteSummary::favorite)
 }
@@ -109,6 +115,18 @@ interface NotesEngine {
     suspend fun rename(id: NoteId, title: String)
 
     suspend fun setCategory(id: NoteId, category: String)
+
+    /** Renames this Source's Category and descendants using ordinary durable Note updates. */
+    suspend fun renameCategory(sourceId: SourceId, category: String, newCategory: String): Set<NoteId> =
+        replaceCategoryAssignments(sourceId, category, normalizedCategoryPath(newCategory))
+
+    /** Keeps an empty Category available in this Source and returns its normalized path. */
+    suspend fun createCategory(sourceId: SourceId, category: String): String =
+        throw UnsupportedOperationException("This Source cannot keep empty Categories")
+
+    /** Clears Category assignments, including descendants, while keeping every Note. */
+    suspend fun deleteCategory(sourceId: SourceId, category: String): Set<NoteId> =
+        replaceCategoryAssignments(sourceId, category, "")
 
     suspend fun importManagedAttachment(
         noteId: NoteId,

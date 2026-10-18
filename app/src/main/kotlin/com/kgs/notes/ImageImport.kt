@@ -1,5 +1,7 @@
 package com.kgs.notes
 
+import com.kgs.notes.design.R.string as UiR
+
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -24,9 +26,10 @@ internal fun prepareImageImport(
     uri: Uri,
     removePrivateMetadata: Boolean,
 ): PreparedImage {
+    val strings = context.localizedResources()
     val resolver = context.contentResolver
     val mediaType = resolver.getType(uri)?.lowercase() ?: "image/jpeg"
-    require(mediaType.startsWith("image/")) { "The selected file is not an image" }
+    require(mediaType.startsWith("image/")) { strings.getString(UiR.ui_the_selected_file_is_not_an_image) }
     val displayName = resolver.query(
         uri,
         arrayOf(OpenableColumns.DISPLAY_NAME),
@@ -36,17 +39,17 @@ internal fun prepareImageImport(
     )?.use { cursor ->
         if (cursor.moveToFirst()) cursor.getString(0) else null
     }?.takeIf(String::isNotBlank) ?: "Image.${extensionFor(mediaType)}"
-    val original = requireNotNull(resolver.openInputStream(uri)) { "The selected image cannot be opened" }
-        .use(::readBounded)
+    val original = requireNotNull(resolver.openInputStream(uri)) { strings.getString(UiR.ui_the_selected_image_cannot_be_opened) }
+        .use { readBounded(strings, it) }
     val content = if (removePrivateMetadata) {
-        reencodeWithoutPrivateMetadata(original, mediaType)
+        reencodeWithoutPrivateMetadata(strings, original, mediaType)
     } else {
         original
     }
     return PreparedImage(displayName, mediaType, content)
 }
 
-private fun readBounded(input: java.io.InputStream): ByteArray {
+private fun readBounded(strings: android.content.res.Resources, input: java.io.InputStream): ByteArray {
     val output = ByteArrayOutputStream()
     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
     var total = 0
@@ -54,15 +57,15 @@ private fun readBounded(input: java.io.InputStream): ByteArray {
         val read = input.read(buffer)
         if (read < 0) break
         total += read
-        require(total <= MAX_IMAGE_BYTES) { "The selected image is larger than 64 MB" }
+        require(total <= MAX_IMAGE_BYTES) { strings.getString(UiR.ui_the_selected_image_is_larger_than_64_mb) }
         output.write(buffer, 0, read)
     }
     return output.toByteArray()
 }
 
-private fun reencodeWithoutPrivateMetadata(bytes: ByteArray, mediaType: String): ByteArray {
+private fun reencodeWithoutPrivateMetadata(strings: android.content.res.Resources, bytes: ByteArray, mediaType: String): ByteArray {
     require(mediaType == "image/jpeg" || mediaType == "image/png") {
-        "Metadata removal currently supports JPEG and PNG images; choose Keep original for this format"
+        strings.getString(UiR.ui_metadata_removal_currently_supports_jpeg_and_png_images_choose_keep_original_for_this)
     }
     val decoded = if (Build.VERSION.SDK_INT >= 28) {
         ImageDecoder.decodeBitmap(ImageDecoder.createSource(ByteBuffer.wrap(bytes))) { decoder, _, _ ->
@@ -70,13 +73,13 @@ private fun reencodeWithoutPrivateMetadata(bytes: ByteArray, mediaType: String):
         }
     } else {
         requireNotNull(BitmapFactory.decodeByteArray(bytes, 0, bytes.size)) {
-            "The selected image could not be decoded"
+            strings.getString(UiR.ui_the_selected_image_could_not_be_decoded)
         }.applyExifOrientation(bytes)
     }
     val output = ByteArrayOutputStream()
     val format = if (mediaType == "image/png") Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG
     val quality = if (format == Bitmap.CompressFormat.PNG) 100 else 95
-    check(decoded.compress(format, quality, output)) { "The selected image could not be prepared" }
+    check(decoded.compress(format, quality, output)) { strings.getString(UiR.ui_the_selected_image_could_not_be_prepared) }
     decoded.recycle()
     return output.toByteArray()
 }

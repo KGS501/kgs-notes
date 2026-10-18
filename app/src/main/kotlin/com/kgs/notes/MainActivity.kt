@@ -4,7 +4,7 @@ import android.graphics.Color
 import android.content.Intent
 import android.os.Bundle
 import androidx.activity.SystemBarStyle
-import androidx.activity.ComponentActivity
+import androidx.appcompat.app.AppCompatActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
@@ -18,7 +18,7 @@ import com.kgs.notes.editor.RichEditorStartup
 private val LightNavigationScrim = Color.argb(0xe6, 0xFF, 0xFF, 0xFF)
 private val DarkNavigationScrim = Color.argb(0x80, 0x1b, 0x1b, 0x1b)
 
-class MainActivity : ComponentActivity() {
+class MainActivity : AppCompatActivity() {
     private val notesViewModel: NotesViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -54,6 +54,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        notesViewModel.refreshLocale(resources.configuration.locales[0])
         notesViewModel.startForegroundSourceRefresh()
     }
 

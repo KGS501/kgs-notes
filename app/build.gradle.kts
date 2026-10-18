@@ -11,8 +11,8 @@ android {
         applicationId = "com.kgs501.kgsnotes"
         minSdk = 26
         targetSdk = 37
-        versionCode = 34
-        versionName = "V.0.0.34"
+        versionCode = 36
+        versionName = "V.0.0.36"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -30,6 +30,9 @@ android {
         }
     }
 
+    // Both app languages stay available when switching offline, including Play bundles.
+    bundle { language { enableSplit = false } }
+
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
     }
@@ -43,6 +46,8 @@ dependencies {
 
     implementation(platform(libs.compose.bom))
     implementation(libs.activity.compose)
+    implementation(libs.appcompat)
+    implementation(libs.window)
     implementation(libs.core.splashscreen)
     implementation(libs.compose.foundation)
     implementation(libs.compose.material3)

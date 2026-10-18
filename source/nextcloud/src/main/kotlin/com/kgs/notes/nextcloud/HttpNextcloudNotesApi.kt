@@ -33,6 +33,10 @@ class HttpNextcloudNotesApi(
     private val serverUrl: HttpUrl = canonicalNextcloudServerAddress(credentials.serverUrl).toHttpUrlOrNull()
         ?: throw NextcloudConnectionException(NextcloudConnectionFailure.INVALID_SERVER_URL)
     private val authorization = Credentials.basic(credentials.loginName, credentials.appPassword)
+    // OkHttp silently resends a request whose pooled connection drops. A resent
+    // create publishes a second Note, so writes fail instead and the engine retries
+    // them knowing the first attempt may have reached the server.
+    private val writeClient: OkHttpClient = client.newBuilder().retryOnConnectionFailure(false).build()
 
     override suspend fun capabilities(): NotesCapabilities = withContext(Dispatchers.IO) {
         val endpoint = requireNotNull(serverUrl.resolve("ocs/v2.php/cloud/capabilities"))
@@ -108,7 +112,7 @@ class HttpNextcloudNotesApi(
         val endpoint = requireNotNull(serverUrl.resolve("index.php/apps/notes/api/v1/notes"))
         val body = note.requestBody()
         val request = authenticatedRequest(endpoint).post(body).build()
-        parseNote(executeObject(request))
+        parseNote(executeObject(request, writeClient))
     }
 
     override suspend fun update(
@@ -127,13 +131,13 @@ class HttpNextcloudNotesApi(
             })
             .put(note.requestBody())
             .build()
-        parseNote(executeObject(request))
+        parseNote(executeObject(request, writeClient))
     }
 
     override suspend fun delete(id: Long): Unit = withContext(Dispatchers.IO) {
         val endpoint = requireNotNull(serverUrl.resolve("index.php/apps/notes/api/v1/notes/$id"))
         val request = authenticatedRequest(endpoint).delete().build()
-        client.newCall(request).execute().use { response ->
+        writeClient.newCall(request).execute().use { response ->
             if (!response.isSuccessful) throw NextcloudApiException(response.code)
         }
     }
@@ -143,7 +147,7 @@ class HttpNextcloudNotesApi(
         val body = buildJsonObject { put("fileSuffix", fileSuffix) }
             .toString()
             .toRequestBody(JSON_MEDIA_TYPE)
-        val root = executeObject(authenticatedRequest(endpoint).put(body).build())
+        val root = executeObject(authenticatedRequest(endpoint).put(body).build(), writeClient)
         NotesSettings(root.requiredString("fileSuffix"))
     }
 
@@ -161,7 +165,7 @@ class HttpNextcloudNotesApi(
         .header("Authorization", authorization)
         .header("User-Agent", USER_AGENT)
 
-    private fun executeObject(request: Request): JsonObject = client.newCall(request).execute().use { response ->
+    private fun executeObject(request: Request, via: OkHttpClient = client): JsonObject = via.newCall(request).execute().use { response ->
         if (!response.isSuccessful) throw NextcloudApiException(response.code)
         parseElement(response.body.string()).jsonObject
     }

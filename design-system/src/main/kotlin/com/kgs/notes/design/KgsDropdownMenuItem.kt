@@ -1,5 +1,7 @@
 package com.kgs.notes.design
 
+import com.kgs.notes.design.R.string as UiR
+
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -33,6 +35,8 @@ fun KgsDropdownMenuItem(
     modifier: Modifier = Modifier,
     contentColor: Color = MaterialTheme.colorScheme.onSurface,
 ) {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+
     KgsExpressiveSurface(
         onClick = onClick,
         color = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
@@ -46,7 +50,7 @@ fun KgsDropdownMenuItem(
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
             Box(contentAlignment = Alignment.Center, modifier = Modifier.size(24.dp)
                 .testTag("dropdown-leading-$text")
-                .then(if (selected) Modifier.semantics { contentDescription = "Selected: $text" } else Modifier)) {
+                .then(if (selected) Modifier.semantics { contentDescription = strings.getString(UiR.ui_selected_value, text) } else Modifier)) {
                 if (selected) Icon(Icons.Default.Check, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
                 else CompositionLocalProvider(LocalContentColor provides contentColor) { icon() }
             }

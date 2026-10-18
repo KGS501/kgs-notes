@@ -7,6 +7,7 @@ import java.time.ZoneOffset
 import kotlin.io.path.isRegularFile
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlin.test.assertFailsWith
@@ -20,6 +21,67 @@ import kotlinx.coroutines.launch
 import org.junit.jupiter.api.io.TempDir
 
 class ConnectedNotesEngineTest {
+    @Test
+    fun `empty Categories are kept per Source and leave with their Source`() = runBlocking {
+        val source = ControlledSource(SourceId("category-cloud"), emptyList())
+        val engine: NotesEngine = ConnectedNotesEngine.open(root.resolve("local"), root.resolve("working"))
+        engine.attachSource(source)
+        engine.createCategory(LocalSourceId, "Home")
+        engine.createCategory(source.descriptor.id, "Work")
+
+        val reopened: NotesEngine = ConnectedNotesEngine.open(root.resolve("local"), root.resolve("working"))
+        reopened.attachSource(source)
+        assertEquals(setOf("Home"), reopened.library.value.categories[LocalSourceId])
+        assertEquals(setOf("Work"), reopened.library.value.categories[source.descriptor.id])
+        reopened.renameCategory(source.descriptor.id, "Work", "Office")
+        assertEquals(setOf("Office"), reopened.library.value.categories[source.descriptor.id])
+        assertTrue(source.notes.value.isEmpty())
+        reopened.removeSource(source.descriptor.id)
+        assertEquals(null, reopened.library.value.categories[source.descriptor.id])
+        assertEquals(setOf("Home"), reopened.library.value.categories[LocalSourceId])
+    }
+
+    @Test
+    fun `Categories created by another client keep their exact lookup path during management`() = runBlocking {
+        val source = ControlledSource(SourceId("external-categories"), listOf(SourceNote(
+            remoteId = "remote-1", revision = "r1", title = "Fixture", markdown = "Body",
+            category = "Work: projects/Sub", favorite = false, modifiedAt = Instant.EPOCH, readOnly = false,
+        )))
+        val engine: NotesEngine = ConnectedNotesEngine.open(root.resolve("local"), root.resolve("working"))
+        engine.attachSource(source)
+        engine.refreshSources()
+        val id = engine.library.value.active.single().id
+        assertEquals(setOf(id), engine.renameCategory(source.descriptor.id, "Work: projects", "Office"))
+        engine.synchronize(id)
+        assertEquals("Office/Sub", source.notes.value.single().category)
+        engine.deleteCategory(source.descriptor.id, "Office").forEach { engine.synchronize(it) }
+        assertEquals("", source.notes.value.single().category)
+    }
+
+    @Test
+    fun `Category operations queue ordinary conflict safe Source updates and preserve other Sources`() = runBlocking {
+        val source = ControlledSource(SourceId("category-cloud"), emptyList())
+        val engine: NotesEngine = ConnectedNotesEngine.open(root.resolve("local"), root.resolve("working"))
+        engine.attachSource(source)
+        val remote = engine.createDraft(category = "Work/Sub", sourceId = source.descriptor.id)
+        val local = engine.createDraft(category = "Work/Sub")
+        engine.updateContent(remote, "Server body")
+        engine.updateContent(local, "Local body")
+        engine.synchronize(remote)
+        engine.renameCategory(source.descriptor.id, "Work", "Office")
+        assertEquals("Work/Sub", engine.note(local)?.category)
+        assertEquals("Office/Sub", engine.note(remote)?.category)
+        assertEquals(NoteSyncState.SAVED_LOCALLY, engine.note(remote)?.syncState)
+        engine.synchronize(remote)
+        assertEquals("Office/Sub", source.notes.value.single().category)
+        engine.deleteCategory(source.descriptor.id, "Office")
+        engine.synchronize(remote)
+        assertEquals("", source.notes.value.single().category)
+        assertEquals("Server body", source.notes.value.single().markdown)
+        assertEquals("Work/Sub", engine.note(local)?.category)
+        assertEquals(2, engine.library.value.active.size)
+    }
+
     @Test
     fun `fresh storage and empty reopening expose a usable Local Source`() = runBlocking {
         repeat(2) {
@@ -201,7 +263,7 @@ class ConnectedNotesEngineTest {
     }
 
     @Test
-    fun `a rejected move to local preserves the server Note and pending edits`() = runBlocking {
+    fun `a move to local during a remote change keeps the server Note and moves the pending edits`() = runBlocking {
         val source = ControlledSource(SourceId("cloud"), emptyList())
         val engine: NotesEngine = ConnectedNotesEngine.open(root.resolve("local"), root.resolve("working"))
         engine.attachSource(source)
@@ -211,16 +273,15 @@ class ConnectedNotesEngineTest {
         engine.updateContent(id, "My pending edit")
         source.editRemotely("Changed on server")
 
-        assertFailsWith<SourceConflictException> { engine.moveToSource(id, LocalSourceId) }
+        val movedId = engine.moveToSource(id, LocalSourceId)
 
+        assertEquals(LocalSourceId, assertNotNull(engine.note(movedId)).sourceId)
+        assertEquals("My pending edit", assertNotNull(engine.note(movedId)).markdown)
         assertEquals(source.descriptor.id, assertNotNull(engine.note(id)).sourceId)
-        assertEquals("My pending edit", assertNotNull(engine.note(id)).markdown)
-        assertEquals(NoteState.ACTIVE, assertNotNull(engine.note(id)).state)
-        assertEquals(NoteSyncState.NEEDS_ATTENTION, assertNotNull(engine.note(id)).syncState)
+        assertEquals("Changed on server", assertNotNull(engine.note(id)).markdown)
+        assertEquals(NoteSyncState.SYNCED, assertNotNull(engine.note(id)).syncState)
         assertEquals("Changed on server", source.notes.value.single().markdown)
-        assertEquals(listOf(id), engine.library.value.active.map(NoteSummary::id))
-        engine.synchronize(id)
-        assertEquals("Changed on server", source.notes.value.single().markdown)
+        assertEquals(setOf(id, movedId), engine.library.value.active.map(NoteSummary::id).toSet())
     }
 
     @Test
@@ -605,6 +666,167 @@ class ConnectedNotesEngineTest {
         assertEquals(listOf(id), engine.library.value.trash.map(NoteSummary::id))
     }
 
+    @Test
+    fun `a create whose response was lost is adopted after refresh instead of published twice`() = runBlocking {
+        val sourceId = SourceId("nextcloud-home")
+        val source = ControlledSource(sourceId, emptyList())
+        val engine = ConnectedNotesEngine.open(root.resolve("local"), root.resolve("working"))
+        engine.attachSource(source)
+        val id = engine.createDraft(sourceId = sourceId)
+        engine.updateContent(id, "Offline idea")
+        engine.close(id)
+
+        source.loseNextResponse = true
+        engine.synchronize(id)
+
+        assertEquals(NoteSyncState.SAVED_LOCALLY, assertNotNull(engine.note(id)).syncState)
+        assertTrue(engine.library.value.active.single().syncFailed)
+        engine.refreshSources()
+        engine.synchronize(id)
+
+        assertEquals(1, source.notes.value.size)
+        assertEquals(listOf(id), engine.library.value.active.map(NoteSummary::id))
+        assertEquals(NoteSyncState.SYNCED, assertNotNull(engine.note(id)).syncState)
+        assertFalse(engine.library.value.active.single().syncFailed)
+    }
+
+    @Test
+    fun `retrying a create whose response was lost uploads later edits to the same remote Note`() = runBlocking {
+        val sourceId = SourceId("nextcloud-home")
+        val source = ControlledSource(sourceId, emptyList())
+        val engine = ConnectedNotesEngine.open(root.resolve("local"), root.resolve("working"))
+        engine.attachSource(source)
+        val id = engine.createDraft(sourceId = sourceId)
+        engine.updateContent(id, "Offline idea")
+        engine.close(id)
+        source.loseNextResponse = true
+        engine.synchronize(id)
+
+        engine.updateContent(id, "Offline idea\nwith more detail")
+        engine.synchronize(id)
+
+        assertEquals(listOf("Offline idea\nwith more detail"), source.notes.value.map(SourceNote::markdown))
+        assertEquals(NoteSyncState.SYNCED, assertNotNull(engine.note(id)).syncState)
+        engine.refreshSources()
+        assertEquals(listOf(id), engine.library.value.active.map(NoteSummary::id))
+    }
+
+    @Test
+    fun `reopening keeps an uncertain create from publishing a second copy`() = runBlocking {
+        val sourceId = SourceId("nextcloud-home")
+        val source = ControlledSource(sourceId, emptyList())
+        val first = ConnectedNotesEngine.open(root.resolve("local"), root.resolve("working"))
+        first.attachSource(source)
+        val id = first.createDraft(sourceId = sourceId)
+        first.updateContent(id, "Written on the train")
+        first.close(id)
+        source.loseNextResponse = true
+        first.synchronize(id)
+
+        val reopened = ConnectedNotesEngine.open(root.resolve("local"), root.resolve("working"))
+        reopened.attachSource(source)
+        reopened.synchronize(id)
+        reopened.refreshSources()
+
+        assertEquals(1, source.notes.value.size)
+        assertEquals(listOf(id), reopened.library.value.active.map(NoteSummary::id))
+    }
+
+    @Test
+    fun `an update whose response was lost is confirmed instead of reported as a conflict`() = runBlocking {
+        val sourceId = SourceId("nextcloud-home")
+        val source = ControlledSource(sourceId, listOf(remoteNote("12", "Groceries", "- milk")))
+        val engine = ConnectedNotesEngine.open(root.resolve("local"), root.resolve("working"))
+        engine.attachSource(source)
+        engine.refreshSources()
+        val id = engine.library.value.active.single().id
+        engine.updateContent(id, "- milk\n- bread")
+        source.loseNextResponse = true
+        engine.synchronize(id)
+
+        engine.synchronize(id)
+
+        assertEquals(NoteSyncState.SYNCED, assertNotNull(engine.note(id)).syncState)
+        engine.updateContent(id, "- milk\n- bread\n- eggs")
+        engine.synchronize(id)
+        assertEquals(NoteSyncState.SYNCED, assertNotNull(engine.note(id)).syncState)
+        assertEquals("- milk\n- bread\n- eggs", source.notes.value.single().markdown)
+    }
+
+    @Test
+    fun `a lost update followed by more edits is not reported as a conflict on refresh`() = runBlocking {
+        val sourceId = SourceId("nextcloud-home")
+        val source = ControlledSource(sourceId, listOf(remoteNote("12", "Groceries", "- milk")))
+        val engine = ConnectedNotesEngine.open(root.resolve("local"), root.resolve("working"))
+        engine.attachSource(source)
+        engine.refreshSources()
+        val id = engine.library.value.active.single().id
+        engine.updateContent(id, "- milk\n- bread")
+        source.loseNextResponse = true
+        engine.synchronize(id)
+        engine.updateContent(id, "- milk\n- bread\n- eggs")
+
+        engine.refreshSources()
+        engine.synchronize(id)
+
+        assertEquals(NoteSyncState.SYNCED, assertNotNull(engine.note(id)).syncState)
+        assertEquals("- milk\n- bread\n- eggs", source.notes.value.single().markdown)
+    }
+
+    @Test
+    fun `a new remote revision without remote edits keeps local edits pending`() = runBlocking {
+        val sourceId = SourceId("nextcloud-home")
+        val source = ControlledSource(sourceId, listOf(remoteNote("13", "Plans", "Weekend")))
+        val engine = ConnectedNotesEngine.open(root.resolve("local"), root.resolve("working"))
+        engine.attachSource(source)
+        engine.refreshSources()
+        val id = engine.library.value.active.single().id
+        engine.updateContent(id, "Weekend hike")
+        source.touchRemotely()
+
+        engine.refreshSources()
+        assertEquals(NoteSyncState.SAVED_LOCALLY, assertNotNull(engine.note(id)).syncState)
+        engine.synchronize(id)
+
+        assertEquals(NoteSyncState.SYNCED, assertNotNull(engine.note(id)).syncState)
+        assertEquals("Weekend hike", source.notes.value.single().markdown)
+    }
+
+    @Test
+    fun `moving a conflicted Note to the Local Source keeps both versions`() = runBlocking {
+        val sourceId = SourceId("nextcloud-home")
+        val source = ControlledSource(sourceId, listOf(remoteNote("14", "Draft", "Base")))
+        val engine = ConnectedNotesEngine.open(root.resolve("local"), root.resolve("working"))
+        engine.attachSource(source)
+        engine.refreshSources()
+        val id = engine.library.value.active.single().id
+        engine.updateContent(id, "Base plus my edit")
+        source.editRemotely("Base plus their edit")
+        engine.refreshSources()
+        assertEquals(NoteSyncState.NEEDS_ATTENTION, assertNotNull(engine.note(id)).syncState)
+
+        val movedId = engine.moveToSource(id, LocalSourceId)
+
+        val moved = assertNotNull(engine.note(movedId))
+        assertEquals(LocalSourceId, moved.sourceId)
+        assertEquals("Base plus my edit", moved.markdown)
+        assertEquals(listOf("Base plus their edit"), source.notes.value.map(SourceNote::markdown))
+        val remaining = engine.library.value.active.single { it.sourceId == sourceId }
+        assertEquals(NoteSyncState.SYNCED, remaining.syncState)
+        assertEquals("Base plus their edit", assertNotNull(engine.note(remaining.id)).markdown)
+    }
+
+    private fun remoteNote(remoteId: String, title: String, markdown: String) = SourceNote(
+        remoteId = remoteId,
+        revision = "initial",
+        title = title,
+        markdown = markdown,
+        category = "",
+        favorite = false,
+        modifiedAt = Instant.parse("2026-08-24T08:00:00Z"),
+        readOnly = false,
+    )
+
     private class ControlledSource(
         sourceId: SourceId,
         initialNotes: List<SourceNote>,
@@ -622,6 +844,23 @@ class ConnectedNotesEngineTest {
         var lastDeletedRevision: String? = null
         var beforeWrite: suspend () -> Unit = {}
         var beforeRefresh: suspend () -> Unit = {}
+        /** Applies the next write on the server, then loses its response like a dropped connection. */
+        var loseNextResponse = false
+        private var revisions = 0
+
+        private fun nextRevision() = "server-${++revisions}"
+
+        private fun <T> respond(value: T): T {
+            if (loseNextResponse) {
+                loseNextResponse = false
+                throw java.io.IOException("Connection reset")
+            }
+            return value
+        }
+
+        fun touchRemotely() {
+            mutableNotes.value = mutableNotes.value.map { it.copy(revision = nextRevision()) }
+        }
 
         fun editRemotely(markdown: String) {
             mutableNotes.value = mutableNotes.value.map { it.copy(markdown = markdown, revision = "external-edit") }
@@ -642,7 +881,7 @@ class ConnectedNotesEngineTest {
                 readOnly = false,
             )
             mutableNotes.value = mutableNotes.value + created
-            return created
+            return respond(created)
         }
 
         override suspend fun updateNote(
@@ -657,7 +896,7 @@ class ConnectedNotesEngineTest {
             lastExpectedRevision = expectedRevision
             lastDraft = note
             val updated = mutableNotes.value.single { it.remoteId == remoteId }.copy(
-                revision = "after-edit",
+                revision = if (loseNextResponse || expectedRevision.startsWith("server-")) nextRevision() else "after-edit",
                 title = note.title,
                 markdown = note.markdown,
                 category = note.category,
@@ -665,7 +904,7 @@ class ConnectedNotesEngineTest {
                 modifiedAt = note.modifiedAt,
             )
             mutableNotes.value = mutableNotes.value.filterNot { it.remoteId == remoteId } + updated
-            return updated
+            return respond(updated)
         }
 
         override suspend fun deleteNote(remoteId: String, expectedRevision: String) {

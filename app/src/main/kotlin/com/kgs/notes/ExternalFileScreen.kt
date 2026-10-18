@@ -1,5 +1,7 @@
 package com.kgs.notes
 
+import com.kgs.notes.design.R.string as UiR
+
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
@@ -78,6 +80,8 @@ internal fun ExternalFileScreen(
     onDismissCloseWarning: () -> Unit = {},
     onEditOriginal: () -> Unit = {},
 ) {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+
     val fallbackDock = remember { KgsSheetDock() }
     val dock = LocalKgsSheetDock.current ?: fallbackDock
     val keyboard = LocalSoftwareKeyboardController.current
@@ -101,7 +105,7 @@ internal fun ExternalFileScreen(
             if (text != null) {
                 onTextChange(text)
                 action()
-            } else commitProblem = "The editor couldn't finish saving your text. Keep the preview open and try again."
+            } else commitProblem = strings.getString(UiR.ui_the_editor_couldn_t_finish_saving_your_text_keep_the_preview_open_and_try_again)
         }
     }
     val close = {
@@ -119,10 +123,10 @@ internal fun ExternalFileScreen(
                 modifier = Modifier.fillMaxWidth().kgsSheetControls(dock)
                     .padding(start = 6.dp, end = 6.dp, top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 2.dp),
             ) {
-                ExpressiveIconButton("Close file", close) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "Close file", tint = MaterialTheme.colorScheme.onSurface)
+                ExpressiveIconButton(strings.getString(UiR.ui_close_file), close) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, strings.getString(UiR.ui_close_file), tint = MaterialTheme.colorScheme.onSurface)
                 }
-                Text(file.name.ifBlank { "File preview" }, style = MaterialTheme.typography.titleMedium,
+                Text(file.name.ifBlank { strings.getString(UiR.ui_file_preview) }, style = MaterialTheme.typography.titleMedium,
                     maxLines = 1, softWrap = false, overflow = androidx.compose.ui.text.style.TextOverflow.Clip,
                     modifier = Modifier.weight(1f).padding(horizontal = 6.dp).kgsHorizontalTextFade())
                 AnimatedContent(file.copying || file.closing || committing, transitionSpec = { fadeIn(tween(150)) togetherWith fadeOut(tween(100)) }, label = "File operation") { operating ->
@@ -131,7 +135,7 @@ internal fun ExternalFileScreen(
                             CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
                         }
                     } else if (!file.loading && file.name.isNotBlank()) {
-                        ExpressiveIconButton("Save to KGS Notes", { sourceChooserOpen = !sourceChooserOpen }) {
+                        ExpressiveIconButton(strings.getString(UiR.ui_save_to_kgs_notes), { sourceChooserOpen = !sourceChooserOpen }) {
                             SaveToNotesGlyph()
                         }
                     } else Spacer(Modifier.size(40.dp))
@@ -140,18 +144,18 @@ internal fun ExternalFileScreen(
             if (file.name.isNotBlank()) {
                 if (!file.writable && !busy) {
                     Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text("Read-only file", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        Text(strings.getString(UiR.ui_read_only_file), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.weight(1f))
-                        OutlinedButton(onClick = onEditOriginal) { Text("Edit original file…") }
+                        OutlinedButton(onClick = onEditOriginal) { Text(strings.getString(UiR.ui_edit_original_file)) }
                     }
                 }
                 AnimatedContent(
                     targetState = when {
-                        file.copying -> "Saving a copy to KGS Notes…"
-                        file.saving -> "Saving to original file…"
-                        !file.writable -> "Choose the original file to grant edit access."
-                        file.dirty -> "Unsaved changes"
-                        else -> "Editing original file"
+                        file.copying -> strings.getString(UiR.ui_saving_a_copy_to_kgs_notes)
+                        file.saving -> strings.getString(UiR.ui_saving_to_original_file)
+                        !file.writable -> strings.getString(UiR.ui_choose_the_original_file_to_grant_edit_access)
+                        file.dirty -> strings.getString(UiR.ui_unsaved_changes)
+                        else -> strings.getString(UiR.ui_editing_original_file)
                     },
                     transitionSpec = { fadeIn(tween(150)) togetherWith fadeOut(tween(100)) },
                     label = "External file status",
@@ -162,7 +166,7 @@ internal fun ExternalFileScreen(
                 Column(Modifier.padding(horizontal = 20.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(commitProblem ?: file.error.orEmpty(), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface)
                     if (file.dirty && file.writable && !busy) {
-                        OutlinedButton(onClick = { commitThen(action = onRetry) }) { Text("Retry saving") }
+                        OutlinedButton(onClick = { commitThen(action = onRetry) }) { Text(strings.getString(UiR.ui_retry_saving)) }
                     }
                 }
             }
@@ -186,24 +190,24 @@ internal fun ExternalFileScreen(
             expanded = sourceChooserOpen && !busy,
             current = null,
             sources = sources.filter { it.connected && it.writable },
-            explanation = "The original file stays in its current location.",
+            explanation = strings.getString(UiR.ui_the_original_file_stays_in_its_current_location),
             onSelect = { source -> sourceChooserOpen = false; commitThen { onCopy(source) } },
             onDismiss = { sourceChooserOpen = false },
         )
-        KgsConfirmationDialog(expanded = file.closeBlocked, onDismissRequest = onDismissCloseWarning, title = "Unsaved file changes") {
+        KgsConfirmationDialog(expanded = file.closeBlocked, onDismissRequest = onDismissCloseWarning, title = strings.getString(UiR.ui_unsaved_file_changes)) {
             Surface(shape = RoundedCornerShape(26.dp), color = MaterialTheme.colorScheme.surface) {
                 Column(Modifier.padding(22.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                    Text("Keep your changes", style = MaterialTheme.typography.titleMedium)
-                    Text("The original file couldn't be saved. Save a copy to a KGS Notes Source, or keep editing and retry.",
+                    Text(strings.getString(UiR.ui_keep_your_changes), style = MaterialTheme.typography.titleMedium)
+                    Text(strings.getString(UiR.ui_the_original_file_couldn_t_be_saved_save_a_copy_to_a_kgs_notes_source_or_keep_editing),
                         style = MaterialTheme.typography.bodyMedium)
                     Button(onClick = { onDismissCloseWarning(); sourceChooserOpen = true }, modifier = Modifier.fillMaxWidth()) {
-                        Text("Save to KGS Notes")
+                        Text(strings.getString(UiR.ui_save_to_kgs_notes))
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        OutlinedButton(onClick = onDismissCloseWarning, modifier = Modifier.weight(1f)) { Text("Keep editing") }
+                        OutlinedButton(onClick = onDismissCloseWarning, modifier = Modifier.weight(1f)) { Text(strings.getString(UiR.ui_keep_editing)) }
                         Button(onClick = onDiscard, modifier = Modifier.weight(1f),
                             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError)) {
-                            Text("Discard edits")
+                            Text(strings.getString(UiR.ui_discard_edits))
                         }
                     }
                 }
@@ -214,8 +218,10 @@ internal fun ExternalFileScreen(
 
 @Composable
 private fun SaveToNotesGlyph() {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+
     val color = MaterialTheme.colorScheme.onSurfaceVariant
-    Canvas(Modifier.size(22.dp).semantics { contentDescription = "Save to KGS Notes" }) {
+    Canvas(Modifier.size(22.dp).semantics { contentDescription = strings.getString(UiR.ui_save_to_kgs_notes) }) {
         val unit = size.width / 24f
         drawRoundRect(color, Offset(3 * unit, 2 * unit), Size(14 * unit, 19 * unit), CornerRadius(2 * unit), style = Stroke(1.7f * unit))
         drawLine(color, Offset(7 * unit, 6 * unit), Offset(13 * unit, 6 * unit), 1.7f * unit, StrokeCap.Round)

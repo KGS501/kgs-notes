@@ -104,10 +104,15 @@ fun KgsSettingsContainer(
     modifier: Modifier = Modifier,
     onClick: (() -> Unit)? = null,
     enabled: Boolean = true,
+    selected: Boolean = false,
     content: @Composable BoxScope.() -> Unit,
 ) {
     val corners = animatedCorners(position)
-    val color = MaterialTheme.colorScheme.surface
+    // In two-pane settings, the row whose page is open stays tinted.
+    val color by animateColorAsState(
+        if (selected) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surface,
+        LocalKgsMotion.current.defaultEffectsSpec(), label = "Settings row selection",
+    )
     if (onClick == null) {
         val shape = RoundedCornerShape(corners.topStart, corners.topEnd, corners.bottomEnd, corners.bottomStart)
         Box(modifier.fillMaxWidth().background(color, shape), content = content)
@@ -145,8 +150,9 @@ fun KgsSettingsItem(
     titleColor: Color = MaterialTheme.colorScheme.onSurface,
     leading: (@Composable () -> Unit)? = null,
     trailing: (@Composable () -> Unit)? = null,
+    selected: Boolean = false,
 ) {
-    KgsSettingsContainer(position, modifier, onClick) {
+    KgsSettingsContainer(position, modifier, onClick, selected = selected) {
         Row(
             Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,

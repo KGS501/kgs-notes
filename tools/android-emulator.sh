@@ -4,7 +4,14 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$PROJECT_ROOT/tools/dev-env.sh"
 AVD_NAME="${KGS_NOTES_AVD_NAME:-kgs_notes_phone_api36}"
-UNIT_NAME="kgs-notes-emulator.service"
+# A foldable AVD can be created alongside, for example:
+#   KGS_NOTES_AVD_NAME=kgs_notes_fold_api36 KGS_NOTES_AVD_DEVICE=pixel_9_pro_fold tools/android-emulator.sh create
+AVD_DEVICE="${KGS_NOTES_AVD_DEVICE:-pixel_6}"
+if [[ "$AVD_NAME" == kgs_notes_phone_api36 ]]; then
+    UNIT_NAME="kgs-notes-emulator.service"
+else
+    UNIT_NAME="kgs-notes-${AVD_NAME//_/-}-emulator.service"
+fi
 ADB="${ANDROID_SDK_ROOT}/platform-tools/adb"
 EMULATOR="${ANDROID_SDK_ROOT}/emulator/emulator"
 AVDMANAGER="${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/avdmanager"
@@ -72,7 +79,7 @@ create_avd() {
     printf 'no\n' | ANDROID_AVD_HOME="$ANDROID_AVD_HOME" "$AVDMANAGER" create avd \
         --name "$AVD_NAME" \
         --package "$SYSTEM_IMAGE" \
-        --device pixel_6
+        --device "$AVD_DEVICE"
     echo "Created $AVD_NAME"
 }
 

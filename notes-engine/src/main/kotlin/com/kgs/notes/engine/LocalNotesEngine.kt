@@ -30,6 +30,7 @@ class LocalNotesEngine private constructor(
     private val clock: Clock,
     loadedNotes: Map<NoteId, StoredNote>,
     loadedAttachments: Map<AttachmentId, StoredAttachment>,
+    loadedCategories: Set<String>,
 ) : NotesEngine {
     private val metadataRoot = root.resolve(".kgs/notes")
     private val attachmentMetadataRoot = root.resolve(".kgs/attachments")
@@ -38,7 +39,8 @@ class LocalNotesEngine private constructor(
     private val mutex = Mutex()
     private val notes = loadedNotes.toMutableMap()
     private val attachments = ConcurrentHashMap(loadedAttachments)
-    private val mutableLibrary = MutableStateFlow(snapshotOf(notes.values))
+    private var retainedCategories: Set<String> = loadedCategories
+    private val mutableLibrary = MutableStateFlow(snapshotOf(notes.values, retainedCategories))
     private val mutableSources = MutableStateFlow(listOf(LOCAL_SOURCE_DESCRIPTOR))
 
     override val library: StateFlow<LibrarySnapshot> = mutableLibrary.asStateFlow()
@@ -178,7 +180,7 @@ class LocalNotesEngine private constructor(
         val current = notes[id] ?: return@withLock
         val normalized = normalizeCategory(category)
         if (current.category == normalized) return@withLock
-        val desiredPath = if (current.state == NoteState.DRAFT) {
+        val desiredPath = if (current.state != NoteState.ACTIVE) {
             current.relativePath
         } else {
             availableContentPath(current.title, normalized, current.id, current.relativePath)
@@ -292,8 +294,43 @@ class LocalNotesEngine private constructor(
         publish()
     }
 
+    override suspend fun createCategory(sourceId: SourceId, category: String): String {
+        require(sourceId == LocalSourceId) { "LocalNotesEngine only owns the Local Source" }
+        val normalized = normalizedCategoryPath(category)
+        mutex.withLock {
+            retainCategories(retainedCategories + normalized)
+            publish()
+        }
+        return normalized
+    }
+
+    override suspend fun renameCategory(sourceId: SourceId, category: String, newCategory: String): Set<NoteId> {
+        val target = normalizedCategoryPath(newCategory)
+        val changed = replaceCategoryAssignments(sourceId, category, target)
+        mutex.withLock {
+            retainCategories(retainedCategories.replacingCategory(category, target))
+            publish()
+        }
+        return changed
+    }
+
+    override suspend fun deleteCategory(sourceId: SourceId, category: String): Set<NoteId> {
+        val changed = replaceCategoryAssignments(sourceId, category, "")
+        mutex.withLock {
+            retainCategories(retainedCategories.replacingCategory(category, ""))
+            publish()
+        }
+        return changed
+    }
+
+    private fun retainCategories(categories: Set<String>) {
+        if (categories == retainedCategories) return
+        writeTextAtomically(root.resolve(CATEGORIES_PATH), categories.sorted().joinToString("\n"))
+        retainedCategories = categories
+    }
+
     private fun publish() {
-        mutableLibrary.value = snapshotOf(notes.values)
+        mutableLibrary.value = snapshotOf(notes.values, retainedCategories)
     }
 
     private fun persistMetadata(note: StoredNote) {
@@ -382,6 +419,7 @@ class LocalNotesEngine private constructor(
 
     companion object {
         private const val DEFAULT_TITLE = "New note"
+        private const val CATEGORIES_PATH = ".kgs/categories.txt"
         private const val MAX_TITLE_CODE_POINTS = 80
         private val LOCAL_SOURCE_DESCRIPTOR = SourceDescriptor(
             id = LocalSourceId,
@@ -404,7 +442,9 @@ class LocalNotesEngine private constructor(
             normalizedRoot.resolve(".kgs-notes-attachments").createDirectories()
             val loaded = loadNotes(normalizedRoot)
             val loadedAttachments = loadAttachments(normalizedRoot)
-            return LocalNotesEngine(normalizedRoot, clock, loaded, loadedAttachments)
+            val categories = normalizedRoot.resolve(CATEGORIES_PATH).takeIf(Path::exists)?.readText()
+                ?.lineSequence()?.filter(String::isNotBlank)?.toSet().orEmpty()
+            return LocalNotesEngine(normalizedRoot, clock, loaded, loadedAttachments, categories)
         }
 
         private fun loadNotes(root: Path): Map<NoteId, StoredNote> {
@@ -546,7 +586,7 @@ class LocalNotesEngine private constructor(
             }
         }
 
-        private fun snapshotOf(notes: Collection<StoredNote>): LibrarySnapshot {
+        private fun snapshotOf(notes: Collection<StoredNote>, categories: Set<String>): LibrarySnapshot {
             fun summariesFor(state: NoteState) = notes
                 .filter { it.state == state }
                 .map(StoredNote::toSummary)
@@ -555,6 +595,7 @@ class LocalNotesEngine private constructor(
             return LibrarySnapshot(
                 active = summariesFor(NoteState.ACTIVE),
                 trash = summariesFor(NoteState.TRASHED),
+                categories = if (categories.isEmpty()) emptyMap() else mapOf(LocalSourceId to categories),
             )
         }
 

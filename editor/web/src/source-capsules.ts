@@ -1,3 +1,4 @@
+import { editorLabel } from './editor-labels'
 import { Node } from '@tiptap/core'
 import { Lexer, Marked, Tokenizer, type marked } from 'marked'
 
@@ -23,6 +24,13 @@ function pairedHtmlLength(source: string, opening: string): number {
 export function preservingMarked(): typeof marked {
   const instance = new Marked({
     tokenizer: {
+      blockquote(source) {
+        const token = Tokenizer.prototype.blockquote.call(this, source)
+        if (!token) return false
+        const marker = /^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\][ \t]*(?:\n|$)/.exec(token.text)
+        if (!marker) return token
+        return { ...token, type: 'markdownAlert', alertType: marker[1], tokens: this.lexer.blockTokens(token.text.slice(marker[0].length)) }
+      },
       html(source) {
         const token = Tokenizer.prototype.html.call(this, source)
         return token ? { ...token, type: 'sourceHtmlBlock' } : false
@@ -93,15 +101,17 @@ function capsule(name: string, inline: boolean, tokenName: string) {
         dom.dataset.sourceCapsule = name
         dom.className = `source-capsule ${inline ? 'source-capsule--inline' : 'source-capsule--block'}`
         dom.setAttribute('role', 'group')
-        dom.setAttribute('aria-label', `${kind}. Edit this fragment in Source Mode.`)
-        dom.title = 'Preserved source — edit in Source Mode'
+        dom.dataset.sourceKind = kind
+        dom.dataset.sourceComment = String(/^\s*<!--/.test(source))
+        dom.setAttribute('aria-label', `${editorLabel(kind)}. ${editorLabel('sourceHint')}`)
+        dom.title = editorLabel('sourceTitle')
         if (kind === 'HTML' && !/^\s*<!--/.test(source)) {
           dom.append(htmlPreview(source))
           if (dom.childNodes.length > 0) { dom.classList.add('source-capsule--preview'); return { dom } }
         }
         const label = document.createElement('span')
         label.className = 'source-capsule-label'
-        label.textContent = /^\s*<!--/.test(source) ? 'Comment' : kind
+        label.textContent = /^\s*<!--/.test(source) ? editorLabel('Comment') : editorLabel(kind)
         dom.append(label)
         if (!/^\s*<!--/.test(source)) {
           const code = document.createElement('code')

@@ -22,6 +22,7 @@ internal fun noteCardPreview(
     markdown: String,
     mode: EditorMode,
     linkColor: Color,
+    imageLabel: String = "Image",
 ): AnnotatedString {
     if (mode == EditorMode.SOURCE) return AnnotatedString(markdown)
     return buildAnnotatedString {
@@ -40,30 +41,30 @@ internal fun noteCardPreview(
             }
             if (heading != null) {
                 withStyle(SpanStyle(fontWeight = FontWeight.SemiBold)) {
-                    appendMarkdownInline(display, linkColor)
+                    appendMarkdownInline(display, linkColor, imageLabel)
                 }
             } else {
-                appendMarkdownInline(display, linkColor)
+                appendMarkdownInline(display, linkColor, imageLabel)
             }
         }
     }
 }
 
-private fun AnnotatedString.Builder.appendMarkdownInline(markdown: String, linkColor: Color) {
+private fun AnnotatedString.Builder.appendMarkdownInline(markdown: String, linkColor: Color, imageLabel: String) {
     var index = 0
     while (index < markdown.length) {
         val remaining = markdown.substring(index)
         val image = imagePattern.find(remaining)?.takeIf { it.range.first == 0 }
         if (image != null) {
             append("▧ ")
-            append(image.groupValues[1].ifBlank { "Image" })
+            append(image.groupValues[1].ifBlank { imageLabel })
             index += image.value.length
             continue
         }
         val link = linkPattern.find(remaining)?.takeIf { it.range.first == 0 }
         if (link != null) {
             withStyle(SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline)) {
-                appendMarkdownInline(link.groupValues[1], linkColor)
+                appendMarkdownInline(link.groupValues[1], linkColor, imageLabel)
             }
             index += link.value.length
             continue
@@ -87,7 +88,7 @@ private fun AnnotatedString.Builder.appendMarkdownInline(markdown: String, linkC
                     "`" -> SpanStyle(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
                     else -> SpanStyle(fontStyle = FontStyle.Italic)
                 }
-                withStyle(style) { appendMarkdownInline(inner, linkColor) }
+                withStyle(style) { appendMarkdownInline(inner, linkColor, imageLabel) }
                 index = closing + delimiter.length
                 continue
             }

@@ -1,5 +1,7 @@
 package com.kgs.notes.design
 
+import com.kgs.notes.design.R.string as UiR
+
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
@@ -128,6 +130,8 @@ fun KgsSearchField(
     containerColor: Color = MaterialTheme.colorScheme.surface,
     interactionSource: MutableInteractionSource = remember { MutableInteractionSource() },
 ) {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
     KgsTextField(
@@ -147,7 +151,7 @@ fun KgsSearchField(
                     if (pressed) .86f else 1f,
                     LocalKgsMotion.current.fastSpatialSpec(), label = "Clear search press",
                 )
-                KgsTooltip("Clear search") {
+                KgsTooltip(strings.getString(UiR.ui_clear_search)) {
                     KgsExpressiveSurface(
                         onClick = {
                             onValueChange("")
@@ -158,7 +162,7 @@ fun KgsSearchField(
                         interactionSource = clearInteractions,
                         color = Color.Transparent,
                         restingCorners = KgsCornerRadii(14.dp),
-                        modifier = Modifier.size(40.dp).semantics { contentDescription = "Clear search" },
+                        modifier = Modifier.size(40.dp).semantics { contentDescription = strings.getString(UiR.ui_clear_search) },
                     ) {
                         Icon(Icons.Default.Close, contentDescription = null,
                             tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp).graphicsLayer {

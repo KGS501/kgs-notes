@@ -1,5 +1,14 @@
 package com.kgs.notes.editor
 
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.ui.layout.onPlaced
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.union
+import com.kgs.notes.design.R.string as UiR
+
 import com.kgs.notes.design.LocalKgsSheetDock
 import com.kgs.notes.design.kgsSheetDock
 import com.kgs.notes.design.rememberKgsDismissSheets
@@ -63,6 +72,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -82,6 +93,8 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalResources
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -91,6 +104,9 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -112,11 +128,38 @@ import org.json.JSONObject
 import org.json.JSONTokener
 import java.io.InputStream
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
+import kotlin.math.roundToInt
 
 enum class EditorMode {
     RICH,
     SOURCE,
+}
+
+private data class EditorViewport(
+    val sourceOffset: Int,
+    val top: Float,
+    val selectionStart: Int,
+    val selectionEnd: Int,
+    val scrollY: Float? = null,
+    val width: Float = 0f,
+    val height: Float = 0f,
+) {
+    fun json() = JSONObject().put("sourceOffset", sourceOffset).put("top", top)
+        .put("selectionStart", selectionStart).put("selectionEnd", selectionEnd)
+        .put("scrollY", scrollY).put("width", width).put("height", height)
+
+    fun sameScroll(other: EditorViewport) = scrollY != null && other.scrollY != null &&
+        kotlin.math.abs(scrollY - other.scrollY) < .5f && width == other.width && height == other.height
+
+    companion object {
+        fun from(json: JSONObject) = EditorViewport(json.getInt("sourceOffset"), json.getDouble("top").toFloat(),
+            json.getInt("selectionStart"), json.getInt("selectionEnd"),
+            if (json.has("scrollY") && !json.isNull("scrollY")) json.getDouble("scrollY").toFloat() else null,
+            json.optDouble("width", 0.0).toFloat(), json.optDouble("height", 0.0).toFloat())
+    }
 }
 
 @Composable
@@ -137,12 +180,14 @@ fun KgsMarkdownEditor(
     allowRemoteResources: Boolean = true,
     onSnapshotReaderReady: (suspend () -> String?) -> Unit = {},
 ) {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+
     val safety = remember(markdown, editor) { editor.safetyFor(markdown) }
     var rendererFailure by remember(editor) { mutableStateOf<String?>(null) }
     val richModeBlocker = when {
         rendererFailure != null -> rendererFailure
         !WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER) ->
-            "This Android WebView requires Source Mode"
+            strings.getString(UiR.ui_this_android_webview_requires_source_mode)
         safety is EditorSafety.SourceMode -> safety.reason
         else -> null
     }
@@ -153,6 +198,11 @@ fun KgsMarkdownEditor(
     }
 
     val commands = remember { EditorCommandDispatcher() }
+    val modeSwitchScope = rememberCoroutineScope()
+    var viewport by remember { mutableStateOf<EditorViewport?>(null) }
+    var switchingMode by remember { mutableStateOf(false) }
+    val modeSnapshots = remember { mutableMapOf<EditorMode, Pair<String, EditorViewport>>() }
+    var readingBaseline by remember { mutableStateOf<Pair<String, EditorViewport>?>(null) }
     var activeCommands by remember { mutableStateOf(emptySet<MarkdownCommand>()) }
     var richEditorReady by remember { mutableStateOf(false) }
     val richOpacity by animateFloatAsState(if (richEditorReady) 1f else 0f, tween(180), label = "Rich editor ready")
@@ -171,9 +221,7 @@ fun KgsMarkdownEditor(
     }
 
     Column(
-        modifier
-            .navigationBarsPadding()
-            .imePadding(),
+        modifier.bottomBarsOverlapPadding(),
     ) {
         if (requestedMode == EditorMode.RICH && richModeBlocker != null) {
             SourceFallbackNotice(richModeBlocker)
@@ -193,10 +241,12 @@ fun KgsMarkdownEditor(
                         onMarkdownChange = onMarkdownChange,
                         onActiveCommandsChange = { activeCommands = it },
                         onReady = { richEditorReady = true },
-                        onFallback = { rendererFailure = "This Note couldn't be rendered reliably. Source Mode keeps its contents intact." },
+                        onFallback = { rendererFailure = strings.getString(UiR.ui_this_note_couldn_t_be_rendered_reliably_source_mode_keeps_its_contents_intact) },
                         restoreFocus = restoreKeyboardMode == EditorMode.RICH,
                         onFocusRestored = { restoreKeyboardMode = null },
                         commands = commands,
+                        initialViewport = viewport,
+                        onViewportRestored = { readingBaseline = currentMarkdown to it },
                         openManagedAttachment = openManagedAttachment,
                         modifier = Modifier.fillMaxSize().graphicsLayer { alpha = richOpacity },
                         readOnly = readOnly,
@@ -214,6 +264,8 @@ fun KgsMarkdownEditor(
                     onMarkdownChange = onMarkdownChange,
                     commands = commands,
                     editor = editor,
+                    initialViewport = viewport,
+                    onViewportRestored = { readingBaseline = currentMarkdown to it },
                     restoreFocus = restoreKeyboardMode == EditorMode.SOURCE,
                     onFocusRestored = { restoreKeyboardMode = null },
                     modifier = Modifier.fillMaxSize(),
@@ -235,9 +287,29 @@ fun KgsMarkdownEditor(
             mode = effectiveMode,
             activeCommands = activeCommands,
             onModeChange = { nextMode ->
-                rendererFailure = null
-                restoreKeyboardMode = if (keyboardWasOpen) nextMode else null
-                onModeChange(nextMode)
+                if (!switchingMode) modeSwitchScope.launch {
+                    switchingMode = true
+                    try {
+                        // Capture before disposing the outgoing editor, including
+                        // changes whose debounced bridge notification hasn't arrived.
+                        withTimeoutOrNull(1_500) {
+                            val text = commands.readCurrentMarkdown() ?: currentMarkdown
+                            val captured = commands.readViewport()
+                            if (captured != null) {
+                                val previous = modeSnapshots[nextMode]?.takeIf { it.first == text }?.second
+                                val sameLocation = readingBaseline?.let { it.first == text && it.second.sameScroll(captured) } == true
+                                modeSnapshots[effectiveMode] = text to captured
+                                viewport = if (sameLocation && previous != null) captured.copy(
+                                    scrollY = previous.scrollY, width = previous.width, height = previous.height,
+                                ) else captured.copy(scrollY = null)
+                            }
+                            if (text != currentMarkdown) onMarkdownChange(text)
+                        }
+                        rendererFailure = null
+                        restoreKeyboardMode = if (keyboardWasOpen) nextMode else null
+                        onModeChange(nextMode)
+                    } finally { switchingMode = false }
+                }
             },
             onCommand = commands::dispatch,
             onAddImage = onAddImage,
@@ -248,6 +320,8 @@ fun KgsMarkdownEditor(
 
 @Composable
 private fun SourceFallbackNotice(reason: String) {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+
     Surface(
         color = MaterialTheme.colorScheme.secondaryContainer,
         contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
@@ -260,8 +334,13 @@ private fun SourceFallbackNotice(reason: String) {
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
         ) {
-            Text("Source Mode", style = MaterialTheme.typography.labelLarge)
-            Text(reason, style = MaterialTheme.typography.bodyMedium)
+            Text(strings.getString(UiR.ui_source_mode), style = MaterialTheme.typography.labelLarge)
+            val explanation = when (reason) {
+                "This Note is large. Source Mode keeps editing responsive." -> strings.getString(UiR.ui_this_note_is_large_source_mode_keeps_editing_responsive)
+                "This Note contains characters that need Source Mode to stay intact." -> strings.getString(UiR.ui_this_note_contains_characters_that_need_source_mode_to_stay_intact)
+                else -> reason
+            }
+            Text(explanation, style = MaterialTheme.typography.bodyMedium)
         }
     }
 }
@@ -272,6 +351,8 @@ private fun SourceMarkdownEditor(
     onMarkdownChange: (String) -> Unit,
     commands: EditorCommandDispatcher,
     editor: MarkdownEditor,
+    initialViewport: EditorViewport?,
+    onViewportRestored: (EditorViewport) -> Unit,
     restoreFocus: Boolean,
     onFocusRestored: () -> Unit,
     modifier: Modifier,
@@ -279,14 +360,45 @@ private fun SourceMarkdownEditor(
 ) {
     val focusRequester = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
-    LaunchedEffect(restoreFocus) {
+    val field = rememberTextFieldState(markdown, initialSelection = initialViewport?.let {
+        TextRange(it.selectionStart.coerceIn(0, markdown.length), it.selectionEnd.coerceIn(0, markdown.length))
+    } ?: TextRange.Zero)
+    val scroll = rememberScrollState()
+    val density = LocalDensity.current.density
+    var textLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
+    var viewportSize by remember { mutableStateOf(IntSize.Zero) }
+    var reportedViewport by remember { mutableStateOf(false) }
+    var restoringViewport by remember { mutableStateOf(initialViewport != null) }
+    val opacity by animateFloatAsState(if (restoringViewport) 0f else 1f, tween(120), label = "Source editor ready")
+    fun captureViewport(): EditorViewport? = textLayout?.let { layout ->
+        val line = layout.getLineForVerticalPosition(scroll.value.toFloat())
+        EditorViewport(layout.getLineStart(line), 16f + (layout.getLineTop(line) - scroll.value) / density,
+            field.selection.start, field.selection.end, scroll.value / density,
+            viewportSize.width / density, viewportSize.height / density)
+    }
+    LaunchedEffect(restoreFocus, textLayout, viewportSize) {
+        val layout = textLayout ?: return@LaunchedEffect
         if (restoreFocus && !readOnly) {
             focusRequester.requestFocus()
             keyboard?.show()
             onFocusRestored()
         }
+        if (restoringViewport && initialViewport != null) {
+            withFrameNanos { }
+            withFrameNanos { }
+            val line = layout.getLineForOffset(initialViewport.sourceOffset.coerceIn(0, field.text.length))
+            val target = if (initialViewport.scrollY != null && initialViewport.width == viewportSize.width / density &&
+                initialViewport.height == viewportSize.height / density) initialViewport.scrollY * density
+                else layout.getLineTop(line) + (16f - initialViewport.top) * density
+            scroll.scrollTo(target.roundToInt().coerceAtLeast(0))
+            restoringViewport = false
+        }
+        if (!reportedViewport && viewportSize != IntSize.Zero) {
+            withFrameNanos { }
+            captureViewport()?.let(onViewportRestored)
+            reportedViewport = true
+        }
     }
-    val field = rememberTextFieldState(markdown)
     val latestOnMarkdownChange by rememberUpdatedState(onMarkdownChange)
     val commandOwner = remember { Any() }
     val undo = remember { ArrayDeque<TextFieldValue>() }
@@ -325,7 +437,7 @@ private fun SourceMarkdownEditor(
             }
     }
     SideEffect {
-        commands.connect(commandOwner, reader = { field.text.toString() }) { command ->
+        commands.connect(commandOwner, reader = { field.text.toString() }, viewportReader = { captureViewport() }) { command ->
             when (command) {
                 MarkdownCommand.UNDO -> undo.removeLastOrNull()?.let { previous ->
                     redo.addLast(lastObserved)
@@ -370,6 +482,8 @@ private fun SourceMarkdownEditor(
     ) {
         BasicTextField(
             state = field,
+            scrollState = scroll,
+            onTextLayout = { textLayout = it() },
             readOnly = readOnly,
             textStyle = MaterialTheme.typography.bodyLarge.copy(
                 color = MaterialTheme.colorScheme.onSurface,
@@ -378,6 +492,8 @@ private fun SourceMarkdownEditor(
             cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
             modifier = Modifier
                 .fillMaxSize()
+                .graphicsLayer { alpha = opacity }
+                .onSizeChanged { viewportSize = it }
                 .focusRequester(focusRequester)
                 .testTag("source-editor"),
         )
@@ -396,12 +512,35 @@ private fun RichMarkdownEditor(
     restoreFocus: Boolean,
     onFocusRestored: () -> Unit,
     commands: EditorCommandDispatcher,
+    initialViewport: EditorViewport?,
+    onViewportRestored: (EditorViewport) -> Unit,
     openManagedAttachment: (String) -> InputStream?,
     modifier: Modifier,
     readOnly: Boolean = false,
     allowRemoteResources: Boolean = true,
 ) {
     val context = LocalContext.current
+    val resources = LocalResources.current
+    val language = resources.configuration.locales[0].toLanguageTag()
+    val labels = mapOf(
+        "content" to resources.getString(UiR.ui_rich_note_content),
+        "empty" to resources.getString(UiR.ui_start_writing),
+        "sourceTitle" to resources.getString(UiR.ui_preserved_source_edit_in_source_mode),
+        "sourceHint" to resources.getString(UiR.ui_edit_this_fragment_in_source_mode),
+        "NOTE" to resources.getString(UiR.ui_note),
+        "TIP" to resources.getString(UiR.ui_tip),
+        "IMPORTANT" to resources.getString(UiR.ui_important),
+        "WARNING" to resources.getString(UiR.ui_warning),
+        "CAUTION" to resources.getString(UiR.ui_caution),
+        "Comment" to resources.getString(UiR.ui_comment),
+        "Metadata" to resources.getString(UiR.ui_metadata),
+        "Footnote" to resources.getString(UiR.ui_footnote),
+        "Math" to resources.getString(UiR.ui_math),
+        "Directive" to resources.getString(UiR.ui_directive),
+        "Footnote reference" to resources.getString(UiR.ui_footnote_reference),
+    )
+    val latestLabels by rememberUpdatedState(labels)
+    val latestLanguage by rememberUpdatedState(language)
     val keyboard = LocalSoftwareKeyboardController.current
     // Follows the app's chosen dark mode, which may differ from the system's.
     val darkMode = LocalKgsDarkTheme.current
@@ -418,6 +557,7 @@ private fun RichMarkdownEditor(
     val latestOnMarkdownChange by rememberUpdatedState(onMarkdownChange)
     val latestOnActiveCommandsChange by rememberUpdatedState(onActiveCommandsChange)
     val latestOnReady by rememberUpdatedState(onReady)
+    val latestOnViewportRestored by rememberUpdatedState(onViewportRestored)
     val latestOnFallback by rememberUpdatedState(onFallback)
     val latestRestoreFocus by rememberUpdatedState(restoreFocus)
     val latestOnFocusRestored by rememberUpdatedState(onFocusRestored)
@@ -434,6 +574,9 @@ private fun RichMarkdownEditor(
             editorMarkdown = markdown
             webView.loadMarkdown(markdown)
         }
+    }
+    LaunchedEffect(labels, language, connectedWebView) {
+        connectedWebView?.setEditorLabels(labels, language)
     }
     LaunchedEffect(themeColors, connectedWebView) {
         connectedWebView?.setThemeColors(themeColors)
@@ -523,7 +666,19 @@ private fun RichMarkdownEditor(
                             }.getOrNull() ?: return@addWebMessageListener
                             when (payload.optString("type")) {
                                 "fallback" -> if (connectedWebView === view) latestOnFallback()
+                                "viewportRestored" -> if (connectedWebView === view) {
+                                    val restored = runCatching { EditorViewport.from(payload.getJSONObject("viewport")) }.getOrNull()
+                                    view.postVisualStateCallback(0L, object : WebView.VisualStateCallback() {
+                                        override fun onComplete(requestId: Long) {
+                                            if (connectedWebView === view) {
+                                                restored?.let(latestOnViewportRestored)
+                                                latestOnReady()
+                                            }
+                                        }
+                                    })
+                                }
                                 "ready" -> {
+                                    view.setEditorLabels(latestLabels, latestLanguage)
                                     view.setThemeColors(latestThemeColors)
                                     view.setDarkMode(latestDarkMode)
                                     view.setReadOnly(latestReadOnly)
@@ -534,7 +689,15 @@ private fun RichMarkdownEditor(
                                         view.setReadOnly(latestReadOnly, force = latestReadOnly) {
                                             view.postVisualStateCallback(0L, object : WebView.VisualStateCallback() {
                                                 override fun onComplete(requestId: Long) {
-                                                    if (connectedWebView === view) latestOnReady()
+                                                    if (connectedWebView === view) {
+                                                        if (initialViewport == null) latestOnReady()
+                                                        else {
+                                                            val notify = "window.$BRIDGE_NAME.postMessage(JSON.stringify({type:'viewportRestored',viewport:window.kgsEditor.viewport()}))"
+                                                            view.evaluateJavascript(
+                                                                "window.kgsEditor.restoreViewport(${initialViewport.json()}).then(() => {$notify}).catch(() => window.$BRIDGE_NAME.postMessage(JSON.stringify({type:'fallback'})))", null,
+                                                            )
+                                                        }
+                                                    }
                                                 }
                                             })
                                         }
@@ -548,6 +711,19 @@ private fun RichMarkdownEditor(
                                                         if (text != null) editorMarkdown = text
                                                         continuation.resume(text)
                                                     }
+                                                }
+                                            } catch (_: Exception) {
+                                                if (continuation.isActive) continuation.resume(null)
+                                            }
+                                        }
+                                    }, viewportReader = {
+                                        suspendCancellableCoroutine<EditorViewport?> { continuation ->
+                                            try {
+                                                view.evaluateJavascript("JSON.stringify(window.kgsEditor?.viewport())") { encoded ->
+                                                    if (continuation.isActive) continuation.resume(runCatching {
+                                                        val json = JSONObject(JSONTokener(encoded).nextValue() as String)
+                                                        EditorViewport.from(json)
+                                                    }.getOrNull())
                                                 }
                                             } catch (_: Exception) {
                                                 if (continuation.isActive) continuation.resume(null)
@@ -617,13 +793,16 @@ private class EditorCommandDispatcher {
     private var owner: Any? = null
     private var action: ((MarkdownCommand) -> Unit)? = null
     private var reader: (suspend () -> String?)? = null
+    private var viewportReader: (suspend () -> EditorViewport?)? = null
     private val pending = ArrayDeque<MarkdownCommand>()
     val hasReader: Boolean get() = reader != null
 
-    fun connect(owner: Any, reader: (suspend () -> String?)? = null, action: (MarkdownCommand) -> Unit) {
+    fun connect(owner: Any, reader: (suspend () -> String?)? = null,
+        viewportReader: (suspend () -> EditorViewport?)? = null, action: (MarkdownCommand) -> Unit) {
         this.owner = owner
         this.action = action
         this.reader = reader
+        this.viewportReader = viewportReader
         while (pending.isNotEmpty()) action(pending.removeFirst())
     }
 
@@ -632,10 +811,12 @@ private class EditorCommandDispatcher {
             this.owner = null
             action = null
             reader = null
+            viewportReader = null
         }
     }
 
     suspend fun readCurrentMarkdown(): String? = reader?.invoke()
+    suspend fun readViewport(): EditorViewport? = viewportReader?.invoke()
 
     fun dispatch(command: MarkdownCommand) {
         action?.invoke(command) ?: pending.addLast(command)
@@ -651,6 +832,8 @@ private fun EditorToolbar(
     onAddImage: () -> Unit,
     canAddImage: Boolean,
 ) {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+
     val motion = LocalKgsMotion.current
     var listMenuOpen by remember { mutableStateOf(false) }
     val dismissSheets = rememberKgsDismissSheets()
@@ -680,7 +863,7 @@ private fun EditorToolbar(
             ) {
                 Spacer(Modifier.width(9.dp))
                 ToolbarButton(
-                    description = if (mode == EditorMode.RICH) "Switch to Source Mode" else "Switch to Rich Mode",
+                    description = if (mode == EditorMode.RICH) strings.getString(UiR.ui_switch_to_source_mode) else strings.getString(UiR.ui_switch_to_rich_mode),
                     selected = true,
                     onClick = {
                         onModeChange(if (mode == EditorMode.RICH) EditorMode.SOURCE else EditorMode.RICH)
@@ -749,9 +932,9 @@ private fun EditorToolbar(
                             .fillMaxHeight()
                             .horizontalScroll(toolsScroll),
                     ) {
-                        ToolbarIconButton(ToolbarGlyphType.BOLD, "Bold", MarkdownCommand.BOLD in activeCommands) { onCommand(MarkdownCommand.BOLD) }
-                        ToolbarIconButton(ToolbarGlyphType.ITALIC, "Italic", MarkdownCommand.ITALIC in activeCommands) { onCommand(MarkdownCommand.ITALIC) }
-                        ToolbarIconButton(ToolbarGlyphType.HEADING, "Heading level 2", MarkdownCommand.HEADING_2 in activeCommands) { onCommand(MarkdownCommand.HEADING_2) }
+                        ToolbarIconButton(ToolbarGlyphType.BOLD, strings.getString(UiR.ui_bold), MarkdownCommand.BOLD in activeCommands) { onCommand(MarkdownCommand.BOLD) }
+                        ToolbarIconButton(ToolbarGlyphType.ITALIC, strings.getString(UiR.ui_italic), MarkdownCommand.ITALIC in activeCommands) { onCommand(MarkdownCommand.ITALIC) }
+                        ToolbarIconButton(ToolbarGlyphType.HEADING, strings.getString(UiR.ui_heading_level_2), MarkdownCommand.HEADING_2 in activeCommands) { onCommand(MarkdownCommand.HEADING_2) }
                         Box {
                         val activeList = listOf(
                             MarkdownCommand.BULLET_LIST,
@@ -759,7 +942,7 @@ private fun EditorToolbar(
                             MarkdownCommand.NUMBERED_LIST,
                         ).firstOrNull { it in activeCommands }
                         ToolbarButton(
-                            description = "Lists",
+                            description = strings.getString(UiR.ui_lists),
                             selected = listMenuOpen || activeList != null,
                             onClick = {
                                 val wasOpen = listMenuOpen
@@ -785,36 +968,36 @@ private fun EditorToolbar(
                             onDismissRequest = { listMenuOpen = false },
                             focusable = false,
                             modifier = Modifier.testTag("list-style-menu"),
-                            title = "Lists",
+                            title = strings.getString(UiR.ui_lists),
                         ) {
-                            ListMenuItem("Bulleted list", ToolbarGlyphType.LIST,
+                            ListMenuItem(strings.getString(UiR.ui_bulleted_list), ToolbarGlyphType.LIST,
                                 selected = MarkdownCommand.BULLET_LIST in activeCommands) {
                                 onCommand(MarkdownCommand.BULLET_LIST)
                                 listMenuOpen = false
                             }
-                            ListMenuItem("Checklist", ToolbarGlyphType.CHECKLIST,
+                            ListMenuItem(strings.getString(UiR.ui_checklist), ToolbarGlyphType.CHECKLIST,
                                 selected = MarkdownCommand.TASK_LIST in activeCommands) {
                                 onCommand(MarkdownCommand.TASK_LIST)
                                 listMenuOpen = false
                             }
-                            ListMenuItem("Numbered list", ToolbarGlyphType.NUMBERED_LIST,
+                            ListMenuItem(strings.getString(UiR.ui_numbered_list), ToolbarGlyphType.NUMBERED_LIST,
                                 selected = MarkdownCommand.NUMBERED_LIST in activeCommands) {
                                 onCommand(MarkdownCommand.NUMBERED_LIST)
                                 listMenuOpen = false
                             }
                         }
                         }
-                        ToolbarIconButton(ToolbarGlyphType.QUOTE, "Quote", MarkdownCommand.BLOCKQUOTE in activeCommands) { onCommand(MarkdownCommand.BLOCKQUOTE) }
-                        ToolbarIconButton(ToolbarGlyphType.CODE, "Code block", MarkdownCommand.CODE_BLOCK in activeCommands) { onCommand(MarkdownCommand.CODE_BLOCK) }
-                        ToolbarIconButton(ToolbarGlyphType.TABLE, "Insert table", MarkdownCommand.TABLE in activeCommands) { onCommand(MarkdownCommand.TABLE) }
+                        ToolbarIconButton(ToolbarGlyphType.QUOTE, strings.getString(UiR.ui_quote), MarkdownCommand.BLOCKQUOTE in activeCommands) { onCommand(MarkdownCommand.BLOCKQUOTE) }
+                        ToolbarIconButton(ToolbarGlyphType.CODE, strings.getString(UiR.ui_code_block), MarkdownCommand.CODE_BLOCK in activeCommands) { onCommand(MarkdownCommand.CODE_BLOCK) }
+                        ToolbarIconButton(ToolbarGlyphType.TABLE, strings.getString(UiR.ui_insert_table), MarkdownCommand.TABLE in activeCommands) { onCommand(MarkdownCommand.TABLE) }
                         if (canAddImage) {
-                            ToolbarIconButton(ToolbarGlyphType.IMAGE, "Add image") { onAddImage() }
+                            ToolbarIconButton(ToolbarGlyphType.IMAGE, strings.getString(UiR.ui_add_image)) { onAddImage() }
                         }
                     }
                 }
                 Spacer(Modifier.width(4.dp))
-                ToolbarIconButton(ToolbarGlyphType.UNDO, "Undo") { onCommand(MarkdownCommand.UNDO) }
-                ToolbarIconButton(ToolbarGlyphType.REDO, "Redo") { onCommand(MarkdownCommand.REDO) }
+                ToolbarIconButton(ToolbarGlyphType.UNDO, strings.getString(UiR.ui_undo)) { onCommand(MarkdownCommand.UNDO) }
+                ToolbarIconButton(ToolbarGlyphType.REDO, strings.getString(UiR.ui_redo)) { onCommand(MarkdownCommand.REDO) }
                 Spacer(Modifier.width(2.dp))
             }
         }
@@ -958,6 +1141,10 @@ private fun WebView.loadMarkdown(markdown: String, onLoaded: (() -> Unit)? = nul
     ) { onLoaded?.invoke() }
 }
 
+private fun WebView.setEditorLabels(labels: Map<String, String>, language: String) {
+    evaluateJavascript("window.kgsEditor?.setLabels(${JSONObject(labels)}, ${JSONObject.quote(language)})", null)
+}
+
 private fun WebView.setThemeColors(colors: Map<String, String>) {
     val properties = JSONObject(colors).toString()
     evaluateJavascript(
@@ -1022,3 +1209,25 @@ private fun WebView.runCommand(
 private const val ASSET_HOST = "appassets.androidplatform.net"
 private const val ASSET_ORIGIN = "https://$ASSET_HOST"
 private const val BRIDGE_NAME = "KgsNotesEditor"
+
+/**
+ * Keeps content above the keyboard and navigation bar only where they actually cover it.
+ * An editor above a tabletop fold stays whole while the keyboard covers the lower half.
+ */
+@Composable
+private fun Modifier.bottomBarsOverlapPadding(): Modifier {
+    val bars = WindowInsets.ime.union(WindowInsets.navigationBars)
+    val view = LocalView.current
+    var top by remember { mutableIntStateOf(0) }
+    return onPlaced { top = it.positionInWindow().y.roundToInt() }
+        .layout { measurable, constraints ->
+            val height = constraints.maxHeight
+            val coveredFrom = view.rootView.height - bars.getBottom(this)
+            val overlap = if (constraints.hasBoundedHeight) (top + height - coveredFrom).coerceIn(0, height) else 0
+            val placeable = measurable.measure(constraints.copy(
+                minHeight = (constraints.minHeight - overlap).coerceAtLeast(0),
+                maxHeight = if (constraints.hasBoundedHeight) height - overlap else constraints.maxHeight,
+            ))
+            layout(placeable.width, placeable.height + overlap) { placeable.place(0, 0) }
+        }
+}

@@ -1,5 +1,7 @@
 package com.kgs.notes
 
+import com.kgs.notes.design.R.string as UiR
+
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Box
@@ -21,6 +23,8 @@ import com.kgs.notes.design.defaultEffectsSpec
 
 @Composable
 internal fun SidebarLogo() {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+
     val lettering = animateColorAsState(
         if (LocalKgsDarkTheme.current) MaterialTheme.colorScheme.onSurface else Color.Black,
         LocalKgsMotion.current.defaultEffectsSpec(), label = "Sidebar logo lettering",
@@ -38,7 +42,7 @@ internal fun SidebarLogo() {
     Box(Modifier.fillMaxWidth().testTag("sidebar-branding"), contentAlignment = Alignment.Center) {
         Image(
             painterResource(R.drawable.kgs_logo_text),
-            contentDescription = "KGS Notes logo",
+            contentDescription = strings.getString(UiR.ui_kgs_notes_logo),
             modifier = Modifier.width(72.dp),
             colorFilter = ColorFilter.colorMatrix(colors),
         )

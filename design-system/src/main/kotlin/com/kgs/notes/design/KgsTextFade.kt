@@ -1,6 +1,7 @@
 package com.kgs.notes.design
 
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
@@ -63,10 +64,13 @@ fun KgsNoteTitleField(
     val field = rememberTextFieldState(value, initialSelection = TextRange.Zero)
     val scroll = rememberScrollState()
     val interactions = remember { MutableInteractionSource() }
+    val focused by interactions.collectIsFocusedAsState()
     val latestValue by rememberUpdatedState(value)
     val latestChange by rememberUpdatedState(onValueChange)
-    LaunchedEffect(value) {
-        if (value != field.text.toString()) field.edit {
+    LaunchedEffect(value, focused) {
+        // Canonical Titles are trimmed and may fall back to an automatic Title.
+        // Their autosave echo must not replace the person's live editing buffer.
+        if (!focused && value != field.text.toString()) field.edit {
             val retainedSelection = TextRange(selection.start.coerceAtMost(value.length), selection.end.coerceAtMost(value.length))
             replace(0, length, value)
             selection = retainedSelection

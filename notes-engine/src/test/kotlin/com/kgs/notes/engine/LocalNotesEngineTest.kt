@@ -17,6 +17,65 @@ import org.junit.jupiter.api.io.TempDir
 
 class LocalNotesEngineTest {
     @Test
+    fun `Category management normalizes portable paths and preserves Trash Notes`() = runBlocking {
+        val engine: NotesEngine = LocalNotesEngine.open(root)
+        val active = engine.createDraft(category = "Work")
+        val trashed = engine.createDraft(category = "Work/Archive")
+        listOf(active, trashed).forEach { engine.updateContent(it, "Body kept") }
+        engine.moveToTrash(trashed)
+        engine.renameCategory(LocalSourceId, "Work", "Office?  Team")
+        assertEquals("Office Team", engine.note(active)?.category)
+        assertEquals("Office Team/Archive", engine.note(trashed)?.category)
+        assertEquals(NoteState.TRASHED, engine.note(trashed)?.state)
+        kotlin.test.assertFailsWith<IllegalArgumentException> {
+            engine.renameCategory(LocalSourceId, "Office Team", "Office Team/Child")
+        }
+        engine.deleteCategory(LocalSourceId, "Office Team")
+        val reopened: NotesEngine = LocalNotesEngine.open(root)
+        assertEquals(setOf(active), reopened.library.value.active.map { it.id }.toSet())
+        assertEquals(setOf(trashed), reopened.library.value.trash.map { it.id }.toSet())
+        reopened.restore(trashed)
+        assertEquals("", reopened.note(trashed)?.category)
+        assertEquals("Body kept", reopened.note(trashed)?.markdown)
+    }
+
+    @Test
+    fun `an empty Category is retained across reopening and follows rename and removal`() = runBlocking {
+        val engine: NotesEngine = LocalNotesEngine.open(root)
+        assertEquals("Ideas/Later", engine.createCategory(LocalSourceId, " Ideas / Later "))
+        assertEquals(setOf("Ideas/Later"), engine.library.value.categories[LocalSourceId])
+
+        val reopened: NotesEngine = LocalNotesEngine.open(root)
+        assertEquals(setOf("Ideas/Later"), reopened.library.value.categories[LocalSourceId])
+        reopened.renameCategory(LocalSourceId, "Ideas", "Someday")
+        assertEquals(setOf("Someday/Later"), reopened.library.value.categories[LocalSourceId])
+        reopened.deleteCategory(LocalSourceId, "Someday")
+
+        assertEquals(emptySet(), LocalNotesEngine.open(root).library.value.categories[LocalSourceId].orEmpty())
+    }
+
+    @Test
+    fun `Category renaming includes descendants and removing it preserves every Note across reopen`() = runBlocking {
+        val engine: NotesEngine = LocalNotesEngine.open(root)
+        val parent = engine.createDraft(category = "Work")
+        val child = engine.createDraft(category = "Work/Projects")
+        val unrelated = engine.createDraft(category = "Workshop")
+        listOf(parent, child, unrelated).forEach { engine.updateContent(it, "Preserved body") }
+        engine.renameCategory(LocalSourceId, "Work", "Office")
+        assertEquals("Office", engine.note(parent)?.category)
+        assertEquals("Office/Projects", engine.note(child)?.category)
+        assertEquals("Workshop", engine.note(unrelated)?.category)
+        val reopened: NotesEngine = LocalNotesEngine.open(root)
+        reopened.deleteCategory(LocalSourceId, "Office")
+        val final: NotesEngine = LocalNotesEngine.open(root)
+        assertEquals("", final.note(parent)?.category)
+        assertEquals("", final.note(child)?.category)
+        assertEquals("Workshop", final.note(unrelated)?.category)
+        assertEquals(3, final.library.value.active.size)
+        listOf(parent, child, unrelated).forEach { assertEquals("Preserved body", final.note(it)?.markdown) }
+    }
+
+    @Test
     fun `pins survive restart and Trash Restore without changing content or Favorite`() = runBlocking {
         val engine: NotesEngine = LocalNotesEngine.open(root)
         val id = engine.createDraft()

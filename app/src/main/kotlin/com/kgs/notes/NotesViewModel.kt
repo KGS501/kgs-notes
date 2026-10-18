@@ -1,5 +1,6 @@
 package com.kgs.notes
 
+import com.kgs.notes.design.R.string as UiR
 import android.app.Application
 import android.content.SharedPreferences
 import android.net.Uri
@@ -65,6 +66,9 @@ enum class LibrarySort {
 }
 
 enum class LibraryView { LIST, CARDS }
+enum class EditorLayoutPreference { AUTOMATIC, SPLIT, FULL_SCREEN }
+
+data class ManagedCategory(val sourceId: SourceId, val path: String, val noteCount: Int)
 
 enum class LibraryDestination {
     NOTES,
@@ -81,16 +85,16 @@ enum class AttachmentMetadataPreference {
 }
 
 /** Whether KGS Notes follows the system's dark theme or keeps its own. */
-enum class DarkModePreference(val label: String) {
-    SYSTEM("System"),
-    LIGHT("Light"),
-    DARK("Dark"),
+enum class DarkModePreference(val labelRes: Int) {
+    SYSTEM(UiR.ui_system),
+    LIGHT(UiR.ui_light),
+    DARK(UiR.ui_dark),
 }
 
-enum class NoteFormatPreference(val label: String, val nextcloudSuffix: String?) {
-    MARKDOWN("Markdown (.md)", ".md"),
-    TEXT("Text (.txt)", ".txt"),
-    FOLLOW_SOURCE("Follow Source", null),
+enum class NoteFormatPreference(val labelRes: Int, val nextcloudSuffix: String?) {
+    MARKDOWN(UiR.ui_markdown_md, ".md"),
+    TEXT(UiR.ui_text_txt, ".txt"),
+    FOLLOW_SOURCE(UiR.ui_follow_source, null),
 }
 
 data class SourceChoice(
@@ -100,7 +104,30 @@ data class SourceChoice(
     val connected: Boolean = true,
     val supportsAttachments: Boolean = id == LocalSourceId,
     val writable: Boolean = true,
+    val categories: Boolean = true,
 )
+
+/** In book posture the right page is primary, as the editor beside the library is elsewhere. */
+enum class NotePane {
+    PRIMARY,
+    SECONDARY;
+
+    val other: NotePane get() = if (this == PRIMARY) SECONDARY else PRIMARY
+}
+
+data class PaneNote(val note: Note, val editorMode: EditorMode)
+
+/** One open Note with its own unsaved edits; book posture shows two pages at once. */
+private class EditorSlot {
+    val note = MutableStateFlow<Note?>(null)
+    var contentSave: Job? = null
+    var metadataSave: Job? = null
+    var pendingTitle: String? = null
+    var pendingCategory: String? = null
+    var contentDirty = false
+    var metadataDirty = false
+    var editorMode: EditorMode? = null
+}
 
 enum class SourceConnectionPhase {
     READY,
@@ -126,6 +153,13 @@ data class NotesUiState(
     val notes: List<NoteSummary> = emptyList(),
     val selectedNote: Note? = null,
     val categories: List<String> = emptyList(),
+    val managedCategories: List<ManagedCategory> = emptyList(),
+    val managingCategories: Boolean = false,
+    val editorLayout: EditorLayoutPreference = EditorLayoutPreference.AUTOMATIC,
+    /** The library's share of a wide window beside an open Note. */
+    val splitFraction: Float = DefaultSplitFraction,
+    val canExpandEditor: Boolean = false,
+    val fold: NotesFold? = null,
     val sources: List<SourceChoice> = listOf(SourceChoice(LocalSourceId, "Local Source", true)),
     val filter: LibraryFilter = LibraryFilter.ALL,
     val query: String = "",
@@ -139,6 +173,10 @@ data class NotesUiState(
     val pendingSyncCount: Int = 0,
     val syncingSources: Boolean = false,
     val editorMode: EditorMode = EditorMode.RICH,
+    /** The page editor actions apply to; [selectedNote] and [editorMode] describe it. */
+    val activePane: NotePane = NotePane.PRIMARY,
+    /** The Note open on the other page in book posture. */
+    val otherPane: PaneNote? = null,
     val previewModes: Map<NoteId, EditorMode> = emptyMap(),
     val attachmentMetadataPreference: AttachmentMetadataPreference = AttachmentMetadataPreference.ASK_EVERY_TIME,
     val saving: Boolean = false,
@@ -166,6 +204,7 @@ class NotesViewModel internal constructor(
     ),
     private val loginFlow: NextcloudLoginFlow = HttpNextcloudLoginFlow(),
 ) : AndroidViewModel(application) {
+    private val strings get() = getApplication<Application>().localizedResources()
     constructor(application: Application) : this(
         application = application,
         engine = ConnectedNotesEngine.open(
@@ -173,7 +212,13 @@ class NotesViewModel internal constructor(
             workingCopyRoot = application.noBackupFilesDir.resolve("working-copies").toPath(),
         ),
     )
-    private val selected = MutableStateFlow<Note?>(null)
+    private val primarySlot = EditorSlot()
+    private val secondarySlot = EditorSlot()
+    private val activePane = MutableStateFlow(NotePane.PRIMARY)
+    /** The slot that editor actions apply to; book posture switches it as a person works on either page. */
+    private val slot: EditorSlot get() = slotFor(activePane.value)
+    private fun slotFor(pane: NotePane) = if (pane == NotePane.PRIMARY) primarySlot else secondarySlot
+    private val selected: MutableStateFlow<Note?> get() = slot.note
     private val controls = MutableStateFlow(
         UiControls(
             groupByDate = preferences.getBoolean(GROUP_BY_DATE_KEY, false),
@@ -183,6 +228,10 @@ class NotesViewModel internal constructor(
             darkMode = preferences.getString(DARK_MODE_KEY, null)
                 ?.let { stored -> DarkModePreference.entries.firstOrNull { it.name == stored } }
                 ?: DarkModePreference.SYSTEM,
+            editorLayout = preferences.getString(EDITOR_LAYOUT_KEY, null)
+                ?.let { value -> EditorLayoutPreference.entries.firstOrNull { it.name == value } }
+                ?: EditorLayoutPreference.AUTOMATIC,
+            splitFraction = preferences.getFloat(SPLIT_FRACTION_KEY, DefaultSplitFraction),
             defaultEditorMode = preferences.getString(DEFAULT_EDITOR_MODE_KEY, null)
                 ?.let { stored -> EditorMode.entries.firstOrNull { it.name == stored } }
                 ?: EditorMode.RICH,
@@ -204,12 +253,21 @@ class NotesViewModel internal constructor(
                 ?: NoteFormatPreference.MARKDOWN,
         ),
     )
-    private var contentSave: Job? = null
-    private var metadataSave: Job? = null
-    private var pendingTitle: String? = null
-    private var pendingCategory: String? = null
-    private var contentDirty = false
-    private var metadataDirty = false
+    private var contentSave: Job?
+        get() = slot.contentSave
+        set(value) { slot.contentSave = value }
+    private var pendingTitle: String?
+        get() = slot.pendingTitle
+        set(value) { slot.pendingTitle = value }
+    private var pendingCategory: String?
+        get() = slot.pendingCategory
+        set(value) { slot.pendingCategory = value }
+    private var contentDirty: Boolean
+        get() = slot.contentDirty
+        set(value) { slot.contentDirty = value }
+    private var metadataDirty: Boolean
+        get() = slot.metadataDirty
+        set(value) { slot.metadataDirty = value }
     private var connectionJob: Job? = null
     private var foregroundRefreshJob: Job? = null
     private var manualSyncJob: Job? = null
@@ -219,12 +277,18 @@ class NotesViewModel internal constructor(
     private val markdownEditor = DefaultMarkdownEditor()
     private val externalFiles = ExternalFileSession(application, viewModelScope)
 
+    private val openNotes = combine(primarySlot.note, secondarySlot.note, activePane) { primary, secondary, active ->
+        Triple(primary, secondary, active)
+    }
+
     private val libraryUi = combine(
         engine.library,
         engine.sources,
-        selected,
+        openNotes,
         controls,
-    ) { library, sourceDescriptors, selectedNote, controls ->
+    ) { library, sourceDescriptors, (primaryNote, secondaryNote, active), controls ->
+        val selectedNote = if (active == NotePane.PRIMARY) primaryNote else secondaryNote
+        val otherNote = if (active == NotePane.PRIMARY) secondaryNote else primaryNote
         val descriptorsById = sourceDescriptors.associateBy(SourceDescriptor::id)
         val allSourceIds = buildList {
             sourceDescriptors.forEach { descriptor ->
@@ -249,18 +313,28 @@ class NotesViewModel internal constructor(
         NotesUiState(
             notes = notes,
             selectedNote = selectedNote,
-            categories = (library.active.map(NoteSummary::category) + listOfNotNull(selectedNote?.category))
+            activePane = active,
+            otherPane = otherNote?.let { note ->
+                PaneNote(note, slotFor(active.other).editorMode ?: previewModeFor(note.id, controls.defaultEditorMode))
+            },
+            categories = (library.active.map(NoteSummary::category) + library.categories.values.flatten() +
+                listOfNotNull(selectedNote?.category))
                 .filter(String::isNotBlank)
                 .distinct(),
+            managedCategories = managedCategoryList(library),
+            managingCategories = controls.managingCategories,
+            editorLayout = controls.editorLayout,
+            splitFraction = controls.splitFraction,
             sources = allSourceIds.map { id ->
                 SourceChoice(
                     id = id,
-                    name = descriptorsById[id]?.name
-                        ?: if (id == LocalSourceId) "Local Source" else "Disconnected Source",
+                    name = if (id == LocalSourceId) strings.getString(UiR.ui_local_source) else descriptorsById[id]?.name
+                        ?: strings.getString(UiR.ui_disconnected),
                     visible = id !in controls.hiddenSourceIds,
                     connected = id in descriptorsById,
                     supportsAttachments = descriptorsById[id]?.capabilities?.attachments == true,
                     writable = descriptorsById[id]?.capabilities?.writable == true,
+                    categories = descriptorsById[id]?.capabilities?.categories == true,
                 )
             },
             filter = controls.filter,
@@ -271,9 +345,7 @@ class NotesViewModel internal constructor(
             ascending = controls.ascending,
             destination = controls.destination,
             libraryCategory = controls.libraryCategory,
-            pendingSyncCount = library.active.count { note ->
-                visible(note) && note.sourceId != LocalSourceId && note.syncState in pendingSyncStates
-            },
+            pendingSyncCount = library.active.count { note -> visible(note) && note.needsSyncNotice },
             syncingSources = controls.syncingSources,
             editorMode = controls.editorMode,
             previewModes = notes.associate { it.id to previewModeFor(it.id, controls.defaultEditorMode) },
@@ -297,6 +369,8 @@ class NotesViewModel internal constructor(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000),
         initialValue = NotesUiState(
+            sources = listOf(SourceChoice(LocalSourceId, strings.getString(UiR.ui_local_source), true)),
+            editorLayout = controls.value.editorLayout,
             theme = controls.value.theme,
             darkMode = controls.value.darkMode,
             defaultEditorMode = controls.value.defaultEditorMode,
@@ -310,9 +384,11 @@ class NotesViewModel internal constructor(
     init {
         viewModelScope.launch {
             engine.library.collect {
-                val id = selected.value?.id ?: return@collect
-                val current = engine.note(id) ?: return@collect
-                if (selected.value?.id == id) selected.value = current.withPendingDisplayMetadata()
+                for (open in listOf(primarySlot, secondarySlot)) {
+                    val id = open.note.value?.id ?: continue
+                    val current = engine.note(id) ?: continue
+                    if (open.note.value?.id == id) open.note.value = current.withPendingDisplayMetadata(open)
+                }
             }
         }
         if (engine is ConnectedNotesEngine) {
@@ -329,38 +405,89 @@ class NotesViewModel internal constructor(
     }
 
     fun createNote() {
+        val s = slot
         viewModelScope.launch {
             sourcesReady.await()
-            flushSelectedContent()
-            selected.value?.id?.let { engine.close(it) }
+            flushSelectedContent(s)
+            s.note.value?.id?.let { engine.close(it) }
             val sourceId = controls.value.defaultSourceId.takeIf { preferred ->
                 engine.sources.value.any { it.id == preferred }
             } ?: LocalSourceId
             val id = engine.createDraft(category = controls.value.libraryCategory.orEmpty(), sourceId = sourceId)
-            selected.value = engine.openEditingSession(id)
-            controls.update { it.copy(editorMode = it.defaultEditorMode) }
+            s.note.value = engine.openEditingSession(id)
+            setSlotEditorMode(s, controls.value.defaultEditorMode)
         }
     }
 
     fun selectNote(id: NoteId) {
-        viewModelScope.launch {
-            flushSelectedContent()
-            selected.value?.id?.takeIf { it != id }?.let { engine.close(it) }
-            selected.value = engine.openEditingSession(id)
-            controls.update { it.copy(editorMode = previewModeFor(id)) }
+        // One Editing Session per Note: a Note already open on the other page is focused there.
+        val other = slotFor(activePane.value.other)
+        if (other.note.value?.id == id) {
+            activatePane(activePane.value.other)
+            return
         }
+        val s = slot
+        viewModelScope.launch {
+            flushSelectedContent(s)
+            s.note.value?.id?.takeIf { it != id }?.let { engine.close(it) }
+            s.note.value = engine.openEditingSession(id)
+            setSlotEditorMode(s, previewModeFor(id))
+        }
+    }
+
+    /** Book posture shows two pages; editor actions follow the page a person last worked on. */
+    fun activatePane(pane: NotePane) {
+        if (pane == activePane.value) return
+        slot.editorMode = controls.value.editorMode
+        activePane.value = pane
+        val next = slot
+        controls.update { current ->
+            current.copy(
+                editorMode = next.editorMode ?: next.note.value?.id?.let(::previewModeFor) ?: current.defaultEditorMode,
+                saving = next.contentDirty || next.metadataDirty,
+            )
+        }
+    }
+
+    /** Leaving book posture keeps one page: the right one, or the left one when only it was open. */
+    fun setDualPages(enabled: Boolean) {
+        if (enabled || secondarySlot.note.value == null) {
+            if (!enabled) activatePane(NotePane.PRIMARY)
+            return
+        }
+        viewModelScope.launch {
+            flushSelectedContent(secondarySlot)
+            val leftNote = secondarySlot.note.value ?: return@launch
+            if (primarySlot.note.value == null) {
+                primarySlot.note.value = leftNote
+                primarySlot.editorMode = if (activePane.value == NotePane.SECONDARY) controls.value.editorMode else secondarySlot.editorMode
+            } else {
+                engine.close(leftNote.id)
+            }
+            secondarySlot.note.value = null
+            secondarySlot.editorMode = null
+            activatePane(NotePane.PRIMARY)
+        }
+    }
+
+    private fun setSlotEditorMode(s: EditorSlot, mode: EditorMode) {
+        s.editorMode = mode
+        if (s === slot) controls.update { it.copy(editorMode = mode) }
     }
 
     internal fun openExternalFile(request: ExternalFileRequest) {
         viewModelScope.launch {
             try {
                 externalFiles.open(request, controls.value.defaultEditorMode) {
-                    flushSelectedContent()
-                    selected.value?.id?.let { engine.close(it) }
-                    selected.value = null
+                    for (open in listOf(primarySlot, secondarySlot)) {
+                        flushSelectedContent(open)
+                        open.note.value?.id?.let { engine.close(it) }
+                        open.note.value = null
+                    }
+                    activatePane(NotePane.PRIMARY)
                 }
             } catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { controls.update { it.copy(userMessage = "The file couldn't be opened safely. Your current Note was kept.") } }
+            catch (_: Exception) { controls.update { it.copy(userMessage = strings.getString(UiR.ui_the_file_couldn_t_be_opened_safely_your_current_note_was_kept)) } }
         }
     }
 
@@ -389,11 +516,12 @@ class NotesViewModel internal constructor(
         viewModelScope.launch {
             externalFiles.copyIntoNotes(sessionKey) { existingId, previousText, previousTitle, title, text, mode, rememberId ->
                 if (sourceId != LocalSourceId) sourcesReady.await()
-                flushSelectedContent()
-                selected.value?.id?.let { engine.close(it) }
-                selected.value = null
+                val s = slot
+                flushSelectedContent(s)
+                s.note.value?.id?.let { engine.close(it) }
+                s.note.value = null
                 val destination = engine.sources.value.firstOrNull { it.id == sourceId }
-                require(destination?.capabilities?.writable == true) { "Choose a connected, writable Source" }
+                require(destination?.capabilities?.writable == true) { strings.getString(UiR.ui_choose_a_connected_writable_source) }
                 // Retain the new identity before subsequent writes so retrying never duplicates a copy.
                 val existing = existingId?.let { engine.note(it) }
                 // An independently edited copy must survive a retry of the file operation.
@@ -412,8 +540,9 @@ class NotesViewModel internal constructor(
                 val finalId = if (engine.note(id)?.sourceId != sourceId) engine.moveToSource(id, sourceId) else id
                 if (finalId != id) rememberId(finalId, engine.note(finalId)?.title)
                 preferences.edit().putString(previewModeKey(finalId), mode.name).apply()
-                selected.value = requireNotNull(engine.openEditingSession(finalId))
-                controls.update { it.copy(editorMode = mode, destination = LibraryDestination.NOTES, libraryCategory = null) }
+                s.note.value = requireNotNull(engine.openEditingSession(finalId))
+                setSlotEditorMode(s, mode)
+                controls.update { it.copy(destination = LibraryDestination.NOTES, libraryCategory = null) }
                 if (sourceId != LocalSourceId) scheduleSynchronization(finalId)
             }
         }
@@ -425,10 +554,11 @@ class NotesViewModel internal constructor(
         selected.value = current.copy(markdown = markdown)
         contentDirty = true
         showSaving()
-        contentSave?.cancel()
-        contentSave = viewModelScope.launch {
+        val s = slot
+        s.contentSave?.cancel()
+        s.contentSave = viewModelScope.launch {
             delay(CONTENT_SAVE_DELAY_MILLIS)
-            saveCurrentContent()
+            saveCurrentContent(s)
         }
     }
 
@@ -444,10 +574,11 @@ class NotesViewModel internal constructor(
 
     fun toggleFavorite() {
         val id = selected.value?.id ?: return
+        val s = slot
         showSaving()
         viewModelScope.launch {
             engine.toggleFavorite(id)
-            selected.value = engine.note(id)?.withPendingDisplayMetadata()
+            if (s.note.value?.id == id) s.note.value = engine.note(id)?.withPendingDisplayMetadata(s)
             refreshSavingState()
             scheduleSynchronization(id)
         }
@@ -465,10 +596,11 @@ class NotesViewModel internal constructor(
 
     fun importImage(uri: Uri, removePrivateMetadata: Boolean) {
         val requestedNoteId = selected.value?.id ?: return
+        val s = slot
         showSaving()
         viewModelScope.launch {
             try {
-                flushSelectedContent()
+                flushSelectedContent(s)
                 val prepared = withContext(Dispatchers.IO) {
                     prepareImageImport(getApplication(), uri, removePrivateMetadata)
                 }
@@ -482,7 +614,7 @@ class NotesViewModel internal constructor(
                         ),
                     )
                 }
-                val current = selected.value?.takeIf { it.id == requestedNoteId }
+                val current = s.note.value?.takeIf { it.id == requestedNoteId }
                     ?: return@launch
                 val edit = markdownEditor.insertAttachment(
                     markdown = current.markdown,
@@ -496,16 +628,16 @@ class NotesViewModel internal constructor(
                 withContext(Dispatchers.IO) {
                     engine.updateContent(requestedNoteId, edit.markdown)
                 }
-                selected.value = engine.note(requestedNoteId)
+                if (s.note.value?.id == requestedNoteId) s.note.value = engine.note(requestedNoteId)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
                 controls.update {
                     it.copy(
-                        userMessage = if (failure.message?.contains("Keep original") == true) {
-                            "This image format can only be added with Keep original."
+                        userMessage = if (failure.message?.contains(strings.getString(UiR.ui_keep_original)) == true) {
+                            strings.getString(UiR.ui_this_image_format_can_only_be_added_with_keep_original)
                         } else {
-                            "KGS Notes couldn't add this image."
+                            strings.getString(UiR.ui_kgs_notes_couldn_t_add_this_image)
                         },
                     )
                 }
@@ -533,7 +665,7 @@ class NotesViewModel internal constructor(
                 accountStore.loadAll().firstOrNull { it.profile.id == id }
             }
             if (account == null) {
-                controls.update { it.copy(userMessage = "Reconnect this Source by adding its account again.") }
+                controls.update { it.copy(userMessage = strings.getString(UiR.ui_reconnect_this_source_by_adding_its_account_again)) }
                 showSourceConnection()
                 return@launch
             }
@@ -568,7 +700,7 @@ class NotesViewModel internal constructor(
                 sourceConnection = it.sourceConnection.copy(
                     visible = true,
                     phase = SourceConnectionPhase.STARTING,
-                    message = "Contacting Nextcloud…",
+                    message = strings.getString(UiR.ui_contacting_nextcloud),
                 ),
             )
         }
@@ -581,7 +713,7 @@ class NotesViewModel internal constructor(
                             visible = true,
                             phase = SourceConnectionPhase.WAITING_FOR_BROWSER,
                             browserUrl = challenge.loginUrl,
-                            message = "Approve KGS Notes in your browser.",
+                            message = strings.getString(UiR.ui_approve_kgs_notes_in_your_browser),
                         ),
                     )
                 }
@@ -607,7 +739,7 @@ class NotesViewModel internal constructor(
                 sourceConnection = it.sourceConnection.copy(
                     visible = true,
                     phase = SourceConnectionPhase.VERIFYING,
-                    message = "Checking Notes access…",
+                    message = strings.getString(UiR.ui_checking_notes_access),
                 ),
             )
         }
@@ -642,12 +774,12 @@ class NotesViewModel internal constructor(
                     it.sourceId != LocalSourceId && it.syncState in pendingSyncStates
                 }
                 if (!refreshed || pending) controls.update {
-                    it.copy(userMessage = "Some Sources couldn't finish syncing. Your changes remain saved on this device.")
+                    it.copy(userMessage = strings.getString(UiR.ui_some_sources_couldn_t_finish_syncing_your_changes_remain_saved_on_this_device))
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
-                controls.update { it.copy(userMessage = "KGS Notes couldn't finish syncing. Please try again.") }
+                controls.update { it.copy(userMessage = strings.getString(UiR.ui_kgs_notes_couldn_t_finish_syncing_please_try_again)) }
             } finally {
                 controls.update { it.copy(syncingSources = false) }
             }
@@ -674,6 +806,12 @@ class NotesViewModel internal constructor(
         controls.update { it.copy(defaultSourceId = id) }
     }
 
+    private fun sourceFailureMessage(failure: Throwable, fallback: Int): String = when (failure.message) {
+        "Source names must be unique" -> strings.getString(UiR.ui_source_names_must_be_unique)
+        "Source is no longer connected" -> strings.getString(UiR.ui_source_is_no_longer_connected)
+        else -> strings.getString(fallback)
+    }
+
     fun renameSource(id: SourceId, name: String) {
         viewModelScope.launch {
             runCatching {
@@ -688,7 +826,7 @@ class NotesViewModel internal constructor(
                 engine.attachSource(source)
                 runCatching { engine.refreshSources() }
             }.onFailure { failure ->
-                controls.update { it.copy(userMessage = failure.message ?: "Couldn't rename this Source.") }
+                controls.update { it.copy(userMessage = sourceFailureMessage(failure, UiR.ui_couldn_t_rename_this_source)) }
             }
         }
     }
@@ -704,7 +842,7 @@ class NotesViewModel internal constructor(
                 controls.update { it.copy(hiddenSourceIds = it.hiddenSourceIds - id) }
             }.onFailure { failure ->
                 controls.update {
-                    it.copy(userMessage = failure.message ?: "Couldn't remove this Source.")
+                    it.copy(userMessage = sourceFailureMessage(failure, UiR.ui_couldn_t_remove_this_source))
                 }
             }
         }
@@ -738,7 +876,7 @@ class NotesViewModel internal constructor(
             }
             if (failed) {
                 controls.update {
-                    it.copy(userMessage = "Some Sources couldn't apply the new Note format.")
+                    it.copy(userMessage = strings.getString(UiR.ui_some_sources_couldn_t_apply_the_new_note_format))
                 }
             }
         }
@@ -748,22 +886,23 @@ class NotesViewModel internal constructor(
         val current = selected.value ?: return
         if (current.sourceId == id || controls.value.movingNoteId != null) return
         controls.update { it.copy(movingNoteId = current.id) }
+        val s = slot
         viewModelScope.launch {
             try {
-                flushSelectedContent()
+                flushSelectedContent(s)
                 val movedId = engine.moveToSource(current.id, id)
                 carryPreviewMode(current.id, movedId)
-                if (selected.value?.id == current.id) {
-                    selected.value = engine.openEditingSession(movedId)?.withPendingDisplayMetadata()
+                if (s.note.value?.id == current.id) {
+                    s.note.value = engine.openEditingSession(movedId)?.withPendingDisplayMetadata(s)
                 }
                 if (id != LocalSourceId) scheduleSynchronization(movedId)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
                 val message = when (failure) {
-                    is SourceConflictException -> "The Note changed on the server. Its Source stayed the same, and your edits were kept."
-                    is IllegalArgumentException -> failure.message ?: "KGS Notes couldn't change this Note's Source."
-                    else -> "KGS Notes couldn't change this Note's Source. Your Note was kept."
+                    is SourceConflictException -> strings.getString(UiR.ui_the_note_changed_on_the_server_its_source_stayed_the_same_and_your_edits_were_kept)
+                    is IllegalArgumentException -> failure.message ?: strings.getString(UiR.ui_kgs_notes_couldn_t_change_this_note_s_source)
+                    else -> strings.getString(UiR.ui_kgs_notes_couldn_t_change_this_note_s_source_your_note_was_kept)
                 }
                 controls.update { it.copy(userMessage = message) }
             } finally {
@@ -774,38 +913,42 @@ class NotesViewModel internal constructor(
     }
 
     fun closeEditor() {
+        val s = slot
         viewModelScope.launch {
-            flushSelectedContent()
-            selected.value?.id?.let { engine.close(it) }
-            selected.value = null
+            flushSelectedContent(s)
+            s.note.value?.id?.let { engine.close(it) }
+            s.note.value = null
         }
     }
 
     fun moveToTrash() {
         val id = selected.value?.id ?: return
+        val s = slot
         viewModelScope.launch {
-            flushSelectedContent()
+            flushSelectedContent(s)
             engine.moveToTrash(id)
             scheduleSynchronization(id)
-            selected.value = null
+            if (s.note.value?.id == id) s.note.value = null
         }
     }
 
     fun restore() {
         val id = selected.value?.id ?: return
+        val s = slot
         viewModelScope.launch {
             engine.restore(id)
-            selected.value = engine.openEditingSession(id)
+            if (s.note.value?.id == id) s.note.value = engine.openEditingSession(id)
             scheduleSynchronization(id)
         }
     }
 
     fun deletePermanently() {
         val id = selected.value?.id ?: return
+        val s = slot
         viewModelScope.launch {
             engine.deletePermanently(id)
             preferences.edit().remove(previewModeKey(id)).apply()
-            selected.value = null
+            if (s.note.value?.id == id) s.note.value = null
         }
     }
 
@@ -813,7 +956,7 @@ class NotesViewModel internal constructor(
         viewModelScope.launch {
             runCatching { engine.rename(id, title) }
                 .onSuccess { scheduleSynchronization(id) }
-                .onFailure { controls.update { it.copy(userMessage = "KGS Notes couldn't rename this Note.") } }
+                .onFailure { controls.update { it.copy(userMessage = strings.getString(UiR.ui_kgs_notes_couldn_t_rename_this_note)) } }
         }
     }
 
@@ -850,7 +993,7 @@ class NotesViewModel internal constructor(
                 }.onFailure { failures++ }
             }
             if (failures > 0) controls.update {
-                it.copy(userMessage = "$failures Note action${if (failures == 1) "" else "s"} couldn't be completed.")
+                it.copy(userMessage = strings.getString(UiR.ui_some_note_actions_couldn_t_be_completed_your_notes_were_kept))
             }
         }
     }
@@ -867,6 +1010,7 @@ class NotesViewModel internal constructor(
         selected.value?.id?.let { id ->
             preferences.edit().putString(previewModeKey(id), value.name).apply()
         }
+        slot.editorMode = value
         controls.update { it.copy(editorMode = value) }
     }
 
@@ -919,8 +1063,66 @@ class NotesViewModel internal constructor(
     }
 
     fun openDestination(destination: LibraryDestination) {
-        controls.update { it.copy(destination = destination, libraryCategory = if (destination == LibraryDestination.NOTES) null else it.libraryCategory) }
+        controls.update { it.copy(destination = destination,
+            libraryCategory = if (destination == LibraryDestination.NOTES) null else it.libraryCategory) }
     }
+
+    fun createCategory(sourceId: SourceId, name: String) {
+        viewModelScope.launch {
+            try {
+                engine.createCategory(sourceId, name)
+            } catch (cancelled: CancellationException) { throw cancelled
+            } catch (_: Exception) {
+                controls.update { it.copy(userMessage = strings.getString(UiR.ui_some_category_changes_couldn_t_be_completed_your_notes_were_kept_you_can_retry)) }
+            }
+        }
+    }
+
+    fun renameCategory(sourceId: SourceId, category: String, newCategory: String) = manageCategory(sourceId, category, newCategory)
+    fun deleteCategory(sourceId: SourceId, category: String) = manageCategory(sourceId, category, null)
+
+    private fun manageCategory(sourceId: SourceId, category: String, replacement: String?) {
+        if (controls.value.managingCategories) return
+        controls.update { it.copy(managingCategories = true) }
+        viewModelScope.launch {
+            try {
+                saveCurrentContent()
+                savePendingMetadata()
+                val target = replacement?.let { com.kgs.notes.engine.normalizedCategoryPath(it) }
+                if (target == null) engine.deleteCategory(sourceId, category)
+                else engine.renameCategory(sourceId, category, target)
+                controls.update { current ->
+                    val path = current.libraryCategory
+                    current.copy(libraryCategory = if (path != null && (path == category || path.startsWith("$category/"))) {
+                        if (target == null) "" else target + path.removePrefix(category)
+                    } else path)
+                }
+            } catch (cancelled: CancellationException) { throw cancelled
+            } catch (_: Exception) {
+                controls.update { it.copy(userMessage = strings.getString(UiR.ui_some_category_changes_couldn_t_be_completed_your_notes_were_kept_you_can_retry)) }
+            } finally {
+                for (open in listOf(primarySlot, secondarySlot)) {
+                    open.note.value?.id?.let { id -> open.note.value = engine.note(id)?.withPendingDisplayMetadata(open) }
+                }
+                (engine.library.value.active + engine.library.value.trash)
+                    .filter { it.sourceId == sourceId && it.syncState == NoteSyncState.SAVED_LOCALLY }
+                    .forEach { scheduleSynchronization(it.id) }
+                controls.update { it.copy(managingCategories = false) }
+            }
+        }
+    }
+
+    fun setEditorLayout(value: EditorLayoutPreference) {
+        preferences.edit().putString(EDITOR_LAYOUT_KEY, value.name).apply()
+        controls.update { it.copy(editorLayout = value) }
+    }
+
+    fun setSplitFraction(value: Float) {
+        preferences.edit().putFloat(SPLIT_FRACTION_KEY, value).apply()
+        controls.update { it.copy(splitFraction = value) }
+    }
+
+    fun refreshLocale(locale: java.util.Locale) { controls.update { it.copy(localeTag = locale.toLanguageTag()) } }
 
     fun openCategory(category: String?) {
         controls.update { it.copy(destination = LibraryDestination.NOTES, libraryCategory = category, filter = LibraryFilter.ALL, query = "") }
@@ -928,66 +1130,69 @@ class NotesViewModel internal constructor(
 
     fun flushPendingContent() {
         externalFiles.flush()
-        if (selected.value == null) return
-        contentSave?.cancel()
-        metadataSave?.cancel()
-        contentSave = viewModelScope.launch {
-            saveCurrentContent()
-            savePendingMetadata()
+        for (open in listOf(primarySlot, secondarySlot)) {
+            if (open.note.value == null) continue
+            open.contentSave?.cancel()
+            open.metadataSave?.cancel()
+            open.contentSave = viewModelScope.launch {
+                saveCurrentContent(open)
+                savePendingMetadata(open)
+            }
         }
     }
 
-    private suspend fun flushSelectedContent() {
-        contentSave?.cancel()
-        metadataSave?.cancel()
-        saveCurrentContent()
-        savePendingMetadata()
+    private suspend fun flushSelectedContent(s: EditorSlot = slot) {
+        s.contentSave?.cancel()
+        s.metadataSave?.cancel()
+        saveCurrentContent(s)
+        savePendingMetadata(s)
     }
 
-    private suspend fun saveCurrentContent() {
-        if (!contentDirty) {
+    private suspend fun saveCurrentContent(s: EditorSlot = slot) {
+        if (!s.contentDirty) {
             refreshSavingState()
             return
         }
-        val current = selected.value ?: return
+        val current = s.note.value ?: return
         engine.updateContent(current.id, current.markdown)
-        val displayed = selected.value
-        contentDirty = displayed?.id == current.id && displayed.markdown != current.markdown
-        selected.value = engine.note(current.id)
-            ?.copy(markdown = if (contentDirty) displayed?.markdown.orEmpty() else current.markdown)
-            ?.withPendingDisplayMetadata()
+        val displayed = s.note.value
+        s.contentDirty = displayed?.id == current.id && displayed.markdown != current.markdown
+        s.note.value = engine.note(current.id)
+            ?.copy(markdown = if (s.contentDirty) displayed?.markdown.orEmpty() else current.markdown)
+            ?.withPendingDisplayMetadata(s)
         refreshSavingState()
         scheduleSynchronization(current.id)
     }
 
     private fun scheduleMetadataSave(immediate: Boolean = false) {
-        metadataSave?.cancel()
-        metadataSave = viewModelScope.launch {
+        val s = slot
+        s.metadataSave?.cancel()
+        s.metadataSave = viewModelScope.launch {
             if (!immediate) delay(METADATA_SAVE_DELAY_MILLIS)
             try {
-                savePendingMetadata()
+                savePendingMetadata(s)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
-                controls.update { it.copy(userMessage = "KGS Notes couldn't save this change. Please try again.") }
+                controls.update { it.copy(userMessage = strings.getString(UiR.ui_kgs_notes_couldn_t_save_this_change_please_try_again)) }
             }
         }
     }
 
-    private suspend fun savePendingMetadata() {
-        if (!metadataDirty) {
+    private suspend fun savePendingMetadata(s: EditorSlot = slot) {
+        if (!s.metadataDirty) {
             refreshSavingState()
             return
         }
-        val id = selected.value?.id ?: return
-        val title = pendingTitle
-        val category = pendingCategory
+        val id = s.note.value?.id ?: return
+        val title = s.pendingTitle
+        val category = s.pendingCategory
         if (title != null) engine.rename(id, title)
         if (category != null) engine.setCategory(id, category)
-        if (pendingTitle == title) pendingTitle = null
-        if (pendingCategory == category) pendingCategory = null
-        metadataDirty = pendingTitle != null || pendingCategory != null
-        selected.value = engine.note(id)?.withPendingDisplayMetadata()
+        if (s.pendingTitle == title) s.pendingTitle = null
+        if (s.pendingCategory == category) s.pendingCategory = null
+        s.metadataDirty = s.pendingTitle != null || s.pendingCategory != null
+        s.note.value = engine.note(id)?.withPendingDisplayMetadata(s)
         refreshSavingState()
         scheduleSynchronization(id)
     }
@@ -1004,7 +1209,9 @@ class NotesViewModel internal constructor(
                 val before = engine.note(id) ?: break
                 engine.synchronize(id)
                 val after = engine.note(id) ?: break
-                if (selected.value?.id == id) selected.value = after.withPendingDisplayMetadata()
+                for (open in listOf(primarySlot, secondarySlot)) {
+                    if (open.note.value?.id == id) open.note.value = after.withPendingDisplayMetadata(open)
+                }
                 // Stop after a network failure; foreground refresh retries it.
                 // Continue when an edit arrived while the preceding upload ran.
                 if (after.syncState != NoteSyncState.SAVED_LOCALLY || after == before) break
@@ -1057,14 +1264,14 @@ class NotesViewModel internal constructor(
                 sourceConnection = current.sourceConnection.copy(
                     phase = SourceConnectionPhase.VERIFYING,
                     browserUrl = null,
-                    message = "Checking Notes access…",
+                    message = strings.getString(UiR.ui_checking_notes_access),
                 ),
             )
         }
         val profile = accountStore.profileFor(sourceName, credentials)
         val editingSourceId = controls.value.sourceConnection.editingSourceId
         require(editingSourceId == null || editingSourceId == profile.id) {
-            "The account belongs to a different Source"
+            strings.getString(UiR.ui_the_account_belongs_to_a_different_source)
         }
         val source = NextcloudNotesSource(
             sourceName = profile.name,
@@ -1082,7 +1289,7 @@ class NotesViewModel internal constructor(
                 sourceConnection = current.sourceConnection.copy(
                     visible = true,
                     phase = SourceConnectionPhase.CONNECTED,
-                    message = "${profile.name} is connected.",
+                    message = strings.getString(UiR.ui_value_is_connected, profile.name),
                 ),
             )
         }
@@ -1090,21 +1297,21 @@ class NotesViewModel internal constructor(
 
     private fun showConnectionFailure(failure: Exception) {
         val message = when (failure) {
-            is UnsupportedNotesApi -> "This server needs Nextcloud Notes API ${failure.minimumVersion} or newer."
+            is UnsupportedNotesApi -> strings.getString(UiR.ui_this_server_needs_nextcloud_notes_api_value_or_newer, failure.minimumVersion)
             is NextcloudApiException -> if (failure.statusCode == 401) {
-                "Nextcloud rejected these credentials."
+                strings.getString(UiR.ui_nextcloud_rejected_these_credentials)
             } else {
-                "Nextcloud couldn't complete the request."
+                strings.getString(UiR.ui_nextcloud_couldn_t_complete_the_request)
             }
             is NextcloudConnectionException -> when (failure.failure) {
                 com.kgs.notes.nextcloud.NextcloudConnectionFailure.INSECURE_SERVER ->
-                    "KGS Notes only connects over HTTPS."
+                    strings.getString(UiR.ui_kgs_notes_only_connects_over_https)
                 com.kgs.notes.nextcloud.NextcloudConnectionFailure.INVALID_SERVER_URL ->
-                    "Enter a valid Nextcloud server address."
-                else -> "KGS Notes couldn't connect to this server."
+                    strings.getString(UiR.ui_enter_a_valid_nextcloud_server_address)
+                else -> strings.getString(UiR.ui_kgs_notes_couldn_t_connect_to_this_server)
             }
-            is IllegalArgumentException -> failure.message ?: "KGS Notes couldn't update this Source."
-            else -> "KGS Notes couldn't connect to this server."
+            is IllegalArgumentException -> failure.message ?: strings.getString(UiR.ui_kgs_notes_couldn_t_update_this_source)
+            else -> strings.getString(UiR.ui_kgs_notes_couldn_t_connect_to_this_server)
         }
         controls.update { current ->
             current.copy(
@@ -1133,7 +1340,7 @@ class NotesViewModel internal constructor(
         }
         if (failed) {
             controls.update {
-                it.copy(userMessage = "A Source connected, but its Note format couldn't be changed.")
+                it.copy(userMessage = strings.getString(UiR.ui_a_source_connected_but_its_note_format_couldn_t_be_changed))
             }
         }
     }
@@ -1146,24 +1353,22 @@ class NotesViewModel internal constructor(
         controls.update { it.copy(saving = contentDirty || metadataDirty) }
     }
 
-    private fun Note.withPendingDisplayMetadata(): Note = copy(
-        markdown = selected.value
-            ?.takeIf { it.id == id && contentDirty }
+    private fun Note.withPendingDisplayMetadata(s: EditorSlot = slot): Note = copy(
+        markdown = s.note.value
+            ?.takeIf { it.id == id && s.contentDirty }
             ?.markdown
             ?: markdown,
-        title = pendingTitle ?: title,
-        category = pendingCategory ?: category,
+        title = s.pendingTitle ?: title,
+        category = s.pendingCategory ?: category,
     )
 
     private fun LibrarySnapshot.forFilter(filter: LibraryFilter): List<NoteSummary> = when (filter) {
         LibraryFilter.ALL -> active
         LibraryFilter.FAVORITES -> favorites
-        LibraryFilter.LOCAL -> active.filter { note ->
-            note.sourceId == LocalSourceId || note.syncState != NoteSyncState.SYNCED
-        }
-        LibraryFilter.SERVER -> active.filter { note ->
-            note.sourceId != LocalSourceId && note.syncState == NoteSyncState.SYNCED
-        }
+        // Notes move between these filters only when syncing actually stalls,
+        // not while an ordinary edit is on its way to the Source.
+        LibraryFilter.LOCAL -> active.filter { note -> note.sourceId == LocalSourceId || note.needsSyncNotice }
+        LibraryFilter.SERVER -> active.filter { note -> note.sourceId != LocalSourceId && !note.needsSyncNotice }
     }
 
     private companion object {
@@ -1177,6 +1382,8 @@ class NotesViewModel internal constructor(
         const val THEME_KEY = "app_theme"
         const val DARK_MODE_KEY = "dark_mode"
         const val DEFAULT_EDITOR_MODE_KEY = "default_editor_mode"
+        const val EDITOR_LAYOUT_KEY = "editor_layout"
+        const val SPLIT_FRACTION_KEY = "split_fraction"
         const val CONTENT_SAVE_DELAY_MILLIS = 120L
         const val METADATA_SAVE_DELAY_MILLIS = 300L
         const val LOGIN_POLL_INTERVAL_MILLIS = 1_000L
@@ -1206,12 +1413,16 @@ class NotesViewModel internal constructor(
         val theme: NotesTheme = NotesTheme.KGS_NOTES,
         val darkMode: DarkModePreference = DarkModePreference.SYSTEM,
         val defaultEditorMode: EditorMode = EditorMode.RICH,
+        val localeTag: String = java.util.Locale.getDefault().toLanguageTag(),
+        val managingCategories: Boolean = false,
+        val editorLayout: EditorLayoutPreference = EditorLayoutPreference.AUTOMATIC,
+        val splitFraction: Float = DefaultSplitFraction,
     ) {
         fun comparator(): Comparator<NoteSummary> {
             val base = when (sort) {
                 LibrarySort.LAST_EDITED -> compareBy(NoteSummary::updatedAt)
                 LibrarySort.LAST_CREATED -> compareBy(NoteSummary::createdAt)
-                LibrarySort.ALPHABETICAL -> compareBy { it.title.lowercase() }
+                LibrarySort.ALPHABETICAL -> titleComparator(groupByDate, java.util.Locale.forLanguageTag(localeTag))
             }
             return if (ascending) base else base.reversed()
         }
@@ -1223,3 +1434,23 @@ class NotesViewModel internal constructor(
         NoteSyncState.NEEDS_ATTENTION,
     )
 }
+
+/**
+ * Pending changes on their way to a Source are normal while editing. Only a failed
+ * attempt or a Needs Attention state tells the person that syncing has stalled.
+ */
+internal val NoteSummary.needsSyncNotice: Boolean
+    get() = sourceId != LocalSourceId && (
+        syncState == NoteSyncState.NEEDS_ATTENTION ||
+            (syncFailed && syncState != NoteSyncState.SYNCED)
+        )
+
+internal fun NotesUiState.paneNote(pane: NotePane): Note? = if (pane == activePane) selectedNote else otherPane?.note
+
+/** The state one page's editor shows, whether or not editor actions currently apply to it. */
+internal fun NotesUiState.forPane(pane: NotePane): NotesUiState = if (pane == activePane) this else copy(
+    selectedNote = otherPane?.note,
+    editorMode = otherPane?.editorMode ?: editorMode,
+    saving = false,
+    changingSource = false,
+)

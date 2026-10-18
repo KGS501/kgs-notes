@@ -1,5 +1,7 @@
 package com.kgs.notes
 
+import com.kgs.notes.design.R.string as UiR
+
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -25,7 +27,7 @@ internal data class ExternalFileRequest(val uri: Uri, val mimeType: String?, val
     }
 }
 
-internal class ExternalFileProblem(val explanation: String) : Exception(explanation)
+internal class ExternalFileProblem(val explanationRes: Int) : Exception()
 
 /** Encoding and line endings belong to the original file, not the Markdown renderer. */
 internal data class ExternalTextFormat(
@@ -56,9 +58,9 @@ internal data class ExternalTextFormat(
                     .onUnmappableCharacter(CodingErrorAction.REPORT)
                     .decode(ByteBuffer.wrap(bytes, prefix, bytes.size - prefix)).toString()
             } catch (_: Exception) {
-                throw ExternalFileProblem("This file isn't UTF-8 or Unicode text. Its contents were left unchanged.")
+                throw ExternalFileProblem(UiR.ui_this_file_isn_t_utf_8_or_unicode_text_its_contents_were_left_unchanged)
             }
-            if ('\u0000' in text) throw ExternalFileProblem("This file doesn't contain supported text.")
+            if ('\u0000' in text) throw ExternalFileProblem(UiR.ui_this_file_doesn_t_contain_supported_text)
             val lineEnding = when {
                 "\r\n" in text -> "\r\n"
                 '\r' in text && '\n' !in text -> "\r"
@@ -87,7 +89,7 @@ internal class ExternalTextFiles(private val context: Context) {
     private val ownedGrants = java.util.concurrent.ConcurrentHashMap<Uri, Int>()
 
     fun open(request: ExternalFileRequest): OpenedExternalTextFile {
-        if (request.uri.scheme != "content") throw ExternalFileProblem("Open a Markdown or text file from a file app.")
+        if (request.uri.scheme != "content") throw ExternalFileProblem(UiR.ui_open_a_markdown_or_text_file_from_a_file_app)
         if (request.flags and Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION != 0) {
             val grants = request.flags and (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
             val existing = runCatching { persistedFlags(request.uri) }.getOrNull()
@@ -112,7 +114,7 @@ internal class ExternalTextFiles(private val context: Context) {
         val namedText = extension == "md" || extension == "txt"
         val knownText = mime in setOf("text/plain", "text/markdown", "text/x-markdown", "application/markdown", "application/x-markdown")
         if (!namedText && !knownText) {
-            throw ExternalFileProblem("KGS Notes can open .md and .txt files.")
+            throw ExternalFileProblem(UiR.ui_kgs_notes_can_open_md_and_txt_files)
         }
         val bytes = read(request.uri)
         val (text, format) = ExternalTextFormat.decode(bytes)
@@ -158,22 +160,22 @@ internal class ExternalTextFiles(private val context: Context) {
             val count = input.read(buffer)
             if (count < 0) break
             if (result.size() + count > MAX_EXTERNAL_FILE_BYTES) {
-                throw ExternalFileProblem("This file is too large to edit safely on this device. It was left unchanged.")
+                throw ExternalFileProblem(UiR.ui_this_file_is_too_large_to_edit_safely_on_this_device_it_was_left_unchanged)
             }
             result.write(buffer, 0, count)
         }
         result.toByteArray()
-    } ?: throw ExternalFileProblem("The file app couldn't open this file. Try opening it again.")
+    } ?: throw ExternalFileProblem(UiR.ui_the_file_app_couldn_t_open_this_file_try_opening_it_again)
 
     fun write(uri: Uri, expected: ByteArray, bytes: ByteArray) {
         if (!read(uri).contentEquals(expected)) {
-            throw ExternalFileProblem("The original file changed elsewhere. Your edits are kept here; save a copy to KGS Notes to keep both versions.")
+            throw ExternalFileProblem(UiR.ui_the_original_file_changed_elsewhere_your_edits_are_kept_here_save_a_copy_to_kgs_notes)
         }
         // 'w' is provider-dependent; 'wt' explicitly truncates when replacing a longer file.
         resolver.openOutputStream(uri, "wt")?.use { it.write(bytes) }
-            ?: throw ExternalFileProblem("The file app couldn't save this file. Your edits are kept here.")
+            ?: throw ExternalFileProblem(UiR.ui_the_file_app_couldn_t_save_this_file_your_edits_are_kept_here)
         if (!read(uri).contentEquals(bytes)) {
-            throw ExternalFileProblem("The file app didn't confirm the saved contents. Your edits are kept here; save a copy to KGS Notes.")
+            throw ExternalFileProblem(UiR.ui_the_file_app_didn_t_confirm_the_saved_contents_your_edits_are_kept_here_save_a_copy_t)
         }
     }
 }

@@ -14,6 +14,7 @@ import okhttp3.Credentials
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.SocketPolicy
 import okhttp3.tls.HandshakeCertificates
 import okhttp3.tls.HeldCertificate
 
@@ -43,6 +44,32 @@ class NextcloudNotesSourceTest {
             server.takeRequest(1, TimeUnit.SECONDS)
             server.takeRequest(1, TimeUnit.SECONDS)
             assertEquals("/index.php/apps/notes/api/v1/notes?chunkSize=100&chunkCursor=next-page", server.takeRequest(1, TimeUnit.SECONDS)?.path)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `a create whose connection drops is never resent by the transport`() = runBlocking {
+        val certificate = HeldCertificate.Builder().addSubjectAlternativeName("localhost").build()
+        val serverTrust = HandshakeCertificates.Builder().heldCertificate(certificate).build()
+        val clientTrust = HandshakeCertificates.Builder().addTrustedCertificate(certificate.certificate).build()
+        val server = MockWebServer().apply { useHttps(serverTrust.sslSocketFactory(), false); start() }
+        try {
+            val note = """{"id":5,"etag":"e","title":"Idea","content":"Idea","category":"","modified":1787558400}"""
+            // A preceding request leaves a pooled connection, as during a normal sync.
+            server.enqueue(MockResponse().setBody(note))
+            server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST))
+            server.enqueue(MockResponse().setBody(note))
+            val client = OkHttpClient.Builder().sslSocketFactory(clientTrust.sslSocketFactory(), clientTrust.trustManager).build()
+            val api = HttpNextcloudNotesApi(NextcloudCredentials(server.url("/").toString(), "test-user", "test-password"), client)
+
+            api.note(5)
+            assertFailsWith<java.io.IOException> {
+                api.create(RemoteNoteDraft("Idea", "Idea", "", false, Instant.parse("2026-08-24T08:00:00Z")))
+            }
+
+            assertEquals(2, server.requestCount)
         } finally {
             server.shutdown()
         }

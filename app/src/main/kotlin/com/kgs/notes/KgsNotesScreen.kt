@@ -1,5 +1,7 @@
 package com.kgs.notes
 
+import com.kgs.notes.design.R.string as UiR
+
 import android.content.Intent
 import android.net.Uri
 import com.kgs.notes.design.KgsSheetDock
@@ -108,6 +110,7 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -242,6 +245,13 @@ data class NotesActions(
     val onToggleSortDirection: () -> Unit = {},
     val onToggleLibraryView: () -> Unit = {},
     val onGroupByDateChange: (Boolean) -> Unit = {},
+    val onCreateCategory: (SourceId, String) -> Unit = { _, _ -> },
+    val onRenameCategory: (SourceId, String, String) -> Unit = { _, _, _ -> },
+    val onDeleteCategory: (SourceId, String) -> Unit = { _, _ -> },
+    val onEditorLayoutChange: (EditorLayoutPreference) -> Unit = {},
+    val onSplitFractionChange: (Float) -> Unit = {},
+    val onActivatePane: (NotePane) -> Unit = {},
+    val onDualPagesChange: (Boolean) -> Unit = {},
     val onToggleSourceVisibility: (SourceId) -> Unit = {},
     val onDestinationChange: (LibraryDestination) -> Unit = {},
     val onLibraryCategoryChange: (String?) -> Unit = {},
@@ -268,10 +278,12 @@ internal fun DarkModePreference.isDark(): Boolean = when (this) {
 
 @Composable
 fun KgsNotesApp(viewModel: NotesViewModel, onExternalPreviewClosed: () -> Unit = {}) {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+
     val state by viewModel.state.collectAsState()
     KgsNotesTheme(darkTheme = state.darkMode.isDark(), theme = state.theme) {
         val editorDock = remember { KgsSheetDock() }
-        CompositionLocalProvider(LocalKgsSheetDock provides if (state.externalFile != null || state.selectedNote?.state == NoteState.ACTIVE) editorDock else null) {
+        CompositionLocalProvider(LocalKgsSheetDock provides if (state.externalFile != null) editorDock else null) {
         val context = LocalContext.current
         var imageImportDialogOpen by rememberSaveable { mutableStateOf(false) }
         var removePrivateMetadata by rememberSaveable { mutableStateOf(true) }
@@ -304,14 +316,14 @@ fun KgsNotesApp(viewModel: NotesViewModel, onExternalPreviewClosed: () -> Unit =
                             externalEditPicker.launch(arrayOf("text/*", "application/octet-stream", "application/markdown", "application/x-markdown"))
                         }.onFailure {
                             editPermissionSessionKey = null
-                            android.widget.Toast.makeText(context, "No file picker is available", android.widget.Toast.LENGTH_SHORT).show()
+                            android.widget.Toast.makeText(context, strings.getString(UiR.ui_no_file_picker_is_available), android.widget.Toast.LENGTH_SHORT).show()
                         }
                     }
                 },
             )
             }
         } else KgsNotesScreen(
-            state = state,
+            state = state.copy(fold = rememberNotesFold()),
             actions = NotesActions(
                 onCreate = viewModel::createNote,
                 onSelect = viewModel::selectNote,
@@ -339,6 +351,13 @@ fun KgsNotesApp(viewModel: NotesViewModel, onExternalPreviewClosed: () -> Unit =
                 onToggleSortDirection = viewModel::toggleSortDirection,
                 onToggleLibraryView = viewModel::toggleLibraryView,
                 onGroupByDateChange = viewModel::setGroupByDate,
+                onCreateCategory = viewModel::createCategory,
+                onRenameCategory = viewModel::renameCategory,
+                onDeleteCategory = viewModel::deleteCategory,
+                onEditorLayoutChange = viewModel::setEditorLayout,
+                onSplitFractionChange = viewModel::setSplitFraction,
+                onActivatePane = viewModel::activatePane,
+                onDualPagesChange = viewModel::setDualPages,
                 onToggleSourceVisibility = viewModel::toggleSourceVisibility,
                 onDestinationChange = viewModel::openDestination,
                 onLibraryCategoryChange = viewModel::openCategory,
@@ -371,7 +390,7 @@ fun KgsNotesApp(viewModel: NotesViewModel, onExternalPreviewClosed: () -> Unit =
                 onEditSourceConnection = viewModel::editSourceConnection,
                 onOpenProjectLink = { url ->
                     runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
-                        .onFailure { android.widget.Toast.makeText(context, "No browser is available", android.widget.Toast.LENGTH_SHORT).show() }
+                        .onFailure { android.widget.Toast.makeText(context, strings.getString(UiR.ui_no_browser_is_available), android.widget.Toast.LENGTH_SHORT).show() }
                 },
             ),
         )
@@ -408,7 +427,9 @@ private fun NextcloudConnectionDialog(
     onAppPasswordConnect: (String, String, String, String) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    KgsBottomSheet(expanded = state.visible, onDismissRequest = onDismiss, title = "Nextcloud Source") {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+
+    KgsBottomSheet(expanded = state.visible, onDismissRequest = onDismiss, title = strings.getString(UiR.ui_nextcloud_source)) {
         var sourceName by rememberSaveable(state.editingSourceId?.value) { mutableStateOf(state.initialName) }
         var serverUrl by rememberSaveable(state.editingSourceId?.value) { mutableStateOf(state.initialServerUrl) }
         var loginName by rememberSaveable(state.editingSourceId?.value) { mutableStateOf(state.initialLoginName) }
@@ -436,24 +457,26 @@ private fun NextcloudConnectionDialog(
                 modifier = Modifier.padding(20.dp),
             ) {
                 Text(
-                    if (state.editingSourceId == null) "Add Nextcloud Source" else "Update Nextcloud Source",
+                    if (state.editingSourceId == null) strings.getString(UiR.ui_add_nextcloud_source) else strings.getString(UiR.ui_update_nextcloud_source),
                     style = MaterialTheme.typography.titleLarge,
                 )
                 Text(
-                    "Notes stay available as offline Working Copies and sync through the Notes API.",
+                    strings.getString(UiR.ui_notes_stay_available_as_offline_working_copies_and_sync_through_the_notes_api),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 KgsConnectionField(
                     value = sourceName,
                     onValueChange = { sourceName = it },
-                    label = "Source name",
+                    label = strings.getString(UiR.ui_source_name),
+                    tag = "nextcloud-source-name",
                     enabled = !busy,
                 )
                 KgsConnectionField(
                     value = serverUrl,
                     onValueChange = { serverUrl = it },
-                    label = "Nextcloud address",
+                    label = strings.getString(UiR.ui_nextcloud_address),
+                    tag = "nextcloud-address",
                     placeholder = "cloud.example.com",
                     enabled = !busy && state.editingSourceId == null,
                 )
@@ -461,13 +484,15 @@ private fun NextcloudConnectionDialog(
                     KgsConnectionField(
                         value = loginName,
                         onValueChange = { loginName = it },
-                        label = "Username",
+                        label = strings.getString(UiR.ui_username),
+                    tag = "nextcloud-username",
                         enabled = !busy && state.editingSourceId == null,
                     )
                     KgsConnectionField(
                         value = appPassword,
                         onValueChange = { appPassword = it },
-                        label = "App password",
+                        label = strings.getString(UiR.ui_app_password),
+                    tag = "nextcloud-app-password",
                         enabled = !busy,
                         password = true,
                     )
@@ -505,7 +530,7 @@ private fun NextcloudConnectionDialog(
                         onClick = onDismiss,
                         shape = RoundedCornerShape(14.dp),
                         modifier = Modifier.fillMaxWidth(),
-                    ) { Text("Done") }
+                    ) { Text(strings.getString(UiR.ui_done)) }
                 } else {
                     Button(
                         enabled = !busy && serverUrl.isNotBlank() &&
@@ -521,7 +546,7 @@ private fun NextcloudConnectionDialog(
                         shape = RoundedCornerShape(14.dp),
                         modifier = Modifier.fillMaxWidth(),
                     ) {
-                        Text(if (mode == NextcloudSetupMode.BROWSER) "Continue in browser" else "Connect")
+                        Text(if (mode == NextcloudSetupMode.BROWSER) strings.getString(UiR.ui_continue_in_browser) else strings.getString(UiR.ui_connect))
                     }
                     TextButton(
                         enabled = !busy,
@@ -536,9 +561,9 @@ private fun NextcloudConnectionDialog(
                     ) {
                         Text(
                             if (mode == NextcloudSetupMode.BROWSER) {
-                                "Use an app password instead"
+                                strings.getString(UiR.ui_use_an_app_password_instead)
                             } else {
-                                "Use browser authorization"
+                                strings.getString(UiR.ui_use_browser_authorization)
                             },
                         )
                     }
@@ -550,6 +575,7 @@ private fun NextcloudConnectionDialog(
 
 @Composable
 private fun KgsConnectionField(
+    tag: String,
     value: String,
     onValueChange: (String) -> Unit,
     label: String,
@@ -572,14 +598,7 @@ private fun KgsConnectionField(
             containerColor = MaterialTheme.colorScheme.background,
             modifier = Modifier
                 .fillMaxWidth()
-                .testTag(
-                    when (label) {
-                        "Source name" -> "nextcloud-source-name"
-                        "Nextcloud address" -> "nextcloud-address"
-                        "Username" -> "nextcloud-username"
-                        else -> "nextcloud-app-password"
-                    },
-                ),
+                .testTag(tag),
         )
     }
 }
@@ -592,7 +611,9 @@ private fun ImageImportDialog(
     onChoose: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    KgsBottomSheet(expanded = expanded, onDismissRequest = onDismiss, title = "Add image") {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+
+    KgsBottomSheet(expanded = expanded, onDismissRequest = onDismiss, title = strings.getString(UiR.ui_add_image)) {
 
         Surface(
             color = MaterialTheme.colorScheme.surface,
@@ -605,21 +626,21 @@ private fun ImageImportDialog(
                 verticalArrangement = Arrangement.spacedBy(9.dp),
                 modifier = Modifier.padding(20.dp),
             ) {
-                Text("Add an image", style = MaterialTheme.typography.titleLarge)
+                Text(strings.getString(UiR.ui_add_an_image), style = MaterialTheme.typography.titleLarge)
                 Text(
-                    "Choose whether KGS Notes should remove location, device, and other private metadata.",
+                    strings.getString(UiR.ui_choose_whether_kgs_notes_should_remove_location_device_and_other_private_metadata),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(3.dp))
                 ModalChoiceRow(
-                    label = "Remove private metadata",
+                    label = strings.getString(UiR.ui_remove_private_metadata),
                     selected = removePrivateMetadata,
                     onClick = { onRemovePrivateMetadataChange(true) },
                     icon = { PrivacyGlyph(MaterialTheme.colorScheme.onSurfaceVariant) },
                 )
                 ModalChoiceRow(
-                    label = "Keep original",
+                    label = strings.getString(UiR.ui_keep_original),
                     selected = !removePrivateMetadata,
                     onClick = { onRemovePrivateMetadataChange(false) },
                     icon = { ImageGlyph(MaterialTheme.colorScheme.onSurfaceVariant) },
@@ -630,7 +651,7 @@ private fun ImageImportDialog(
                     shape = RoundedCornerShape(14.dp),
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text("Choose image")
+                    Text(strings.getString(UiR.ui_choose_image))
                 }
             }
         }
@@ -644,10 +665,14 @@ fun KgsNotesScreen(
     actions: NotesActions,
     modifier: Modifier = Modifier,
 ) {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+
     val motion = LocalKgsMotion.current
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
     val cardScrollOffset = rememberSaveable(state.destination, state.libraryCategory) { mutableFloatStateOf(0f) }
+    // The right page of book posture scrolls independently of the left one.
+    val pageScrollOffset = rememberSaveable(state.destination, state.libraryCategory) { mutableFloatStateOf(0f) }
     var selectedIds by remember { mutableStateOf(setOf<NoteId>()) }
     var selectedTitles by remember { mutableStateOf(mapOf<NoteId, String>()) }
     var returnMorphInterrupted by remember { mutableStateOf(false) }
@@ -681,13 +706,18 @@ fun KgsNotesScreen(
         drawerOpen = true
     }
     var newNoteMorphActive by remember { mutableStateOf(false) }
+    var libraryBesideEditor by remember { mutableStateOf(false) }
+    val libraryRegion = remember { com.kgs.notes.design.KgsSheetRegion() }
+    val editorRegion = remember { com.kgs.notes.design.KgsSheetRegion() }
+    // The selection sheet opens under the library page where the selection began.
+    var selectionRegion by remember { mutableStateOf(libraryRegion) }
     LaunchedEffect(state.userMessage) {
         if (state.userMessage != null) {
             delay(4_000)
             actions.onMessageDismissed()
         }
     }
-    BackHandler(enabled = state.selectedNote != null, onBack = closeEditor)
+    BackHandler(enabled = state.selectedNote != null && state.destination != LibraryDestination.SETTINGS, onBack = closeEditor)
     BackHandler(enabled = selectedIds.isNotEmpty()) { selectedIds = emptySet(); selectedTitles = emptyMap() }
     BackHandler(enabled = drawerOpen || pendingNavigation != null) { pendingNavigation = null; drawerOpen = false }
     BackHandler(
@@ -703,39 +733,47 @@ fun KgsNotesScreen(
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background),
     ) {
-        val twoPane = maxWidth >= 760.dp
-        if (twoPane) {
-            Row(Modifier.fillMaxSize()) {
-                LibraryPane(
-                    state = state,
-                    actions = actions,
-                    onOpenDrawer = openDrawer,
-                    selectedId = state.selectedNote?.id,
-                    cardScrollOffset = cardScrollOffset,
+        val adaptive = (maxWidth >= 600.dp && (maxHeight >= 480.dp || state.editorLayout == EditorLayoutPreference.SPLIT)) || state.fold != null
+        // Settings take the whole window beside Notes; wide windows split them into their own two panes.
+        val settingsAlone = state.destination == LibraryDestination.SETTINGS && (state.selectedNote != null || adaptive)
+        SideEffect { if (!adaptive || settingsAlone) libraryBesideEditor = false }
+        AnimatedContent(
+            targetState = settingsAlone,
+            transitionSpec = {
+                (fadeIn(motion.defaultEffectsSpec()) + scaleIn(motion.defaultSpatialSpec(), initialScale = .96f)) togetherWith
+                    (fadeOut(motion.fastEffectsSpec()) + scaleOut(motion.fastSpatialSpec(), targetScale = 1.02f))
+            },
+            label = "settings window",
+            modifier = Modifier.fillMaxSize(),
+        ) { showSettings ->
+        if (showSettings) {
+            NotesSettingsScreen(state, actions, Modifier.fillMaxSize().padding(horizontal = 18.dp))
+        } else if (adaptive) {
+            AdaptiveNotesPanes(state,
+                onLibraryBesideEditor = { libraryBesideEditor = it },
+                onSplitFractionChange = actions.onSplitFractionChange,
+                onDualPagesChange = actions.onDualPagesChange,
+                libraryRegion = libraryRegion,
+                editorRegion = editorRegion,
+                library = { paneModifier, pane, menu -> LibraryPane(
+                    state = state, actions = actions.forPane(pane), onOpenDrawer = openDrawer.takeIf { menu },
+                    selectedId = state.paneNote(pane)?.id, cardScrollOffset = if (menu) cardScrollOffset else pageScrollOffset,
                     selectedIds = selectedIds,
-                    onToggleSelection = toggleSelection,
-                    selectionActive = selectedIds.isNotEmpty(),
-                    modifier = Modifier
-                        .widthIn(min = 330.dp, max = 410.dp)
-                        .fillMaxHeight(),
-                )
-                AnimatedContent(
-                    targetState = state.selectedNote,
-                    contentKey = { it?.id },
-                    transitionSpec = {
-                        fadeIn(motion.defaultEffectsSpec()) togetherWith
-                            fadeOut(motion.fastEffectsSpec())
-                    },
-                    label = "selected note",
-                    modifier = Modifier.weight(1f),
-                ) { note ->
-                    if (note == null) {
-                        NoSelection(Modifier.fillMaxSize())
-                    } else {
-                        EditorPane(state, note, actions, showBack = false, Modifier.fillMaxSize())
+                    onToggleSelection = { id -> selectionRegion = if (menu) libraryRegion else editorRegion; toggleSelection(id) },
+                    selectionActive = selectedIds.isNotEmpty(), modifier = paneModifier,
+                ) },
+                editor = { paneModifier, pane, back, expandable ->
+                    val paneState = state.forPane(pane)
+                    AnimatedContent(targetState = paneState.selectedNote, contentKey = { it?.id },
+                        transitionSpec = { fadeIn(motion.defaultEffectsSpec()) togetherWith fadeOut(motion.fastEffectsSpec()) },
+                        label = "selected note", modifier = paneModifier) { note ->
+                        if (note == null) NoSelection(Modifier.fillMaxSize())
+                        else EditorPane(paneState.copy(canExpandEditor = expandable), note,
+                            actions.forPane(pane).copy(onCloseEditor = { actions.onActivatePane(pane); closeEditor() }),
+                            showBack = back, Modifier.fillMaxSize())
                     }
-                }
-            }
+                },
+            )
         } else {
             SharedTransitionLayout(modifier = Modifier.fillMaxSize()) {
                 val sharedScope = this
@@ -834,15 +872,18 @@ fun KgsNotesScreen(
                 }
             }
         }
+        }
 
         var displayedSelectedIds by remember { mutableStateOf(emptySet<NoteId>()) }
         if (selectedIds.isNotEmpty()) displayedSelectedIds = selectedIds
         val selectionForBar = selectedIds.ifEmpty { displayedSelectedIds }
         val selectionExpansion = remember { KgsSheetExpansion() }
+        CompositionLocalProvider(com.kgs.notes.design.LocalKgsSheetRegion provides selectionRegion.takeIf { libraryBesideEditor }) {
         KgsBottomSheet(
-            expanded = selectedIds.isNotEmpty() && state.selectedNote == null,
+            // Beside an open Note the library stays interactive, including selection.
+            expanded = selectedIds.isNotEmpty() && (state.selectedNote == null || libraryBesideEditor),
             modal = false,
-            title = "Selected Notes",
+            title = strings.getString(UiR.ui_selected_notes),
             animateSizeChanges = false,
             expansion = selectionExpansion,
             onHidden = { selectionExpansion.expanded = false; selectionExpansion.available = false },
@@ -873,6 +914,7 @@ fun KgsNotesScreen(
                     actions.onSelectedNotesAction(selectionForBar, operation, value)
                 },
             )
+        }
         }
 
         NotesDrawer(
@@ -937,11 +979,32 @@ fun KgsNotesScreen(
 
 }
 
+/** Editor and library actions for one page; touching a page makes its Note the one being edited. */
+private fun NotesActions.forPane(pane: NotePane): NotesActions {
+    fun <T> focused(action: (T) -> Unit): (T) -> Unit = { onActivatePane(pane); action(it) }
+    fun focused(action: () -> Unit): () -> Unit = { onActivatePane(pane); action() }
+    return copy(
+        onCreate = focused(onCreate),
+        onSelect = focused(onSelect),
+        onContentChange = focused(onContentChange),
+        onRename = focused(onRename),
+        onToggleFavorite = focused(onToggleFavorite),
+        onCategoryChange = focused(onCategoryChange),
+        onSourceChange = focused(onSourceChange),
+        onCloseEditor = focused(onCloseEditor),
+        onMoveToTrash = focused(onMoveToTrash),
+        onRestore = focused(onRestore),
+        onDeletePermanently = focused(onDeletePermanently),
+        onEditorModeChange = focused(onEditorModeChange),
+        onAddImage = focused(onAddImage),
+    )
+}
+
 @Composable
 private fun LibraryPane(
     state: NotesUiState,
     actions: NotesActions,
-    onOpenDrawer: () -> Unit = {},
+    onOpenDrawer: (() -> Unit)? = {},
     selectedId: NoteId?,
     cardScrollOffset: MutableFloatState,
     noteMorph: NoteMorph? = null,
@@ -953,8 +1016,10 @@ private fun LibraryPane(
     onScroll: () -> Unit = {},
     modifier: Modifier,
 ) {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+
     val motion = LocalKgsMotion.current
-    val navigationBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    val navigationBottom = paneNavigationBottom()
     val location = LibraryLocation(state.destination, state.libraryCategory.takeIf { state.destination == LibraryDestination.NOTES })
     val latestLocation by rememberUpdatedState(location)
     val snapshots = remember { mutableMapOf<LibraryLocation, LibraryDisplay>() }
@@ -971,7 +1036,7 @@ private fun LibraryPane(
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         floatingActionButton = {
             if (state.destination == LibraryDestination.NOTES && !selectionActive) {
-                KgsTooltip("New Note") {
+                KgsTooltip(strings.getString(UiR.ui_new_note)) {
                     Box(Modifier.padding(bottom = navigationBottom).size(56.dp)) {
                         Box(newNoteButtonShadowModifier.size(56.dp).testTag("new-note-shadow"))
                         KgsExpressiveSurface(
@@ -985,7 +1050,7 @@ private fun LibraryPane(
                         ) {
                             Icon(
                                 Icons.Default.Add,
-                                contentDescription = "New note",
+                                contentDescription = strings.getString(UiR.ui_new_note_2),
                                 modifier = Modifier.size(30.dp),
                             )
                         }
@@ -1035,7 +1100,7 @@ private fun LibraryPane(
                         if (destination == LibraryDestination.TRASH) {
                             LibraryHeader(
                                 destination = destination,
-                                onOpenDrawer = onOpenDrawer,
+                                onOpenDrawer = onOpenDrawer ?: {},
                                 onBackToNotes = { actions.onDestinationChange(LibraryDestination.NOTES) },
                             )
                         }
@@ -1288,9 +1353,11 @@ private fun LibraryCollection(
     selectedIds: Set<NoteId>,
     onToggleSelection: (NoteId) -> Unit,
     navigationBottom: androidx.compose.ui.unit.Dp,
-    onOpenDrawer: () -> Unit,
+    onOpenDrawer: (() -> Unit)?,
     onScroll: () -> Unit = {},
 ) {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+
     val motion = LocalKgsMotion.current
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
@@ -1336,17 +1403,18 @@ private fun LibraryCollection(
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
-                modifier = Modifier.fillMaxWidth().padding(top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 5.dp),
+                modifier = Modifier.fillMaxWidth().padding(top = paneStatusTop() + 5.dp),
             ) {
-                ExpressiveIconButton(label = "Open Menu", onClick = {
+                // Only the left page of book posture carries the menu.
+                if (onOpenDrawer != null) ExpressiveIconButton(label = strings.getString(UiR.ui_open_menu), onClick = {
                     keyboard?.hide()
                     focusManager.clearFocus()
                     onOpenDrawer()
-                }) { Icon(Icons.Default.Menu, contentDescription = "Open menu") }
+                }) { Icon(Icons.Default.Menu, contentDescription = strings.getString(UiR.ui_open_menu_2)) }
                 KgsSearchField(
                     value = state.query,
                     onValueChange = actions.onQueryChange,
-                    placeholder = "Search notes",
+                    placeholder = strings.getString(UiR.ui_search_notes),
                     interactionSource = searchInteractions,
                     modifier = Modifier.weight(1f)
                         .onGloballyPositioned { searchBounds = it.boundsInRoot() }
@@ -1361,7 +1429,9 @@ private fun LibraryCollection(
             }
             Spacer(Modifier.height(10.dp))
             BoxWithConstraints(Modifier.fillMaxWidth()) {
-            val filterBaseWidth = ((maxWidth - 143.dp) / 4).coerceIn(28.dp, 44.dp)
+            // Before the controls would crowd, sorting and layout share one button and a sheet.
+            val compact = maxWidth < LibraryControlsCompactWidth
+            val filterBaseWidth = ((maxWidth - if (compact) 60.dp else 143.dp) / 4).coerceIn(28.dp, 44.dp)
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth(),
@@ -1401,6 +1471,9 @@ private fun LibraryCollection(
                     if (index != LibraryFilter.entries.lastIndex) Spacer(Modifier.width(3.dp))
                 }
                 Spacer(Modifier.weight(1f))
+                if (compact) {
+                    LibraryViewOptionsButton(state, actions)
+                } else {
                 val directionInteractions = remember { MutableInteractionSource() }
                 val sortInteractions = remember { MutableInteractionSource() }
                 val viewInteractions = remember { MutableInteractionSource() }
@@ -1437,7 +1510,7 @@ private fun LibraryCollection(
                     animationSpec = motion.fastSpatialSpec(),
                     label = "view group width",
                 )
-                KgsTooltip(if (state.ascending) "Ascending" else "Descending") {
+                KgsTooltip(if (state.ascending) strings.getString(UiR.ui_ascending) else strings.getString(UiR.ui_descending)) {
                     KgsExpressiveSurface(
                         onClick = actions.onToggleSortDirection,
                         color = MaterialTheme.colorScheme.surface,
@@ -1453,7 +1526,7 @@ private fun LibraryCollection(
                             .width(directionWidth)
                             .height(44.dp)
                             .semantics {
-                                contentDescription = if (state.ascending) "Ascending" else "Descending"
+                                contentDescription = if (state.ascending) strings.getString(UiR.ui_ascending) else strings.getString(UiR.ui_descending)
                             },
                     ) {
                         SortDirectionGlyph(ascending = state.ascending)
@@ -1489,7 +1562,7 @@ private fun LibraryCollection(
                         animationSpec = motion.defaultEffectsSpec(),
                         label = "sort content color",
                     )
-                    KgsTooltip("Sort") {
+                    KgsTooltip(strings.getString(UiR.ui_sort)) {
                         KgsExpressiveSurface(
                             onClick = { sortMenuOpen = true },
                             color = sortContainer,
@@ -1515,7 +1588,7 @@ private fun LibraryCollection(
                                             scaleOut(motion.fastSpatialSpec(), targetScale = .65f))
                                 },
                                 label = "selected sort icon",
-                                modifier = Modifier.semantics { contentDescription = "Sort notes" },
+                                modifier = Modifier.semantics { contentDescription = strings.getString(UiR.ui_sort_notes_2) },
                             ) { sort ->
                                 LibrarySortOptionGlyph(sort = sort, color = sortContent)
                             }
@@ -1525,13 +1598,13 @@ private fun LibraryCollection(
                         expanded = sortMenuOpen,
                         onDismissRequest = { sortMenuOpen = false },
                         modifier = Modifier.testTag("sort-options-menu"),
-                        title = "Sort Notes",
+                        title = strings.getString(UiR.ui_sort_notes),
                     ) {
                         LibrarySort.entries.forEach { sort ->
                             val selected = sort == state.sort
-                            KgsTooltip(sort.label) {
+                            KgsTooltip(sort.label(strings)) {
                                 KgsDropdownMenuItem(
-                                text = sort.label,
+                                text = sort.label(strings),
                                 selected = selected,
                                 icon = {
                                     LibrarySortOptionGlyph(
@@ -1555,6 +1628,7 @@ private fun LibraryCollection(
                     interactionSource = viewInteractions,
                     onClick = actions.onToggleLibraryView,
                 )
+                }
             }
             }
             Spacer(Modifier.height(10.dp))
@@ -1570,6 +1644,8 @@ private fun LibraryCollection(
                 bottomPadding = 92.dp + navigationBottom,
                 modifier = Modifier.noteViewportTopFade(),
                 groupByDate = state.groupByDate && destination == LibraryDestination.NOTES,
+                alphabetical = state.sort == LibrarySort.ALPHABETICAL,
+                ascending = state.ascending,
                 dateByCreated = state.sort == LibrarySort.LAST_CREATED,
                 onScroll = onScroll,
             ) { note, cardModifier ->
@@ -1613,7 +1689,9 @@ private fun LibraryHeader(
     onOpenDrawer: () -> Unit,
     onBackToNotes: () -> Unit,
 ) {
-    val statusTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+    val strings = androidx.compose.ui.platform.LocalResources.current
+
+    val statusTop = paneStatusTop()
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
     Row(
@@ -1632,7 +1710,7 @@ private fun LibraryHeader(
             .padding(top = statusTop + 5.dp),
     ) {
         ExpressiveIconButton(
-            label = if (destination == LibraryDestination.NOTES) "Open Menu" else "Back",
+            label = if (destination == LibraryDestination.NOTES) strings.getString(UiR.ui_open_menu) else strings.getString(UiR.ui_back),
             onClick = {
                 keyboard?.hide()
                 focusManager.clearFocus()
@@ -1640,9 +1718,9 @@ private fun LibraryHeader(
             },
         ) {
             if (destination == LibraryDestination.NOTES) {
-                Icon(Icons.Default.Menu, contentDescription = "Open menu")
+                Icon(Icons.Default.Menu, contentDescription = strings.getString(UiR.ui_open_menu_2))
             } else {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to Notes")
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = strings.getString(UiR.ui_back_to_notes))
             }
         }
         Surface(
@@ -1662,9 +1740,9 @@ private fun LibraryHeader(
         Column {
             Text(
                 when (destination) {
-                    LibraryDestination.NOTES -> "Notes"
-                    LibraryDestination.TRASH -> "Trash"
-                    LibraryDestination.SETTINGS -> "Settings"
+                    LibraryDestination.NOTES -> strings.getString(UiR.ui_notes)
+                    LibraryDestination.TRASH -> strings.getString(UiR.ui_trash)
+                    LibraryDestination.SETTINGS -> strings.getString(UiR.ui_settings)
                 },
                 style = MaterialTheme.typography.titleLarge,
             )
@@ -1705,15 +1783,17 @@ private fun LibraryFilterButton(
     modifier: Modifier,
     onClick: () -> Unit,
 ) {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+
     val description = when (filter) {
-        LibraryFilter.ALL -> "All notes"
-        LibraryFilter.FAVORITES -> "Favorite notes"
+        LibraryFilter.ALL -> strings.getString(UiR.ui_all_notes_2)
+        LibraryFilter.FAVORITES -> strings.getString(UiR.ui_favorite_notes)
         LibraryFilter.LOCAL -> if (pendingSyncCount > 0) {
-            "Local notes, $pendingSyncCount awaiting sync"
+            strings.getString(UiR.ui_local_notes_value_awaiting_sync, pendingSyncCount)
         } else {
-            "Local notes"
+            strings.getString(UiR.ui_local_notes)
         }
-        LibraryFilter.SERVER -> "Server notes"
+        LibraryFilter.SERVER -> strings.getString(UiR.ui_server_notes)
     }
     val motion = LocalKgsMotion.current
     val darkTheme = LocalKgsDarkTheme.current
@@ -1818,7 +1898,14 @@ private fun LibraryFilterButton(
 private fun PendingSyncIndicator(visible: Boolean, modifier: Modifier = Modifier, content: @Composable () -> Unit) {
     val motion = LocalKgsMotion.current
     val visibility = remember { MutableTransitionState(false) }
-    visibility.targetState = visible
+    // A failed attempt is often followed by a successful retry within seconds.
+    // Show the notice only once syncing has stayed stalled, and clear it at once.
+    if (!visible) visibility.targetState = false
+    LaunchedEffect(visible) {
+        if (!visible) return@LaunchedEffect
+        delay(SyncNoticeDelayMillis)
+        visibility.targetState = true
+    }
     AnimatedVisibility(visibleState = visibility, modifier = modifier,
         enter = fadeIn(tween(220, easing = motion.standard)),
         exit = fadeOut(tween(220, easing = motion.standard))) {
@@ -1855,7 +1942,9 @@ private fun LibraryViewButton(
     modifier: Modifier = Modifier.width(40.dp),
     interactionSource: MutableInteractionSource = remember { MutableInteractionSource() },
 ) {
-    val action = if (current == LibraryView.LIST) "Card view" else "List view"
+    val strings = androidx.compose.ui.platform.LocalResources.current
+
+    val action = if (current == LibraryView.LIST) strings.getString(UiR.ui_card_view) else strings.getString(UiR.ui_list_view)
     val motion = LocalKgsMotion.current
     KgsTooltip(action) {
         KgsExpressiveSurface(
@@ -1867,7 +1956,7 @@ private fun LibraryViewButton(
             interactionSource = interactionSource,
             modifier = modifier.height(44.dp).semantics {
                 contentDescription = action
-                stateDescription = if (current == LibraryView.LIST) "List view" else "Card view"
+                stateDescription = if (current == LibraryView.LIST) strings.getString(UiR.ui_list_view) else strings.getString(UiR.ui_card_view)
             },
         ) {
             AnimatedContent(
@@ -1880,6 +1969,74 @@ private fun LibraryViewButton(
             ) { LibraryViewGlyph(it) }
         }
     }
+}
+
+private val LibraryControlsCompactWidth = 360.dp
+
+/** Sort order, direction and layout behind one button when the library is narrow. */
+@Composable
+private fun LibraryViewOptionsButton(state: NotesUiState, actions: NotesActions) {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+    val motion = LocalKgsMotion.current
+    var open by remember { mutableStateOf(false) }
+    val container by animateColorAsState(
+        if (open) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+        motion.defaultEffectsSpec(), label = "View options container",
+    )
+    val corner by animateDpAsState(if (open) 22.dp else 12.dp, motion.fastSpatialSpec(), label = "View options shape")
+    val label = strings.getString(UiR.ui_view_options)
+    KgsTooltip(label) {
+        KgsExpressiveSurface(
+            onClick = { open = true },
+            color = container,
+            restingCorners = KgsCornerRadii(corner),
+            showIndication = false,
+            modifier = Modifier.size(48.dp, 44.dp).testTag("library-view-options")
+                .semantics { contentDescription = label },
+        ) {
+            AnimatedContent(state.sort to state.libraryView, transitionSpec = {
+                (fadeIn(motion.fastEffectsSpec()) + scaleIn(motion.fastSpatialSpec(), initialScale = .7f)) togetherWith
+                    (fadeOut(motion.fastEffectsSpec()) + scaleOut(motion.fastSpatialSpec(), targetScale = .7f))
+            }, label = "View options icon") { (sort, _) ->
+                LibrarySortOptionGlyph(sort, MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+    KgsBottomSheet(expanded = open, onDismissRequest = { open = false }, title = label,
+        modifier = Modifier.testTag("view-options-menu")) {
+        Column(Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
+            ViewOptionsHeading(strings.getString(UiR.ui_sort_notes))
+            LibrarySort.entries.forEach { sort ->
+                KgsDropdownMenuItem(text = sort.label(strings), selected = sort == state.sort,
+                    icon = { LibrarySortOptionGlyph(sort, MaterialTheme.colorScheme.onSurfaceVariant) },
+                    onClick = { actions.onSortChange(sort) },
+                    modifier = Modifier.testTag("view-options-sort-${sort.name}"))
+            }
+            // Direction is a toggle; the sheet stays open so several choices can be made together.
+            KgsDropdownMenuItem(
+                text = if (state.ascending) strings.getString(UiR.ui_ascending) else strings.getString(UiR.ui_descending),
+                icon = { SortDirectionGlyph(ascending = state.ascending) },
+                onClick = actions.onToggleSortDirection,
+                modifier = Modifier.testTag("view-options-direction"),
+            )
+            ViewOptionsHeading(strings.getString(UiR.ui_layout))
+            LibraryView.entries.forEach { view ->
+                KgsDropdownMenuItem(
+                    text = if (view == LibraryView.CARDS) strings.getString(UiR.ui_cards) else strings.getString(UiR.ui_list),
+                    selected = state.libraryView == view,
+                    icon = { LibraryViewGlyph(view) },
+                    onClick = { if (state.libraryView != view) actions.onToggleLibraryView() },
+                    modifier = Modifier.testTag("view-options-layout-${view.name}"),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ViewOptionsHeading(text: String) {
+    Text(text, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(start = 20.dp, top = 12.dp, bottom = 6.dp))
 }
 
 @Composable
@@ -2079,6 +2236,8 @@ private fun ImageGlyph(color: Color) {
 
 @Composable
 private fun LibraryCategoryHeader(category: String, count: Int, filterBaseWidth: androidx.compose.ui.unit.Dp) {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+
     Row(
         Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 2.dp)
             .semantics(mergeDescendants = true) {}.testTag("library-category-context"),
@@ -2088,11 +2247,11 @@ private fun LibraryCategoryHeader(category: String, count: Int, filterBaseWidth:
         Box(Modifier.width(filterBaseWidth).testTag("library-category-icon"), contentAlignment = Alignment.Center) {
             CategoryIcon(false, LocalKgsAccentColors.current.focus)
         }
-        Text(category.ifBlank { "No Category" }, style = MaterialTheme.typography.titleMedium,
+        Text(category.ifBlank { strings.getString(UiR.ui_no_category) }, style = MaterialTheme.typography.titleMedium,
             color = MaterialTheme.colorScheme.onSurface, maxLines = 2, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f))
         Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = RoundedCornerShape(10.dp)) {
-            Text("$count ${if (count == 1) "Note" else "Notes"}", style = MaterialTheme.typography.labelSmall,
+            Text("$count ${if (count == 1) strings.getString(UiR.ui_note) else strings.getString(UiR.ui_notes)}", style = MaterialTheme.typography.labelSmall,
                 modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp))
         }
     }
@@ -2100,7 +2259,9 @@ private fun LibraryCategoryHeader(category: String, count: Int, filterBaseWidth:
 
 @Composable
 private fun DrawerSyncButton(syncing: Boolean, onSync: () -> Unit) {
-    KgsTooltip("Sync all Sources") {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+
+    KgsTooltip(strings.getString(UiR.ui_sync_all_sources)) {
         KgsExpressiveSurface(
             onClick = onSync,
             enabled = !syncing,
@@ -2117,12 +2278,12 @@ private fun DrawerSyncButton(syncing: Boolean, onSync: () -> Unit) {
                     transitionSpec = { fadeIn(tween(180)) togetherWith fadeOut(tween(180)) },
                     label = "Sidebar sync progress") { busy ->
                     Box(Modifier.size(23.dp), contentAlignment = Alignment.Center) {
-                        if (busy) CircularProgressIndicator(Modifier.size(19.dp).semantics { contentDescription = "Syncing all Sources" },
+                        if (busy) CircularProgressIndicator(Modifier.size(19.dp).semantics { contentDescription = strings.getString(UiR.ui_syncing_all_sources) },
                             strokeWidth = 2.dp, color = LocalKgsAccentColors.current.focus)
                         else Icon(Icons.Default.Refresh, contentDescription = null)
                     }
                 }
-                Text("Sync", style = MaterialTheme.typography.bodyLarge)
+                Text(strings.getString(UiR.ui_sync), style = MaterialTheme.typography.bodyLarge)
             }
         }
     }
@@ -2139,6 +2300,8 @@ private fun NotesDrawer(
     onCategory: (String?) -> Unit,
     onClosed: () -> Unit,
 ) {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+
     val motion = LocalKgsMotion.current
     val closed by rememberUpdatedState(onClosed)
     val progress by animateFloatAsState(
@@ -2211,7 +2374,7 @@ private fun NotesDrawer(
                         modifier = Modifier.weight(1f).fillMaxWidth().testTag("sidebar-locations"),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        item(key = "sources-heading") { DrawerSectionTitle("Sources") }
+                        item(key = "sources-heading") { DrawerSectionTitle(strings.getString(UiR.ui_sources)) }
                         items(state.sources, key = { "source:${it.id.value}" }) { source ->
                             DrawerRow(
                                 label = source.name,
@@ -2229,14 +2392,14 @@ private fun NotesDrawer(
                         item(key = "sync") {
                             DrawerSyncButton(state.syncingSources, onSync)
                         }
-                        item(key = "notes-heading") { DrawerSectionTitle("Notes", topSpace = true) }
+                        item(key = "notes-heading") { DrawerSectionTitle(strings.getString(UiR.ui_notes), topSpace = true) }
                         item(key = "all-notes") {
-                            DrawerRow("All Notes", selected = state.destination == LibraryDestination.NOTES && state.libraryCategory == null,
+                            DrawerRow(strings.getString(UiR.ui_all_notes), selected = state.destination == LibraryDestination.NOTES && state.libraryCategory == null,
                                 onClick = { onCategory(null) }, navigation = true, testTag = "sidebar-all-notes",
                                 icon = { AllNotesGlyph(MaterialTheme.colorScheme.onSurfaceVariant) })
                         }
                         item(key = "no-category") {
-                            DrawerRow("No Category", selected = state.destination == LibraryDestination.NOTES && state.libraryCategory == "",
+                            DrawerRow(strings.getString(UiR.ui_no_category), selected = state.destination == LibraryDestination.NOTES && state.libraryCategory == "",
                                 onClick = { onCategory("") }, navigation = true, testTag = "sidebar-no-category",
                                 icon = { CategoryIcon(false, MaterialTheme.colorScheme.onSurfaceVariant) })
                         }
@@ -2248,7 +2411,7 @@ private fun NotesDrawer(
                     }
                     Spacer(Modifier.height(12.dp))
                     DrawerRow(
-                        label = "Trash",
+                        label = strings.getString(UiR.ui_trash),
                         selected = state.destination == LibraryDestination.TRASH,
                         onClick = { onDestination(LibraryDestination.TRASH) },
                         navigation = true,
@@ -2256,7 +2419,7 @@ private fun NotesDrawer(
                     )
                     Spacer(Modifier.height(4.dp))
                     DrawerRow(
-                        label = "Settings",
+                        label = strings.getString(UiR.ui_settings),
                         selected = state.destination == LibraryDestination.SETTINGS,
                         onClick = { onDestination(LibraryDestination.SETTINGS) },
                         navigation = true,
@@ -2283,6 +2446,8 @@ private fun DrawerRow(
     testTag: String? = null,
     icon: @Composable () -> Unit,
 ) {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+
     val color by animateColorAsState(
         targetValue = if (selected) {
             if (navigation) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
@@ -2328,7 +2493,7 @@ private fun DrawerRow(
                 } else if (selected) {
                     Icon(
                         Icons.Default.Check,
-                        contentDescription = "Selected",
+                        contentDescription = strings.getString(UiR.ui_selected),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.size(20.dp),
                     )
@@ -2351,11 +2516,13 @@ private fun NoteCard(
     noteMorph: NoteMorph? = null,
     modifier: Modifier,
 ) {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+
     val context = LocalContext.current
     val previewMarkdown = note.previewMarkdown.ifBlank { note.snippet }
     val linkColor = MaterialTheme.colorScheme.primary
     val preview = remember(previewMarkdown, previewMode, linkColor) {
-        noteCardPreview(previewMarkdown, previewMode, linkColor)
+        noteCardPreview(previewMarkdown, previewMode, linkColor, strings.getString(UiR.ui_image))
     }
     val motion = LocalKgsMotion.current
     val container by animateColorAsState(
@@ -2402,7 +2569,7 @@ private fun NoteCard(
             .noteMorphBounds(noteMorph, note.id, "container", corner, 0.dp)
             .border(2.dp, borderColor, RoundedCornerShape(surfaceCorner))
             .testTag("note-card-${note.id.value}")
-            .semantics { contentDescription = if (highlighted) "Selected Note" else "Note" },
+            .semantics { contentDescription = if (highlighted) strings.getString(UiR.ui_selected_note) else strings.getString(UiR.ui_note) },
     ) {
         Box(Modifier.fillMaxSize().noteMorphStableLayout(noteMorph)) {
             Column(
@@ -2423,13 +2590,13 @@ private fun NoteCard(
                             .kgsHorizontalTextFade(end = 22.dp)
                             .testTag("note-title-${note.id.value}"),
                     )
-                    PendingSyncIndicator(note.sourceId != LocalSourceId && note.syncState in pendingSyncStates,
+                    PendingSyncIndicator(note.needsSyncNotice,
                         Modifier.align(Alignment.CenterEnd)) {
                         Box(Modifier.background(container)
                             .padding(start = 4.dp, end = 10.dp)) {
                             Surface(color = Color(0xFFF28C28), shape = CircleShape,
                                 modifier = Modifier.size(10.dp).testTag("note-pending-sync-${note.id.value}")
-                                    .semantics { contentDescription = "Awaiting sync" }) {}
+                                    .semantics { contentDescription = strings.getString(UiR.ui_awaiting_sync) }) {}
                         }
                     }
                 }
@@ -2470,7 +2637,7 @@ private fun NoteCard(
                         ) {
                             Icon(
                                 Icons.Default.Favorite,
-                                contentDescription = "Favorite",
+                                contentDescription = strings.getString(UiR.ui_favorite),
                                 tint = if (trashed) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .65f) else FavoriteRed,
                                 modifier = Modifier.size(18.dp),
                             )
@@ -2567,6 +2734,8 @@ private fun NoteSelectionBar(
     modifier: Modifier = Modifier,
     interactive: Boolean = true,
 ) {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+
     var panel by remember { mutableStateOf(SelectionPanel.NONE) }
     var deleteConfirmationOpen by remember { mutableStateOf(false) }
     val motion = LocalKgsMotion.current
@@ -2604,7 +2773,7 @@ private fun NoteSelectionBar(
         ) {
             Column(Modifier.padding(start = 14.dp, end = 14.dp, bottom = 16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("$count selected", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                    Text(strings.getString(UiR.ui_value_selected, count), style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
                     KgsExpressiveSurface(
                         onClick = onDismiss,
                         color = MaterialTheme.colorScheme.primaryContainer,
@@ -2614,9 +2783,9 @@ private fun NoteSelectionBar(
                         modifier = Modifier
                             .width(72.dp)
                             .height(40.dp)
-                            .semantics { contentDescription = "Done" },
+                            .semantics { contentDescription = strings.getString(UiR.ui_done) },
                     ) {
-                        Text("Done", style = MaterialTheme.typography.labelLarge)
+                        Text(strings.getString(UiR.ui_done), style = MaterialTheme.typography.labelLarge)
                     }
                 }
                 Spacer(Modifier.height(14.dp))
@@ -2637,20 +2806,20 @@ private fun NoteSelectionBar(
                                 contentAlignment = Alignment.Center,
                             ) {
                                 Box(Modifier.requiredWidth(slotWidth), contentAlignment = Alignment.Center) {
-                                    SelectionActionButton("Rename", { if (count == 1) togglePanel(SelectionPanel.RENAME) }) {
+                                    SelectionActionButton(strings.getString(UiR.ui_rename), { if (count == 1) togglePanel(SelectionPanel.RENAME) }) {
                                         Icon(Icons.Default.Edit, contentDescription = null)
                                     }
                                 }
                             }
                             if (destination == LibraryDestination.TRASH) {
-                                SelectionActionButton("Restore", { onAction(NoteSelectionOperation.RESTORE, "") }) {
+                                SelectionActionButton(strings.getString(UiR.ui_restore), { onAction(NoteSelectionOperation.RESTORE, "") }) {
                                     Icon(Icons.Default.Refresh, contentDescription = null)
                                 }
-                                SelectionActionButton("Delete permanently", { deleteConfirmationOpen = true }) {
+                                SelectionActionButton(strings.getString(UiR.ui_delete_permanently_2), { deleteConfirmationOpen = true }) {
                                     Icon(Icons.Default.Delete, contentDescription = null, tint = DestructiveRed)
                                 }
                             } else {
-                                SelectionActionButton(if (allFavorite) "Unfavourite" else "Favourite", {
+                                SelectionActionButton(if (allFavorite) strings.getString(UiR.ui_unfavourite) else strings.getString(UiR.ui_favourite), {
                                     onAction(NoteSelectionOperation.FAVORITE, if (allFavorite) "remove" else "add")
                                 }) {
                                     Icon(
@@ -2659,13 +2828,13 @@ private fun NoteSelectionBar(
                                         tint = FavoriteRed,
                                     )
                                 }
-                                SelectionActionButton("Category", { togglePanel(SelectionPanel.CATEGORY) }) {
+                                SelectionActionButton(strings.getString(UiR.ui_category), { togglePanel(SelectionPanel.CATEGORY) }) {
                                     CategoryIcon(false, MaterialTheme.colorScheme.onSurface)
                                 }
-                                SelectionActionButton("Location", { togglePanel(SelectionPanel.SOURCE) }) {
+                                SelectionActionButton(strings.getString(UiR.ui_location), { togglePanel(SelectionPanel.SOURCE) }) {
                                     SaveStatusGlyph(moveStatus)
                                 }
-                                SelectionActionButton("Delete", { deleteConfirmationOpen = true }) {
+                                SelectionActionButton(strings.getString(UiR.ui_delete), { deleteConfirmationOpen = true }) {
                                     Icon(Icons.Default.Delete, contentDescription = null, tint = DestructiveRed)
                                 }
                             }
@@ -2691,7 +2860,7 @@ private fun NoteSelectionBar(
                         SelectionPanel.RENAME -> KgsSheetDialog(
                             expanded = true,
                             onDismissRequest = { expansion.expanded = false },
-                            title = { Text("Rename Note") },
+                            title = { Text(strings.getString(UiR.ui_rename_note)) },
                             text = {
                                 KgsTextField(
                                     value = title,
@@ -2700,12 +2869,12 @@ private fun NoteSelectionBar(
                                 )
                             },
                             confirmButton = {
-                                SelectionTextButton("Rename", primary = true, enabled = interactive && count == 1 && title.isNotBlank() && expansion.expanded && panel == shownPanel, onClick = {
+                                SelectionTextButton(strings.getString(UiR.ui_rename), primary = true, enabled = interactive && count == 1 && title.isNotBlank() && expansion.expanded && panel == shownPanel, onClick = {
                                     onRename(title)
                                     expansion.expanded = false
                                 })
                             },
-                            dismissButton = { SelectionTextButton("Cancel", onClick = { expansion.expanded = false }) },
+                            dismissButton = { SelectionTextButton(strings.getString(UiR.ui_cancel), onClick = { expansion.expanded = false }) },
                         )
                         SelectionPanel.CATEGORY -> CategoryDialog(
                             expanded = true,
@@ -2783,6 +2952,8 @@ private fun NoteDeleteConfirmationDialog(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+
     var displayed by remember { mutableStateOf(permanently to titles) }
     if (expanded) displayed = permanently to titles
     val shownPermanently = displayed.first
@@ -2802,22 +2973,22 @@ private fun NoteDeleteConfirmationDialog(
                     Icon(Icons.Default.Delete, contentDescription = null, tint = DestructiveRed)
                 }
                 Text(
-                    if (shownPermanently) "Delete permanently?" else "Move to Trash?",
+                    if (shownPermanently) strings.getString(UiR.ui_delete_permanently_3) else strings.getString(UiR.ui_move_to_trash_2),
                     style = MaterialTheme.typography.headlineSmall,
                 )
                 Text(
                     if (shownPermanently) {
-                        if (shownTitles.size == 1) "This Note cannot be restored after deletion."
-                        else "These Notes cannot be restored after deletion."
+                        if (shownTitles.size == 1) strings.getString(UiR.ui_this_note_cannot_be_restored_after_deletion)
+                        else strings.getString(UiR.ui_these_notes_cannot_be_restored_after_deletion)
                     } else {
-                        if (shownTitles.size == 1) "You can restore this Note from Trash later."
-                        else "You can restore these Notes from Trash later."
+                        if (shownTitles.size == 1) strings.getString(UiR.ui_you_can_restore_this_note_from_trash_later)
+                        else strings.getString(UiR.ui_you_can_restore_these_notes_from_trash_later)
                     },
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Text(
-                    "${shownTitles.size} ${if (shownTitles.size == 1) "Note" else "Notes"}",
+                    "${shownTitles.size} ${if (shownTitles.size == 1) strings.getString(UiR.ui_note) else strings.getString(UiR.ui_notes)}",
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -2829,7 +3000,7 @@ private fun NoteDeleteConfirmationDialog(
                     ) {
                         items(shownTitles.size) { index ->
                             Text(
-                                shownTitles[index].ifBlank { "Untitled Note" },
+                                shownTitles[index].ifBlank { strings.getString(UiR.ui_untitled_note) },
                                 maxLines = 2,
                                 overflow = TextOverflow.Ellipsis,
                                 style = MaterialTheme.typography.bodyMedium,
@@ -2843,13 +3014,13 @@ private fun NoteDeleteConfirmationDialog(
                     horizontalArrangement = Arrangement.spacedBy(16.dp, Alignment.End),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    TextButton(onClick = onDismiss) { Text("Cancel") }
+                    TextButton(onClick = onDismiss) { Text(strings.getString(UiR.ui_cancel)) }
                     Button(
                         onClick = onConfirm,
                         colors = androidx.compose.material3.ButtonDefaults.buttonColors(containerColor = DestructiveRed),
                         contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 10.dp),
                         modifier = Modifier.testTag("confirm-note-delete"),
-                    ) { Text(if (shownPermanently) "Delete" else "Move to Trash", maxLines = 1, style = MaterialTheme.typography.labelMedium) }
+                    ) { Text(if (shownPermanently) strings.getString(UiR.ui_delete) else strings.getString(UiR.ui_move_to_trash), maxLines = 1, style = MaterialTheme.typography.labelMedium) }
                 }
             }
         }
@@ -2865,6 +3036,8 @@ private fun EmptyLibrary(
     modifier: Modifier,
     category: String? = null,
 ) {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+
     Box(modifier, contentAlignment = Alignment.Center) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -2882,25 +3055,25 @@ private fun EmptyLibrary(
             }
             Text(
                 text = when {
-                    query.isNotBlank() -> "No matching notes"
-                    destination == LibraryDestination.TRASH -> "Trash is empty"
-                    filter == LibraryFilter.FAVORITES -> "No favorites yet"
-                    filter == LibraryFilter.LOCAL -> "No local notes"
-                    filter == LibraryFilter.SERVER -> "No synced server notes"
-                    category == "" -> "No Notes without a Category"
-                    category != null -> "No Notes in this Category"
-                    else -> "A quiet place for your thoughts"
+                    query.isNotBlank() -> strings.getString(UiR.ui_no_matching_notes)
+                    destination == LibraryDestination.TRASH -> strings.getString(UiR.ui_trash_is_empty)
+                    filter == LibraryFilter.FAVORITES -> strings.getString(UiR.ui_no_favorites_yet)
+                    filter == LibraryFilter.LOCAL -> strings.getString(UiR.ui_no_local_notes)
+                    filter == LibraryFilter.SERVER -> strings.getString(UiR.ui_no_synced_server_notes)
+                    category == "" -> strings.getString(UiR.ui_no_notes_without_a_category)
+                    category != null -> strings.getString(UiR.ui_no_notes_in_this_category)
+                    else -> strings.getString(UiR.ui_a_quiet_place_for_your_thoughts)
                 },
                 style = MaterialTheme.typography.titleLarge,
             )
             Text(
                 text = when {
-                    query.isNotBlank() -> "Try another search term."
-                    destination == LibraryDestination.TRASH -> "Deleted notes stay recoverable here."
-                    filter == LibraryFilter.SERVER -> "Synced notes from connected Sources appear here."
-                    category == "" -> "Notes without an assigned Category appear here."
-                    category != null -> "New Notes you create here will use this Category."
-                    else -> "Create a note and it will be stored as portable Markdown."
+                    query.isNotBlank() -> strings.getString(UiR.ui_try_another_search_term)
+                    destination == LibraryDestination.TRASH -> strings.getString(UiR.ui_deleted_notes_stay_recoverable_here)
+                    filter == LibraryFilter.SERVER -> strings.getString(UiR.ui_synced_notes_from_connected_sources_appear_here)
+                    category == "" -> strings.getString(UiR.ui_notes_without_an_assigned_category_appear_here)
+                    category != null -> strings.getString(UiR.ui_new_notes_you_create_here_will_use_this_category)
+                    else -> strings.getString(UiR.ui_create_a_note_and_it_will_be_stored_as_portable_markdown)
                 },
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -2920,6 +3093,8 @@ private fun EditorPane(
     noteMorph: NoteMorph? = null,
     stableLayoutScope: SharedTransitionScope? = noteMorph?.scope,
 ) {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+
     val fallbackDock = remember { KgsSheetDock() }
     val dock = LocalKgsSheetDock.current ?: fallbackDock
     CompositionLocalProvider(LocalKgsSheetDock provides dock) {
@@ -2951,7 +3126,7 @@ private fun EditorPane(
                         var hintVisible by remember(note.id) { mutableStateOf(false) }
                         LaunchedEffect(note.id) { hintVisible = true }
                         val hintAlpha by animateFloatAsState(if (hintVisible) 1f else 0f, tween(180), label = "Empty Note hint")
-                        Text("Start writing…", style = MaterialTheme.typography.bodyLarge,
+                        Text(strings.getString(UiR.ui_start_writing), style = MaterialTheme.typography.bodyLarge,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(horizontal = 20.dp, vertical = 24.dp).graphicsLayer { alpha = hintAlpha })
                     }
@@ -2970,6 +3145,10 @@ private fun EditorHeader(
     showBack: Boolean,
     noteMorph: NoteMorph? = null,
 ) {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+
+    val keyboard = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
     var categoryDialogOpen by remember { mutableStateOf(false) }
     var sourceDialogOpen by remember { mutableStateOf(false) }
     var actionsMenuOpen by remember { mutableStateOf(false) }
@@ -2979,7 +3158,7 @@ private fun EditorHeader(
         dismissSheets()
         setOpen(!open)
     }
-    val statusTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+    val statusTop = paneStatusTop()
 
     Column(modifier = Modifier.kgsSheetControls(LocalKgsSheetDock.current).padding(start = 6.dp, top = statusTop + 2.dp, end = 6.dp, bottom = 2.dp)) {
         Row(
@@ -2987,10 +3166,10 @@ private fun EditorHeader(
             horizontalArrangement = Arrangement.spacedBy(0.dp),
         ) {
             if (showBack) {
-                ExpressiveIconButton(label = "Back", onClick = actions.onCloseEditor, modifier = Modifier.zIndex(1f)) {
+                ExpressiveIconButton(label = strings.getString(UiR.ui_back), onClick = actions.onCloseEditor, modifier = Modifier.zIndex(1f)) {
                     Icon(
                         Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Back to Notes",
+                        contentDescription = strings.getString(UiR.ui_back_to_notes),
                         tint = MaterialTheme.colorScheme.onSurface,
                     )
                 }
@@ -3006,6 +3185,14 @@ private fun EditorHeader(
                     .noteMorphBounds(noteMorph, note.id, "title")
                     .testTag("editor-title"),
             )
+            if (state.canExpandEditor) {
+                val layoutLabel = if (state.editorLayout == EditorLayoutPreference.FULL_SCREEN) strings.getString(UiR.ui_show_library) else strings.getString(UiR.ui_full_screen_note)
+                ExpressiveIconButton(
+                    label = layoutLabel,
+                    onClick = { actions.onEditorLayoutChange(if (state.editorLayout == EditorLayoutPreference.FULL_SCREEN) EditorLayoutPreference.AUTOMATIC else EditorLayoutPreference.FULL_SCREEN) },
+                    modifier = Modifier.semantics { contentDescription = layoutLabel },
+                ) { PaneLayoutIcon(state.editorLayout == EditorLayoutPreference.FULL_SCREEN, MaterialTheme.colorScheme.onSurfaceVariant) }
+            }
             SaveStatusIndicator(
                 status = when {
                     state.changingSource -> EditorSaveStatus.SYNCING
@@ -3016,7 +3203,7 @@ private fun EditorHeader(
                 onClick = { toggleSheet(sourceDialogOpen) { sourceDialogOpen = it } },
             )
             if (note.state != NoteState.TRASHED) {
-                KgsTooltip("Category") {
+                KgsTooltip(strings.getString(UiR.ui_category)) {
                     KgsExpressiveSurface(
                         onClick = { toggleSheet(categoryDialogOpen) { categoryDialogOpen = it } },
                         restingCorners = KgsCornerRadii(12.dp),
@@ -3024,9 +3211,9 @@ private fun EditorHeader(
                             .size(40.dp)
                             .semantics {
                                 contentDescription = if (note.category.isBlank()) {
-                                    "Choose Category"
+                                    strings.getString(UiR.ui_choose_category)
                                 } else {
-                                    "Choose Category: ${note.category}"
+                                    strings.getString(UiR.ui_choose_category_value, note.category)
                                 }
                             },
                     ) {
@@ -3042,22 +3229,22 @@ private fun EditorHeader(
                 }
                 Box {
                     ExpressiveIconButton(
-                        label = "More",
+                        label = strings.getString(UiR.ui_more),
                         onClick = { toggleSheet(actionsMenuOpen) { actionsMenuOpen = it } },
                         selected = actionsMenuOpen,
                     ) {
                         Icon(
                             Icons.Default.MoreVert,
-                            contentDescription = "More note actions",
+                            contentDescription = strings.getString(UiR.ui_more_note_actions),
                             tint = MaterialTheme.colorScheme.onSurface,
                         )
                     }
                     KgsBottomSheet(
                         expanded = actionsMenuOpen,
-                        title = "Note actions",
+                        title = strings.getString(UiR.ui_note_actions),
                         onDismissRequest = { actionsMenuOpen = false },
                     ) {
-                        val favoriteLabel = if (note.favorite) "Unfavourite" else "Favourite"
+                        val favoriteLabel = if (note.favorite) strings.getString(UiR.ui_unfavourite) else strings.getString(UiR.ui_favourite)
                         KgsTooltip(favoriteLabel) {
                             KgsDropdownMenuItem(
                                 text = favoriteLabel,
@@ -3074,9 +3261,9 @@ private fun EditorHeader(
                                 },
                             )
                         }
-                        KgsTooltip("Delete") {
+                        KgsTooltip(strings.getString(UiR.ui_delete)) {
                             KgsDropdownMenuItem(
-                                text = "Delete",
+                                text = strings.getString(UiR.ui_delete),
                                 contentColor = DestructiveRed,
                                 icon = {
                                     Icon(
@@ -3140,7 +3327,9 @@ private fun CategoryDialog(
     onSelect: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    KgsBottomSheet(expanded = expanded, onDismissRequest = onDismiss, title = "Choose Category") {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+
+    KgsBottomSheet(expanded = expanded, onDismissRequest = onDismiss, title = strings.getString(UiR.ui_choose_category)) {
         var query by rememberSaveable { mutableStateOf("") }
         var creating by rememberSaveable { mutableStateOf(false) }
         var name by rememberSaveable { mutableStateOf("") }
@@ -3160,28 +3349,28 @@ private fun CategoryDialog(
             ) {
                 if (creating) {
                     LaunchedEffect(Unit) { nameFocus.requestFocus() }
-                    Text("New Category", style = MaterialTheme.typography.titleLarge)
+                    Text(strings.getString(UiR.ui_new_category), style = MaterialTheme.typography.titleLarge)
                     KgsTextField(
                         value = name,
                         onValueChange = { name = it },
-                        placeholder = "Category name",
+                        placeholder = strings.getString(UiR.ui_category_name),
                         containerColor = MaterialTheme.colorScheme.background,
                         modifier = Modifier.fillMaxWidth().focusRequester(nameFocus).testTag("new-category-name"),
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(16.dp), modifier = Modifier.fillMaxWidth()) {
-                        TextButton(onClick = rememberKgsHapticClick { creating = false }) { Text("Cancel") }
+                        TextButton(onClick = rememberKgsHapticClick { creating = false }) { Text(strings.getString(UiR.ui_cancel)) }
                         Spacer(Modifier.weight(1f))
                         Button(
                             enabled = name.isNotBlank() && categories.none { it.equals(name.trim(), ignoreCase = true) },
                             onClick = rememberKgsHapticClick { onSelect(name.trim()) },
-                        ) { Text("Create") }
+                        ) { Text(strings.getString(UiR.ui_create)) }
                     }
                 } else {
-                    Text("Choose Category", style = MaterialTheme.typography.titleLarge)
+                    Text(strings.getString(UiR.ui_choose_category), style = MaterialTheme.typography.titleLarge)
                     KgsSearchField(
                         value = query,
                         onValueChange = { query = it },
-                        placeholder = "Search Categories",
+                        placeholder = strings.getString(UiR.ui_search_categories),
                         containerColor = MaterialTheme.colorScheme.background,
                         modifier = Modifier
                             .fillMaxWidth()
@@ -3193,7 +3382,7 @@ private fun CategoryDialog(
                     ) {
                         item {
                             ModalChoiceRow(
-                                label = "No Category",
+                                label = strings.getString(UiR.ui_no_category),
                                 selected = current?.isBlank() == true,
                                 onClick = { onSelect("") },
                                 icon = {
@@ -3223,7 +3412,7 @@ private fun CategoryDialog(
                             )
                         }
                     }
-                    KgsTooltip("Create Category") {
+                    KgsTooltip(strings.getString(UiR.ui_create_category)) {
                         Button(
                             enabled = candidate.isBlank() || categories.none { it.equals(candidate, ignoreCase = true) },
                             onClick = rememberKgsHapticClick {
@@ -3235,7 +3424,7 @@ private fun CategoryDialog(
                         ) {
                             Icon(Icons.Default.Add, contentDescription = null)
                             Spacer(Modifier.width(8.dp))
-                            Text(if (candidate.isBlank()) "New Category" else "Create “$candidate”")
+                            Text(if (candidate.isBlank()) strings.getString(UiR.ui_new_category) else strings.getString(UiR.ui_create_value, candidate))
                         }
                     }
                 }
@@ -3251,9 +3440,11 @@ internal fun SourceDialog(
     sources: List<SourceChoice>,
     onSelect: (SourceId) -> Unit,
     onDismiss: () -> Unit,
-    explanation: String = "The Working Copy stays available offline.",
+    explanation: String = androidx.compose.ui.res.stringResource(UiR.ui_the_working_copy_stays_available_offline),
 ) {
-    KgsBottomSheet(expanded = expanded, onDismissRequest = onDismiss, title = "Save Note to") {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+
+    KgsBottomSheet(expanded = expanded, onDismissRequest = onDismiss, title = strings.getString(UiR.ui_save_note_to)) {
 
         Surface(
             color = MaterialTheme.colorScheme.surface,
@@ -3266,7 +3457,7 @@ internal fun SourceDialog(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.padding(20.dp),
             ) {
-                Text("Save Note to", style = MaterialTheme.typography.titleLarge)
+                Text(strings.getString(UiR.ui_save_note_to), style = MaterialTheme.typography.titleLarge)
                 Text(
                     explanation,
                     style = MaterialTheme.typography.bodyMedium,
@@ -3326,12 +3517,12 @@ private fun ModalChoiceRow(
     }
 }
 
-private enum class EditorSaveStatus(val description: String) {
-    SAVING("Saving"),
-    SAVED_LOCALLY("Saved locally"),
-    SYNCING("Saved locally, syncing"),
-    SYNCED("Synced"),
-    NEEDS_ATTENTION("Needs attention"),
+private enum class EditorSaveStatus(val descriptionRes: Int) {
+    SAVING(UiR.ui_saving),
+    SAVED_LOCALLY(UiR.ui_saved_locally),
+    SYNCING(UiR.ui_saved_locally_syncing),
+    SYNCED(UiR.ui_synced),
+    NEEDS_ATTENTION(UiR.ui_needs_attention),
 }
 
 private fun noteSaveStatus(syncState: NoteSyncState): EditorSaveStatus = when (syncState) {
@@ -3343,13 +3534,15 @@ private fun noteSaveStatus(syncState: NoteSyncState): EditorSaveStatus = when (s
 
 @Composable
 private fun SaveStatusIndicator(status: EditorSaveStatus, onClick: () -> Unit) {
-    KgsTooltip("Location") {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+
+    KgsTooltip(strings.getString(UiR.ui_location)) {
         KgsExpressiveSurface(
             onClick = onClick,
             restingCorners = KgsCornerRadii(19.dp),
             modifier = Modifier
                 .size(38.dp)
-                .semantics { contentDescription = status.description },
+                .semantics { contentDescription = strings.getString(status.descriptionRes) },
         ) {
             SaveStatusGlyph(status)
         }
@@ -3365,8 +3558,9 @@ private fun SaveStatusGlyph(status: EditorSaveStatus) {
     val loading = status == EditorSaveStatus.SAVING || status == EditorSaveStatus.SYNCING
     val color by animateColorAsState(
         targetValue = when (status) {
-            EditorSaveStatus.SAVING, EditorSaveStatus.NEEDS_ATTENTION -> orange
-            EditorSaveStatus.SAVED_LOCALLY, EditorSaveStatus.SYNCING -> blue
+            // Orange is reserved for problems; saving while typing is routine.
+            EditorSaveStatus.NEEDS_ATTENTION -> orange
+            EditorSaveStatus.SAVING, EditorSaveStatus.SAVED_LOCALLY, EditorSaveStatus.SYNCING -> blue
             EditorSaveStatus.SYNCED -> green
         },
         animationSpec = motion.defaultEffectsSpec(),
@@ -3440,7 +3634,7 @@ private fun SaveStatusGlyph(status: EditorSaveStatus) {
 }
 
 @Composable
-private fun CategoryIcon(filled: Boolean, color: Color) {
+internal fun CategoryIcon(filled: Boolean, color: Color) {
     Canvas(Modifier.size(24.dp).padding(2.dp)) {
         val path = androidx.compose.ui.graphics.Path().apply {
             moveTo(size.width * .1f, size.height * .31f)
@@ -3474,6 +3668,8 @@ private fun CategoryIcon(filled: Boolean, color: Color) {
 
 @Composable
 private fun TrashedNote(note: Note, actions: NotesActions, modifier: Modifier) {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+
     var deleteConfirmationOpen by remember { mutableStateOf(false) }
     Column(
         verticalArrangement = Arrangement.spacedBy(18.dp),
@@ -3485,13 +3681,13 @@ private fun TrashedNote(note: Note, actions: NotesActions, modifier: Modifier) {
             shape = MaterialTheme.shapes.medium,
         ) {
             Text(
-                note.markdown.ifBlank { "This note is empty." },
+                note.markdown.ifBlank { strings.getString(UiR.ui_this_note_is_empty) },
                 style = MaterialTheme.typography.bodyLarge,
                 modifier = Modifier.padding(18.dp),
             )
         }
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            KgsTooltip("Restore") {
+            KgsTooltip(strings.getString(UiR.ui_restore)) {
                 KgsExpressiveSurface(
                     onClick = actions.onRestore,
                     color = MaterialTheme.colorScheme.primaryContainer,
@@ -3503,11 +3699,11 @@ private fun TrashedNote(note: Note, actions: NotesActions, modifier: Modifier) {
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         Icon(Icons.Default.Refresh, contentDescription = null)
-                        Text("Restore", style = MaterialTheme.typography.labelLarge)
+                        Text(strings.getString(UiR.ui_restore), style = MaterialTheme.typography.labelLarge)
                     }
                 }
             }
-            KgsTooltip("Delete Permanently") {
+            KgsTooltip(strings.getString(UiR.ui_delete_permanently)) {
                 KgsExpressiveSurface(
                     onClick = { deleteConfirmationOpen = true },
                     color = MaterialTheme.colorScheme.errorContainer,
@@ -3520,7 +3716,7 @@ private fun TrashedNote(note: Note, actions: NotesActions, modifier: Modifier) {
                     ) {
                         Icon(Icons.Default.Delete, contentDescription = null, tint = DestructiveRed)
                         Text(
-                            "Delete permanently",
+                            strings.getString(UiR.ui_delete_permanently_2),
                             style = MaterialTheme.typography.labelLarge,
                             color = DestructiveRed,
                             maxLines = 1,
@@ -3546,14 +3742,16 @@ private fun TrashedNote(note: Note, actions: NotesActions, modifier: Modifier) {
 
 @Composable
 private fun NoSelection(modifier: Modifier) {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+
     Box(modifier, contentAlignment = Alignment.Center) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text("Select a note", style = MaterialTheme.typography.titleLarge)
+            Text(strings.getString(UiR.ui_select_a_note), style = MaterialTheme.typography.titleLarge)
             Text(
-                "Your editor will open here.",
+                strings.getString(UiR.ui_your_editor_will_open_here),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -3561,25 +3759,19 @@ private fun NoSelection(modifier: Modifier) {
     }
 }
 
-private val LibrarySort.label: String
-    get() = when (this) {
-        LibrarySort.LAST_EDITED -> "Last edited"
-        LibrarySort.LAST_CREATED -> "Last created"
-        LibrarySort.ALPHABETICAL -> "Alphabetical"
+private fun LibrarySort.label(strings: android.content.res.Resources): String = when (this) {
+        LibrarySort.LAST_EDITED -> strings.getString(UiR.ui_last_edited)
+        LibrarySort.LAST_CREATED -> strings.getString(UiR.ui_last_created)
+        LibrarySort.ALPHABETICAL -> strings.getString(UiR.ui_alphabetical)
     }
 
-private val AttachmentMetadataPreference.label: String
-    get() = when (this) {
-        AttachmentMetadataPreference.ASK_EVERY_TIME -> "Ask every time"
-        AttachmentMetadataPreference.REMOVE_PRIVATE_METADATA -> "Remove private metadata"
-        AttachmentMetadataPreference.KEEP_ORIGINAL -> "Keep original"
+private fun AttachmentMetadataPreference.label(strings: android.content.res.Resources): String = when (this) {
+        AttachmentMetadataPreference.ASK_EVERY_TIME -> strings.getString(UiR.ui_ask_every_time)
+        AttachmentMetadataPreference.REMOVE_PRIVATE_METADATA -> strings.getString(UiR.ui_remove_private_metadata)
+        AttachmentMetadataPreference.KEEP_ORIGINAL -> strings.getString(UiR.ui_keep_original)
     }
 
-private val pendingSyncStates = setOf(
-    NoteSyncState.SAVED_LOCALLY,
-    NoteSyncState.SYNCING,
-    NoteSyncState.NEEDS_ATTENTION,
-)
+private const val SyncNoticeDelayMillis = 4_000L
 
 private val FavoriteRed = Color(0xFFD13B4B)
 

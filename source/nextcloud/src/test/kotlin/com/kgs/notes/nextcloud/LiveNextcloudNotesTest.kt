@@ -40,6 +40,33 @@ class LiveNextcloudNotesTest {
     lateinit var root: Path
 
     @Test
+    fun `Category management updates the remote subtree and keeps Note identities and content`() = runBlocking {
+        withServer { server ->
+            val source = server.source()
+            val engine = server.engine(source)
+            val ids = listOf("Work", "Work/Projects", "Workshop").map { category ->
+                engine.createDraft(sourceId = source.descriptor.id, category = category).also {
+                    engine.updateContent(it, "Category management fixture $category")
+                    engine.synchronize(it)
+                }
+            }
+            val remoteIds = server.api.notes().map { it.id }.toSet()
+            val changed = engine.renameCategory(source.descriptor.id, "Work", "Office")
+            assertEquals(ids.take(2).toSet(), changed)
+            changed.forEach { engine.synchronize(it) }
+            assertEquals(setOf("Office", "Office/Projects", "Workshop"), server.api.notes().map { it.category }.toSet())
+            engine.deleteCategory(source.descriptor.id, "Office").forEach { engine.synchronize(it) }
+            val remote = server.api.notes()
+            assertEquals(remoteIds, remote.map { it.id }.toSet())
+            assertEquals(3, remote.size)
+            assertEquals(2, remote.count { it.category.isEmpty() })
+            assertTrue(remote.all { it.markdown.startsWith("Category management fixture ") })
+            engine.refreshSources()
+            assertEquals(ids.toSet(), engine.library.value.active.map { it.id }.toSet())
+        }
+    }
+
+    @Test
     fun `new Categories on an open Note persist through repeated updates and refresh`() = runBlocking {
         withServer { server ->
             val source = server.source()

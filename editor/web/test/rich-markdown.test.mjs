@@ -24,6 +24,162 @@ async function editElsewhere() {
   await new Promise(resolve => setTimeout(resolve, 60))
 }
 
+test('GitHub alerts render with a label and editable content and keep their Markdown syntax', async () => {
+  for (const type of ['NOTE', 'TIP', 'IMPORTANT', 'WARNING', 'CAUTION']) {
+    const source = `# Heading\n\n> [!${type}]\n> Keep **this** information.\n>\n> - First item\n> - Second item\n\nAfter.`
+    bridge.load(source)
+    const alert = root.querySelector(`[data-markdown-alert="${type}"]`)
+    assert.ok(alert, `Expected a styled ${type} alert`)
+    assert.equal(alert.querySelector('.markdown-alert-title')?.textContent, type[0] + type.slice(1).toLowerCase())
+    assert.equal(alert.querySelector('.markdown-alert-title')?.contentEditable, 'false')
+    assert.equal(alert.querySelector('strong')?.textContent, 'this')
+    assert.equal(alert.querySelectorAll('li').length, 2)
+    assert.equal(bridge.markdown(), source)
+    await editElsewhere()
+    const edited = bridge.markdown()
+    assert.ok(edited.includes(`> [!${type}]`))
+    bridge.load(edited)
+    assert.equal(root.querySelectorAll(`[data-markdown-alert="${type}"]`).length, 1)
+    const text = root.querySelector('[data-markdown-alert] strong')
+    root.editor.commands.setTextSelection({ from: root.editor.view.posAtDOM(text, 0), to: root.editor.view.posAtDOM(text, 0) + 4 })
+    root.editor.commands.insertContent('updated')
+    assert.ok(bridge.markdown().includes('updated'))
+    assert.ok(bridge.markdown().includes(`> [!${type}]`))
+  }
+})
+
+test('ordinary quotes and literal or unknown alert markers remain ordinary Markdown', () => {
+  bridge.load('> An ordinary quote.\n\n> [!UNKNOWN]\n> Keep the marker.\n\n```md\n> [!WARNING]\n> Example only\n```\n\n`[!TIP]`')
+  assert.equal(root.querySelectorAll('[data-markdown-alert]').length, 0)
+  assert.equal(root.querySelectorAll('blockquote').length, 2)
+  assert.ok(root.querySelector('pre').textContent.includes('[!WARNING]'))
+})
+
+test('copying and pasting a rich alert retains its warning type and Markdown marker', () => {
+  bridge.load('> [!WARNING]\n> Keep **this** warning.')
+  const clipboard = root.editor.getHTML()
+  bridge.load('Destination.\n\n')
+  root.editor.commands.insertContent(clipboard)
+  assert.equal(root.querySelector('[data-markdown-alert]')?.getAttribute('data-markdown-alert'), 'WARNING')
+  assert.ok(bridge.markdown().includes('> [!WARNING]'))
+  assert.ok(bridge.markdown().includes('**this** warning.'))
+})
+
+test('viewport handoff maps repeated text in lists and tables to its original source offset', () => {
+  const source = '# Heading\n\n' + '- Same **phrase**.\n'.repeat(30) + '\n| Name | Value |\n| --- | --- |\n| Same | Last value |'
+  bridge.load(source)
+  const paragraphs = [...root.querySelectorAll('li p')]
+  const position = root.editor.view.posAtDOM(paragraphs[23].firstChild, 3)
+  const originalCoords = root.editor.view.coordsAtPos
+  const originalHit = root.editor.view.posAtCoords
+  root.editor.view.coordsAtPos = () => ({ top: 14, bottom: 36, left: 20, right: 20 })
+  root.editor.view.posAtCoords = () => ({ pos: position, inside: position })
+  try {
+    const viewport = bridge.viewport()
+    assert.equal(viewport.sourceOffset, source.indexOf('- Same') + 23 * '- Same **phrase**.\n'.length + 5)
+    assert.equal(viewport.top, 14)
+    assert.equal(bridge.markdown(), source)
+  } finally {
+    root.editor.view.coordsAtPos = originalCoords
+    root.editor.view.posAtCoords = originalHit
+  }
+})
+
+test('restoring a source viewport aligns the matching rich text and cursor without editing the Note', async () => {
+  const source = '# Heading\n\n' + '- Same **phrase**.\n'.repeat(30) + '\nEnd &amp; detail.'
+  bridge.load(source)
+  const sourceOffset = source.indexOf('- Same') + 23 * '- Same **phrase**.\n'.length + 2
+  const expectedPosition = root.editor.view.posAtDOM(root.querySelectorAll('li p')[23].firstChild, 0)
+  const originalCoords = root.editor.view.coordsAtPos
+  const originalScroll = window.scrollTo
+  const previousFocus = window.document.activeElement
+  let restoredPosition
+  let scrollTop = 0
+  Object.defineProperty(window, 'scrollY', { configurable: true, get: () => scrollTop })
+  window.scrollTo = (_, y) => { scrollTop = y }
+  root.editor.view.coordsAtPos = pos => {
+    restoredPosition = pos
+    return { top: 680 - scrollTop, bottom: 702 - scrollTop, left: 20, right: 20 }
+  }
+  try {
+    await bridge.restoreViewport({ sourceOffset, top: 16, selectionStart: sourceOffset + 1, selectionEnd: sourceOffset + 3 })
+    assert.equal(restoredPosition, expectedPosition)
+    assert.equal(scrollTop, 664)
+    assert.equal(root.editor.state.selection.from, expectedPosition + 1)
+    assert.equal(root.editor.state.selection.to, expectedPosition + 3)
+    assert.equal(bridge.markdown(), source)
+    assert.ok(window.document.activeElement === previousFocus, 'Restoring a viewport must preserve focus')
+  } finally {
+    root.editor.view.coordsAtPos = originalCoords
+    window.scrollTo = originalScroll
+    Object.defineProperty(window, 'scrollY', { configurable: true, value: 0 })
+  }
+})
+
+test('encoded text before an identical literal paragraph maps to the correct source occurrence', () => {
+  const source = 'First &amp; detail.\n\nFirst & detail.'
+  bridge.load(source)
+  const originalCoords = root.editor.view.coordsAtPos
+  const originalHit = root.editor.view.posAtCoords
+  const text = root.querySelector('p').firstChild
+  const position = root.editor.view.posAtDOM(text, 8)
+  root.editor.view.coordsAtPos = () => ({ top: 16, bottom: 38, left: 20, right: 20 })
+  root.editor.view.posAtCoords = () => ({ pos: position, inside: position })
+  try { assert.equal(bridge.viewport().sourceOffset, 12) }
+  finally { root.editor.view.coordsAtPos = originalCoords; root.editor.view.posAtCoords = originalHit }
+})
+
+test('an unchanged viewport returns to its exact fractional scroll offset after a round trip', async () => {
+  bridge.load('# Heading\n\n' + 'Paragraph **content**.\n\n'.repeat(50))
+  const originalCoords = root.editor.view.coordsAtPos
+  const originalHit = root.editor.view.posAtCoords
+  const originalScroll = window.scrollTo
+  let scrollTop = 0
+  Object.defineProperty(window, 'scrollY', { configurable: true, get: () => scrollTop })
+  window.scrollTo = (_, y) => { scrollTop = y }
+  root.editor.view.coordsAtPos = () => ({ top: 19, bottom: 41, left: 20, right: 20 })
+  root.editor.view.posAtCoords = () => ({ pos: 1, inside: 1 })
+  try {
+    await bridge.restoreViewport({ sourceOffset: 10, top: 16, selectionStart: 0, selectionEnd: 0,
+      scrollY: 643.25, width: window.innerWidth, height: window.innerHeight })
+    assert.equal(scrollTop, 643.25)
+  } finally {
+    root.editor.view.coordsAtPos = originalCoords
+    root.editor.view.posAtCoords = originalHit
+    window.scrollTo = originalScroll
+    Object.defineProperty(window, 'scrollY', { configurable: true, value: 0 })
+  }
+})
+
+test('long Notes with repeated encoded paragraphs keep the correct reading anchor', () => {
+  const paragraph = 'Repeated &amp; **encoded &amp; content**.\n\n'
+  const source = paragraph.repeat(500)
+  bridge.load(source)
+  const originalCoords = root.editor.view.coordsAtPos
+  const originalHit = root.editor.view.posAtCoords
+  const text = root.querySelectorAll('p')[375].querySelector('strong').firstChild
+  const position = root.editor.view.posAtDOM(text, 10)
+  root.editor.view.coordsAtPos = () => ({ top: 16, bottom: 38, left: 20, right: 20 })
+  root.editor.view.posAtCoords = () => ({ pos: position, inside: position })
+  try { assert.equal(bridge.viewport().sourceOffset, 375 * paragraph.length + paragraph.indexOf('content')) }
+  finally { root.editor.view.coordsAtPos = originalCoords; root.editor.view.posAtCoords = originalHit }
+})
+
+test('Windows line endings map back to the original source without normalizing saved text', () => {
+  const source = 'First line\r\nSecond line\r\n\r\nFirst line\nSecond line'
+  bridge.load(source)
+  const originalCoords = root.editor.view.coordsAtPos
+  const originalHit = root.editor.view.posAtCoords
+  const text = root.querySelector('p').firstChild
+  const position = root.editor.view.posAtDOM(text, text.textContent.indexOf('Second'))
+  root.editor.view.coordsAtPos = () => ({ top: 16, bottom: 38, left: 20, right: 20 })
+  root.editor.view.posAtCoords = () => ({ pos: position, inside: position })
+  try {
+    assert.equal(bridge.viewport().sourceOffset, source.indexOf('Second'))
+    assert.equal(bridge.markdown(), source)
+  } finally { root.editor.view.coordsAtPos = originalCoords; root.editor.view.posAtCoords = originalHit }
+})
+
 test('GFM tables, task lists and angle autolinks render and survive editing', async () => {
   const source = '# Reference\n\n- [x] Ready\n\n| Link | Label |\n| --- | --- |\n| <https://example.org/reference> | **Reference** |\n\n<reader@example.org>\n'
   bridge.load(source)
@@ -156,4 +312,33 @@ if (process.env.KGS_NOTES_MARKDOWN_FIXTURE) test('supplied Markdown renders and 
   assert.ok(tables() === before.tables, 'Table contents must survive editing and reopening')
   assert.ok(links() === before.links, 'Link targets must survive editing and reopening')
   assert.ok(readFileSync(process.env.KGS_NOTES_MARKDOWN_FIXTURE).equals(bytes), 'Original fixture must remain untouched')
+})
+
+test('German presentation labels change without translating or rewriting Markdown', async () => {
+  const source = '> [!WARNING]\n> Keep this user text.\n\n<!-- User comment -->\n\n$$x^2$$'
+  bridge.load(source)
+  try {
+    bridge.setLabels({ WARNING: 'Warnung', Comment: 'Kommentar', Math: 'Formel',
+      content: 'Formatierter Notizinhalt', empty: 'Schreib etwas…',
+      sourceHint: 'Im Quelltextmodus bearbeiten.', sourceTitle: 'Erhaltener Quelltext' }, 'de')
+    await new Promise(resolve => setTimeout(resolve, 20))
+    assert.equal(window.document.documentElement.lang, 'de')
+    assert.equal(root.getAttribute('aria-label'), 'Formatierter Notizinhalt')
+    assert.equal(root.querySelector('.markdown-alert-title').textContent, 'Warnung')
+    assert.ok(root.textContent.includes('Keep this user text.'))
+    assert.ok(root.textContent.includes('Kommentar'))
+    assert.equal(bridge.markdown(), source)
+    root.editor.commands.insertContentAt(root.editor.state.doc.content.size, { type: 'paragraph', content: [{ type: 'text', text: 'User edit' }] })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    assert.equal(root.getAttribute('aria-label'), 'Formatierter Notizinhalt')
+    assert.ok(bridge.markdown().includes('> [!WARNING]'))
+    assert.ok(!bridge.markdown().includes('Warnung'))
+    bridge.load(source + '\n\n> [!WARNING]\n> Another user text.')
+    assert.equal(root.querySelectorAll('.markdown-alert-title')[1].textContent, 'Warnung')
+    assert.ok(bridge.markdown().includes('> [!WARNING]'))
+  } finally {
+    bridge.setLabels({ WARNING: 'Warning', Comment: 'Comment', Math: 'Math',
+      content: 'Rich note content', empty: 'Start writing…',
+      sourceHint: 'Edit this fragment in Source Mode.', sourceTitle: 'Preserved source — edit in Source Mode' }, 'en')
+  }
 })

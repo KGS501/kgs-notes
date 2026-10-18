@@ -1,5 +1,7 @@
 package com.kgs.notes.design
 
+import com.kgs.notes.design.R.string as UiR
+
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.Animatable
@@ -55,6 +57,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.foundation.layout.requiredHeight
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -114,6 +118,10 @@ fun rememberKgsDismissSheets(): () -> Unit {
 
 /** The toolbar reports the safe bottom edge for every sheet in an editor. */
 class KgsSheetDock {
+    var left by mutableFloatStateOf(0f)
+        internal set
+    var width by mutableFloatStateOf(0f)
+        internal set
     var top by mutableFloatStateOf(0f)
         internal set
     var controlsBottom by mutableFloatStateOf(0f)
@@ -122,7 +130,37 @@ class KgsSheetDock {
 val LocalKgsSheetDock = staticCompositionLocalOf<KgsSheetDock?> { null }
 
 fun Modifier.kgsSheetDock(dock: KgsSheetDock?): Modifier =
-    if (dock == null) this else onGloballyPositioned { dock.top = it.positionInWindow().y }
+    if (dock == null) this else onGloballyPositioned {
+        dock.top = it.positionInWindow().y
+        dock.left = it.positionInWindow().x
+        dock.width = it.size.width.toFloat()
+    }
+
+/**
+ * The window bounds of the pane a sheet opens from. In a split screen, sheets rise from the
+ * bottom of their own pane, as if that pane were the whole app, instead of the window's middle.
+ */
+class KgsSheetRegion {
+    var left by mutableFloatStateOf(0f)
+        internal set
+    var top by mutableFloatStateOf(0f)
+        internal set
+    var width by mutableFloatStateOf(0f)
+        internal set
+    var height by mutableFloatStateOf(0f)
+        internal set
+    internal val known: Boolean get() = width > 0f && height > 0f
+}
+val LocalKgsSheetRegion = staticCompositionLocalOf<KgsSheetRegion?> { null }
+
+fun Modifier.kgsSheetRegion(region: KgsSheetRegion?): Modifier =
+    if (region == null) this else onGloballyPositioned {
+        val position = it.positionInWindow()
+        region.left = position.x
+        region.top = position.y
+        region.width = it.size.width.toFloat()
+        region.height = it.size.height.toFloat()
+    }
 
 /** Header controls stay tappable above a docked sheet's outside-tap area. */
 fun Modifier.kgsSheetControls(dock: KgsSheetDock?): Modifier =
@@ -194,7 +232,7 @@ internal fun KgsSheetHost(content: @Composable () -> Unit) {
                 registry.entries.forEach { entry ->
                     key(entry) {
                         entry.overlay?.let { overlay ->
-                            Box(Modifier.fillMaxSize(), contentAlignment = if (entry.docked) Alignment.TopCenter else Alignment.BottomCenter) { overlay() }
+                            Box(Modifier.fillMaxSize(), contentAlignment = if (entry.docked) Alignment.TopStart else Alignment.BottomCenter) { overlay() }
                         }
                     }
                 }
@@ -211,13 +249,15 @@ fun KgsBottomSheet(
     modifier: Modifier = Modifier,
     modal: Boolean = true,
     focusable: Boolean = true,
-    title: String = "Options",
+    title: String = androidx.compose.ui.res.stringResource(UiR.ui_options),
     containerColor: Color = MaterialTheme.colorScheme.surface,
     onHidden: () -> Unit = {},
     animateSizeChanges: Boolean = true,
     expansion: KgsSheetExpansion? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+
     val motion = LocalKgsMotion.current
     if (LocalKgsInlineSheet.current) {
         if (expanded) {
@@ -230,6 +270,7 @@ fun KgsBottomSheet(
         return
     }
     val dock = LocalKgsSheetDock.current
+    val region = LocalKgsSheetRegion.current.takeIf { dock == null }
     val progress = remember { Animatable(0f) }
     var mounted by remember { mutableStateOf(expanded) }
     var drag by remember { mutableFloatStateOf(0f) }
@@ -261,6 +302,10 @@ fun KgsBottomSheet(
         registry?.entries?.add(entry)
         onDispose { registry?.entries?.remove(entry) }
     }
+    // One sheet at a time, even when the other pane of a split screen still shows one.
+    LaunchedEffect(registry, entry, expanded) {
+        if (expanded) registry?.entries?.filter { it !== entry }?.forEach { it.dismiss() }
+    }
     val dragReturn = remember { Animatable(0f) }
     var gestureDistance by remember { mutableFloatStateOf(0f) }
     var gestureStart by remember { mutableFloatStateOf(0f) }
@@ -282,25 +327,52 @@ fun KgsBottomSheet(
                 keyboard?.hide()
             }
         }
-        BoxWithConstraints((if (dock != null) Modifier.fillMaxWidth().requiredHeight(dockHeight).clipToBounds() else if (modal) Modifier.fillMaxSize() else Modifier.fillMaxWidth())
+        val sideRegion = region?.takeIf { it.known }
+        // Modal sheets live in their own window; convert pane pixels with that window's density.
+        val sheetDensity = LocalDensity.current
+        BoxWithConstraints((if (sideRegion != null) Modifier.fillMaxSize() else if (dock != null) {
+            val paneLeft = with(density) { dock.left.toDp() }
+            val paneWidth = with(density) { dock.width.toDp() }
+            Modifier.offset(x = paneLeft).then(if (paneWidth > 0.dp) Modifier.width(paneWidth) else Modifier.fillMaxWidth())
+                .requiredHeight(dockHeight).clipToBounds()
+        } else if (modal) Modifier.fillMaxSize() else Modifier.fillMaxWidth())
             .testTag("kgs-sheet-frame")
-            .then(if (dock != null) Modifier else if (modal && focusable) Modifier.imePadding() else Modifier.padding(bottom = parentKeyboard))) {
-            val navigation = if (dock != null) 0.dp else WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
-            val top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+            .then(if (dock != null || sideRegion != null) Modifier else if (modal && focusable) Modifier.imePadding() else Modifier.padding(bottom = parentKeyboard))) {
+            val windowHeight = maxHeight
+            val navigationBar = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+            val statusBar = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+            // Within a pane, system bars and the keyboard count only where they cover that pane.
+            val paneTop = with(sheetDensity) { (sideRegion?.top ?: 0f).toDp() }
+            val paneHeight = with(sheetDensity) { (sideRegion?.height ?: 0f).toDp() }
+            val paneBottom = paneTop + paneHeight
+            val navigation = when {
+                dock != null -> 0.dp
+                sideRegion != null -> (paneBottom - (windowHeight - navigationBar)).coerceIn(0.dp, navigationBar)
+                else -> navigationBar
+            }
+            val keyboard = if (sideRegion != null) (paneBottom - (windowHeight - parentKeyboard) - navigation).coerceAtLeast(0.dp) else 0.dp
+            val top = if (sideRegion != null) (statusBar - paneTop).coerceAtLeast(0.dp) else statusBar
             val sheetTop = maxOf(top, controlsHeight)
-            val availableHeight = (maxHeight - sheetTop - 8.dp).coerceAtLeast(0.dp)
+            val availableHeight = ((if (sideRegion != null) paneHeight - keyboard else maxHeight) - sheetTop - 8.dp).coerceAtLeast(0.dp)
             val contentHeight = (availableHeight - navigation - 36.dp).coerceAtLeast(0.dp)
             if (modal) {
-                Box(Modifier.fillMaxSize().padding(top = controlsHeight).semantics { contentDescription = "Dismiss sheet" }
+                Box(Modifier.fillMaxSize().padding(top = controlsHeight).semantics { contentDescription = strings.getString(UiR.ui_dismiss_sheet) }
                     .clickable(interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
                         indication = null, onClick = { currentDismiss() }))
             }
             val sheetShape = RoundedCornerShape(topStart = 30.dp, topEnd = 30.dp)
+            Box(if (sideRegion != null) {
+                Modifier.offset { IntOffset(sideRegion.left.roundToInt(), sideRegion.top.roundToInt()) }
+                    .size(with(sheetDensity) { sideRegion.width.toDp() }, paneHeight)
+                    .padding(bottom = keyboard)
+                    // The sheet slides out of its own pane, never across the other one.
+                    .clipToBounds()
+            } else Modifier.align(Alignment.BottomCenter).fillMaxWidth()) {
             Surface(
                 color = containerColor,
                 shape = sheetShape,
                 shadowElevation = 0.dp,
-                modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                modifier = Modifier.align(Alignment.BottomCenter).widthIn(max = 640.dp).fillMaxWidth()
                     .heightIn(max = availableHeight)
                     .graphicsLayer {
                         translationY = (1f - progress.value) * sheetHeight + drag
@@ -318,7 +390,7 @@ fun KgsBottomSheet(
                     .then(if (animateSizeChanges) Modifier.animateContentSize(tween(300, easing = motion.standard), alignment = Alignment.BottomStart) else Modifier)
                     .padding(bottom = navigation)) {
                     Box(Modifier.fillMaxWidth().height(36.dp).testTag("kgs-sheet-handle")
-                        .semantics { contentDescription = "Drag to collapse, expand or close sheet"; dismiss { currentDismiss(); true } }
+                        .semantics { contentDescription = strings.getString(UiR.ui_drag_to_collapse_expand_or_close_sheet); dismiss { currentDismiss(); true } }
                         .draggable(rememberDraggableState { delta ->
                             gestureDistance += delta
                             if (expansion != null && expansion.available) {
@@ -365,6 +437,7 @@ fun KgsBottomSheet(
                         Column(Modifier.weight(1f, fill = false).fillMaxWidth().verticalScroll(rememberScrollState()), content = content)
                     }
                 }
+            }
             }
         }
     }
@@ -421,7 +494,7 @@ private fun Modifier.consumeSurfaceTaps(): Modifier = pointerInput(Unit) {
 fun KgsConfirmationDialog(
     expanded: Boolean,
     onDismissRequest: () -> Unit,
-    title: String = "Confirm deletion",
+    title: String = androidx.compose.ui.res.stringResource(UiR.ui_confirm_deletion),
     content: @Composable () -> Unit,
 ) {
     val registry = LocalSheets.current

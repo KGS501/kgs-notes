@@ -1,5 +1,7 @@
 package com.kgs.notes
 
+import com.kgs.notes.design.R.string as UiR
+
 import android.app.Application
 import android.net.Uri
 import android.util.AtomicFile
@@ -39,7 +41,8 @@ data class ExternalFileUiState(
 )
 
 /** A URI editor, deliberately outside NotesEngine and every Source's storage and sync. */
-internal class ExternalFileSession(application: Application, private val scope: CoroutineScope) {
+internal class ExternalFileSession(private val application: Application, private val scope: CoroutineScope) {
+    private val strings get() = application.localizedResources()
     private val files = ExternalTextFiles(application)
     private val checkpoint = AtomicFile(application.noBackupFilesDir.resolve("external-file-session.json"))
     private val mutex = Mutex()
@@ -66,9 +69,9 @@ internal class ExternalFileSession(application: Application, private val scope: 
                     val preserved = preserveUnreadableCheckpoint()
                     unreadableRecoveryPending = !preserved
                     mutableState.value = ExternalFileUiState(sessionKey = sessionKey, error = if (preserved) {
-                        "The previous file preview couldn't be restored. Its recovery copy was kept; open the original file again."
+                        strings.getString(UiR.ui_the_previous_file_preview_couldn_t_be_restored_its_recovery_copy_was_kept_open_the_or)
                     } else {
-                        "The previous file preview couldn't be restored. Its recovery file was kept. Free up storage before opening another file."
+                        strings.getString(UiR.ui_the_previous_file_preview_couldn_t_be_restored_its_recovery_file_was_kept_free_up_sto)
                     })
                 }
             }
@@ -160,9 +163,9 @@ internal class ExternalFileSession(application: Application, private val scope: 
         try {
             val opened = withContext(Dispatchers.IO) { files.open(next) }
             if (!opened.bytes.contentEquals(baseline)) {
-                throw ExternalFileProblem("Choose the original file with the same contents. Your preview was kept unchanged.")
+                throw ExternalFileProblem(UiR.ui_choose_the_original_file_with_the_same_contents_your_preview_was_kept_unchanged)
             }
-            if (!opened.writable) throw ExternalFileProblem("This location only allows reading. You can save a copy to KGS Notes instead.")
+            if (!opened.writable) throw ExternalFileProblem(UiR.ui_this_location_only_allows_reading_you_can_save_a_copy_to_kgs_notes_instead)
             val previousUri = request?.uri
             request = next
             mutableState.update { it?.copy(name = opened.name, writable = true, error = null) }
@@ -207,7 +210,7 @@ internal class ExternalFileSession(application: Application, private val scope: 
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
-            mutableState.update { it?.copy(copying = false, error = "The copy couldn't be completed. Your text is kept here. Try again or choose another Source.") }
+            mutableState.update { it?.copy(copying = false, error = strings.getString(UiR.ui_the_copy_couldn_t_be_completed_your_text_is_kept_here_try_again_or_choose_another_sou)) }
             persistSafelyLocked()
         }
     }
@@ -220,9 +223,9 @@ internal class ExternalFileSession(application: Application, private val scope: 
         mutableState.update { it?.copy(saving = true) }
         return try {
             persistLocked()
-            if (!current.writable) throw ExternalFileProblem("The file app no longer allows editing. Save a copy to KGS Notes to keep your edits.")
+            if (!current.writable) throw ExternalFileProblem(UiR.ui_the_file_app_no_longer_allows_editing_save_a_copy_to_kgs_notes_to_keep_your_edits)
             val bytes = withContext(Dispatchers.IO) { codec.encode(current.text) }
-            if (bytes.size > MAX_EXTERNAL_FILE_BYTES) throw ExternalFileProblem("The edited file is too large to save safely. Your text is kept here; save a copy to KGS Notes.")
+            if (bytes.size > MAX_EXTERNAL_FILE_BYTES) throw ExternalFileProblem(UiR.ui_the_edited_file_is_too_large_to_save_safely_your_text_is_kept_here_save_a_copy_to_kgs)
             // Do not cancel in the middle of replacing a provider's contents.
             withContext(NonCancellable + Dispatchers.IO) { files.write(target.uri, baseline, bytes) }
             baseline = bytes
@@ -250,7 +253,7 @@ internal class ExternalFileSession(application: Application, private val scope: 
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
-            mutableState.update { it?.copy(error = "Temporary recovery couldn't be saved. Keep this preview open until your changes are saved.") }
+            mutableState.update { it?.copy(error = strings.getString(UiR.ui_temporary_recovery_couldn_t_be_saved_keep_this_preview_open_until_your_changes_are_sa)) }
         }
     }
 
@@ -294,9 +297,9 @@ internal class ExternalFileSession(application: Application, private val scope: 
             }
             bytes?.let { JSONObject(it.toString(Charsets.UTF_8)) }
         } ?: return
-        if (saved.optInt("version") != 1) throw ExternalFileProblem("Unsupported recovery format")
+        if (saved.optInt("version") != 1) throw ExternalFileProblem(UiR.ui_unsupported_recovery_format)
         val uri = Uri.parse(saved.getString("uri"))
-        if (uri.scheme != "content") throw ExternalFileProblem("Unsupported recovery location")
+        if (uri.scheme != "content") throw ExternalFileProblem(UiR.ui_unsupported_recovery_location)
         val bytes = Base64.decode(saved.getString("baseline"), Base64.NO_WRAP)
         val (original, codec) = ExternalTextFormat.decode(bytes)
         val text = saved.getString("text")
@@ -321,7 +324,7 @@ internal class ExternalFileSession(application: Application, private val scope: 
             name = saved.getString("name"), text = if (text == original && reopened != null) reopened.text else text,
             mode = EditorMode.entries.firstOrNull { it.name == saved.optString("mode") } ?: EditorMode.SOURCE,
             writable = reopened?.writable == true, dirty = text != original,
-            error = if (reopened == null) "The original file is unavailable. Your preview is kept here; save a copy to KGS Notes." else null,
+            error = if (reopened == null) strings.getString(UiR.ui_the_original_file_is_unavailable_your_preview_is_kept_here_save_a_copy_to_kgs_notes) else null,
         )
     }
 
@@ -352,7 +355,7 @@ internal class ExternalFileSession(application: Application, private val scope: 
         if (unreadableRecoveryPending) {
             if (!preserveUnreadableCheckpoint()) {
                 mutableState.update { it?.copy(closing = false,
-                    error = "The previous recovery file is still needed. Free up storage before opening another file.") }
+                    error = strings.getString(UiR.ui_the_previous_recovery_file_is_still_needed_free_up_storage_before_opening_another_fil)) }
                 return false
             }
             unreadableRecoveryPending = false
@@ -375,7 +378,7 @@ internal class ExternalFileSession(application: Application, private val scope: 
         return true
     }
 
-    private fun Exception.safeMessage(opening: Boolean): String = (this as? ExternalFileProblem)?.explanation
-        ?: if (opening) "This file couldn't be opened. Check that the file app grants access, then try again."
-        else "The original file couldn't be saved. Your edits are kept here; retry or save a copy to KGS Notes."
+    private fun Exception.safeMessage(opening: Boolean): String = (this as? ExternalFileProblem)?.let { strings.getString(it.explanationRes) }
+        ?: if (opening) strings.getString(UiR.ui_this_file_couldn_t_be_opened_check_that_the_file_app_grants_access_then_try_again)
+        else strings.getString(UiR.ui_the_original_file_couldn_t_be_saved_your_edits_are_kept_here_retry_or_save_a_copy_to)
 }

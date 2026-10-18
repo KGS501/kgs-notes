@@ -81,9 +81,9 @@ private val DarkColors = darkColorScheme(
     error = Color(0xFFFFB4AB),
 )
 
-enum class NotesTheme(val label: String) {
-    KGS_NOTES("KGS Notes"),
-    BLUE("KGS Blue"),
+enum class NotesTheme(val labelRes: Int) {
+    KGS_NOTES(R.string.ui_kgs_notes),
+    BLUE(R.string.ui_kgs_blue),
 }
 
 /** Bright brand accents are separate from the muted toolbar and selection palette. */

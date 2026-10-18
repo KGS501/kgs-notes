@@ -1,5 +1,7 @@
 package com.kgs.notes
 
+import com.kgs.notes.design.R.string as UiR
+
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -82,10 +84,14 @@ internal fun NoteCollection(
     bottomPadding: Dp,
     modifier: Modifier = Modifier,
     groupByDate: Boolean = false,
+    alphabetical: Boolean = false,
+    ascending: Boolean = false,
     dateByCreated: Boolean = false,
     onScroll: () -> Unit = {},
     item: @Composable (NoteSummary, Modifier) -> Unit,
 ) {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+
     var today by remember { mutableStateOf(LocalDate.now()) }
     var zone by remember { mutableStateOf(ZoneId.systemDefault()) }
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -121,7 +127,9 @@ internal fun NoteCollection(
         val width = with(density) { maxWidth.roundToPx() }
         val viewportHeight = with(density) { maxHeight.roundToPx() }
         val gap = with(density) { 10.dp.roundToPx() }
-        val cardWidth = ((width - gap) / 2).coerceAtLeast(1)
+        // Two columns at least; wide libraries add columns while cards stay comfortably readable.
+        val columns = maxOf(2, (width + gap) / (with(density) { MinCardWidth.roundToPx() } + gap))
+        val cardWidth = ((width - gap * (columns - 1)) / columns).coerceAtLeast(1)
         val padding = with(density) { 34.dp.roundToPx() }
         val cache = remember(width, density, typography, linkColor) {
             mutableMapOf<NoteId, Pair<List<Any>, Pair<Int, Int>>>()
@@ -129,11 +137,11 @@ internal fun NoteCollection(
         val heights = remember(notes, previewModes, width, density, typography, linkColor) {
             cache.keys.retainAll(notes.map { it.id }.toSet())
             notes.map { note ->
-                val pending = note.syncState in setOf(NoteSyncState.SAVED_LOCALLY, NoteSyncState.SYNCING, NoteSyncState.NEEDS_ATTENTION)
+                val pending = note.needsSyncNotice
                 val mode = previewModes[note.id] ?: EditorMode.RICH
                 val key = listOf(note.title, note.previewMarkdown, note.snippet, mode, pending)
                 cache[note.id]?.takeIf { it.first == key }?.let { return@map it.second }
-                val preview = noteCardPreview(note.previewMarkdown.ifBlank { note.snippet }, mode, linkColor)
+                val preview = noteCardPreview(note.previewMarkdown.ifBlank { note.snippet }, mode, linkColor, strings.getString(UiR.ui_image))
                 fun height(itemWidth: Int, cards: Boolean): Int {
                     val contentWidth = (itemWidth - padding).coerceAtLeast(1)
                     val title = textMeasurer.measure(note.title, typography.titleMedium,
@@ -149,14 +157,20 @@ internal fun NoteCollection(
                 (height(width, false) to height(cardWidth, true)).also { cache[note.id] = key to it }
             }
         }
-        val targets = remember(notes, heights, width, cardWidth, gap, groupByDate, dateByCreated, today, zone, density, typography) {
+        val locale = androidx.compose.ui.platform.LocalConfiguration.current.locales[0]
+        val targets = remember(notes, heights, width, cardWidth, columns, gap, groupByDate, alphabetical, ascending, dateByCreated, today, zone, density, typography, locale) {
             val result = mutableListOf<CollectionTarget>()
             val topInset = with(density) { 14.dp.toPx() }
             var listTop = topInset
             var cardTop = topInset
             val groups = buildList {
                 if (!groupByDate) add(notes to null)
-                else {
+                else if (alphabetical) {
+                    val groups = notes.groupBy { noteInitial(it.title, locale) }
+                    val order = java.text.Collator.getInstance(locale)
+                    val entries = groups.entries.sortedWith { a, b -> order.compare(a.key, b.key) }
+                    (if (ascending) entries else entries.reversed()).forEach { (initial, group) -> add(group to initial) }
+                } else {
                     // Disjoint local calendar ranges, never elapsed 24-hour periods.
                     // Keep the caller's chosen sort within each section.
                     val buckets = notes.groupBy { note ->
@@ -169,16 +183,17 @@ internal fun NoteCollection(
                             else -> 4 to date.withDayOfMonth(1)
                         }
                     }
-                    buckets.entries.sortedWith(compareBy<Map.Entry<Pair<Int, LocalDate>, List<NoteSummary>>> { it.key.first }
-                        .thenByDescending { it.key.second }).forEach { (bucket, group) ->
+                    val sections = buckets.entries.sortedWith(compareBy<Map.Entry<Pair<Int, LocalDate>, List<NoteSummary>>> { it.key.first }
+                        .thenByDescending { it.key.second })
+                    (if (ascending) sections.reversed() else sections).forEach { (bucket, group) ->
                         val date = bucket.second
                         val label = when (bucket.first) {
-                            0 -> "Today"
-                            1 -> "Yesterday"
-                            2 -> "Last 7 Days"
-                            3 -> "Last 30 Days"
+                            0 -> strings.getString(UiR.ui_today)
+                            1 -> strings.getString(UiR.ui_yesterday)
+                            2 -> strings.getString(UiR.ui_last_7_days)
+                            3 -> strings.getString(UiR.ui_last_30_days)
                             else -> date.format(DateTimeFormatter.ofPattern(
-                                if (date.year == today.year) "MMMM" else "MMMM yyyy", Locale.getDefault()))
+                                if (date.year == today.year) "MMMM" else "MMMM yyyy", locale))
                         }
                         add(group to label)
                     }
@@ -197,10 +212,10 @@ internal fun NoteCollection(
                     listTop += headingHeight + with(density) { 4.dp.toPx() }
                     cardTop += headingHeight + with(density) { 4.dp.toPx() }
                 }
-                val lanes = floatArrayOf(cardTop, cardTop)
+                val lanes = FloatArray(columns) { cardTop }
                 group.forEachIndexed { index, note ->
                     val (listHeight, cardHeight) = heightsById.getValue(note.id)
-                    val lane = index % 2
+                    val lane = index % columns
                     result += CollectionTarget(note.id.value, note, null,
                         CardBounds(0f, listTop, width.toFloat(), listHeight.toFloat()),
                         CardBounds((lane * (cardWidth + gap)).toFloat(), lanes[lane], cardWidth.toFloat(), cardHeight.toFloat()))
@@ -397,6 +412,8 @@ private class CollectionCardMotion(initialTarget: CollectionTarget, initialAlpha
         fromAlpha = targetAlpha
     }
 }
+
+private val MinCardWidth = 220.dp
 
 private data class CardBounds(val left: Float, val top: Float, val width: Float, val height: Float) {
     val bottom: Float get() = top + height

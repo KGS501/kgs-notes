@@ -5,8 +5,11 @@ import TaskItem from '@tiptap/extension-task-item'
 import TaskList from '@tiptap/extension-task-list'
 import { Markdown } from '@tiptap/markdown'
 import StarterKit from '@tiptap/starter-kit'
+import { MarkdownAlert } from './markdown-alert'
+import { viewportBridge, type EditorViewport } from './editor-viewport'
 import { preservingMarked, SourceBlock, SourceFootnoteReference, SourceHtmlBlock, SourceHtmlInline } from './source-capsules'
 import './style.css'
+import { editorLabel, setLabels as applyLabels } from './editor-labels'
 
 declare global {
   interface Window {
@@ -15,8 +18,11 @@ declare global {
       load(markdown: string): void
       markdown(): string
       setDarkMode(enabled: boolean): void
+      setLabels(labels: Record<string, string>, language: string): void
       run(command: string): void
       focus(): void
+      viewport(): EditorViewport
+      restoreViewport(viewport: EditorViewport): Promise<void>
     }
   }
 }
@@ -174,6 +180,7 @@ const editor = new Editor({
     TaskList,
     TaskItem.configure({ nested: true }),
     attachmentImage,
+    MarkdownAlert,
     SourceHtmlBlock,
     SourceHtmlInline,
     SourceBlock,
@@ -189,7 +196,7 @@ const editor = new Editor({
   editorProps: {
     attributes: {
       class: 'rich-editor',
-      'aria-label': 'Rich note content',
+      'aria-label': editorLabel('content'),
       spellcheck: 'true',
     },
   },
@@ -227,6 +234,23 @@ paper.addEventListener('pointermove', event => {
   if (blankTap && Math.hypot(event.clientX - blankTap.x, event.clientY - blankTap.y) > 8) blankTap = null
 })
 paper.addEventListener('pointercancel', () => { blankTap = null })
+
+// The app shrinks the WebView above the keyboard instead of letting Android pan
+// it, so Chromium sees an ordinary resize and leaves the caret where it was.
+// Follow the shrinking viewport, frame by frame, like a native text field.
+const caretMargin = 28
+let viewportHeight = window.innerHeight
+window.addEventListener('resize', () => {
+  const shrank = window.innerHeight < viewportHeight
+  viewportHeight = window.innerHeight
+  if (shrank && editor.isFocused) revealCaret()
+})
+function revealCaret() {
+  const caret = editor.view.coordsAtPos(editor.state.selection.head)
+  const bottom = window.innerHeight - caretMargin
+  if (caret.bottom > bottom) window.scrollBy(0, caret.bottom - bottom)
+  else if (caret.top < caretMargin) window.scrollBy(0, caret.top - caretMargin)
+}
 
 function post(payload: Record<string, unknown>) {
   window.KgsNotesEditor?.postMessage(JSON.stringify(payload))
@@ -272,6 +296,14 @@ function load(markdown: string) {
   }
 }
 
+function setLabels(labels: Record<string, string>, language: string) {
+  applyLabels(labels, language)
+  editor.setOptions({ editorProps: {
+    ...editor.options.editorProps,
+    attributes: { ...editor.options.editorProps.attributes, 'aria-label': editorLabel('content') },
+  } })
+}
+
 function setDarkMode(enabled: boolean) {
   document.documentElement.classList.toggle('dark', enabled)
 }
@@ -308,5 +340,5 @@ function focus() {
   editor.view.focus()
 }
 
-window.kgsEditor = { load, markdown: exactMarkdown, setDarkMode, run, focus }
+window.kgsEditor = { load, markdown: exactMarkdown, setDarkMode, setLabels, run, focus, ...viewportBridge(editor, exactMarkdown) }
 post({ type: 'ready' })

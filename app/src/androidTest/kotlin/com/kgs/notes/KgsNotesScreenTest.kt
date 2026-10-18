@@ -777,6 +777,7 @@ class KgsNotesScreenTest {
         compose.setContent {
             KgsNotesTheme(theme = NotesTheme.BLUE) { KgsNotesScreen(NotesUiState(pendingSyncCount = 1234), NotesActions()) }
         }
+        compose.mainClock.advanceTimeBy(SyncNoticeSettledMillis)
         val number = compose.onNodeWithTag("pending-sync-count", useUnmergedTree = true).assertTextContains("9+")
             .fetchSemanticsNode().boundsInRoot
         val badge = compose.onNodeWithTag("pending-sync-badge", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
@@ -785,16 +786,23 @@ class KgsNotesScreenTest {
     }
 
     @Test
-    fun pendingSyncIndicatorsFadeBothWaysAndRetainTheirCountUntilTheExitEnds() {
-        val pending = sampleSummary(SourceId("fade-fixture"), NoteSyncState.SAVED_LOCALLY, "Fade fixture")
+    fun pendingSyncIndicatorsWaitForAStalledSyncFadeBothWaysAndRetainTheirCountUntilTheExitEnds() {
+        val pending = sampleSummary(SourceId("fade-fixture"), NoteSyncState.SAVED_LOCALLY, "Fade fixture").copy(syncFailed = true)
         val state = mutableStateOf(NotesUiState(notes = listOf(pending.copy(syncState = NoteSyncState.SYNCED))))
         compose.mainClock.autoAdvance = false
         compose.setContent { KgsNotesTheme { KgsNotesScreen(state.value, NotesActions()) } }
         compose.mainClock.advanceTimeBy(1000)
         compose.onNodeWithTag("pending-sync-badge", useUnmergedTree = true).assertDoesNotExist()
         compose.onNodeWithTag("note-pending-sync-${pending.id.value}", useUnmergedTree = true).assertDoesNotExist()
+        // An edit on its way to the Source is not a problem worth showing, however long typing lasts.
+        compose.runOnIdle { state.value = state.value.copy(notes = listOf(pending.copy(syncFailed = false))) }
+        compose.mainClock.advanceTimeBy(SyncNoticeSettledMillis)
+        compose.onNodeWithTag("note-pending-sync-${pending.id.value}", useUnmergedTree = true).assertDoesNotExist()
+        // A failed attempt shows only after it has stayed unresolved.
         compose.runOnIdle { state.value = state.value.copy(notes = listOf(pending), pendingSyncCount = 8) }
-        compose.mainClock.advanceTimeBy(64)
+        compose.mainClock.advanceTimeBy(1000)
+        compose.onNodeWithTag("note-pending-sync-${pending.id.value}", useUnmergedTree = true).assertDoesNotExist()
+        compose.mainClock.advanceTimeBy(SyncNoticeSettledMillis - 1000 + 64)
         val tags = listOf("pending-sync-badge", "note-pending-sync-${pending.id.value}")
         fun colors(): List<Color> {
             val pixels = compose.onRoot().captureToImage().toPixelMap()
@@ -2036,6 +2044,7 @@ class KgsNotesScreenTest {
                 )
             }
         }
+        compose.mainClock.advanceTimeBy(SyncNoticeSettledMillis)
 
         compose.onNodeWithContentDescription("All notes").assertIsDisplayed()
         compose.onNodeWithContentDescription("Favorite notes").assertIsDisplayed()
@@ -2812,3 +2821,6 @@ class KgsNotesScreenTest {
         override suspend fun close(id: NoteId) = Unit
     }
 }
+
+/** The library shows sync notices only after a stalled sync stays unresolved for four seconds. */
+private const val SyncNoticeSettledMillis = 4_100L
