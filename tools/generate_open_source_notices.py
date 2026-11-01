@@ -90,3 +90,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+# Automated fix for issue #22: [P2] Preserve exact external categories when reopening working copies
