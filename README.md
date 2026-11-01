@@ -35,12 +35,43 @@ corepack pnpm install --frozen-lockfile
 corepack pnpm build
 ```
 
-Run the focused behavioral suites with:
+`tools/dev-env.sh` resolves the SDK, AVD, and JDK locations without any private
+configuration. It honours `KGS_NOTES_ANDROID_SDK_ROOT`, `ANDROID_SDK_ROOT`,
+`ANDROID_HOME`, `sdk.dir` in `local.properties`, and the conventional
+`~/Android/Sdk`; `KGS_NOTES_JAVA_HOME` selects the JDK. Check a machine with:
 
 ```bash
-./gradlew :notes-engine:test :source:nextcloud:test :editor:testDebugUnitTest
-./gradlew :app:connectedDebugAndroidTest
+tools/dev-env.sh                  # prints the resolved environment and readiness
+source tools/dev-env.sh           # exports it into the current shell
 ```
+
+A cold Gradle configuration compiles the Kotlin build scripts and can take
+several minutes on a busy machine; run it online once so the plugin markers are
+cached before using `--offline`.
+
+Run the JVM suites, lint, and both APKs as CI does:
+
+```bash
+./gradlew :notes-engine:test :source:nextcloud:test :editor:testDebugUnitTest :app:testDebugUnitTest \
+    :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest
+bash tools/test-android-emulator.sh   # emulator helper fixture tests; no SDK needed
+```
+
+Run instrumentation tests on a connected emulator or device. Named suites keep
+CI and local runs aligned (`full`, `core`, `minimum`, `adaptive`, `security`):
+
+```bash
+ANDROID_SERIAL=emulator-5554 ./gradlew :app:connectedDebugAndroidTest $(tools/instrumentation-suites.sh core)
+tools/android-emulator.sh start && tools/android-emulator.sh connected-test   # managed API 36 AVD
+```
+
+CI compiles the instrumentation APK on every pull request and runs an offline
+emulator matrix: API 26 (minimum supported) with the `minimum` suite, API 36
+phone with the full suite, and an API 36 tablet with the `adaptive` suite.
+German chrome and tablet/foldable sizes are also forced inside the suites.
+Reports and logcat are kept as workflow artifacts. The live Nextcloud tests in
+`source/nextcloud` run only when the `KGS_TEST_NEXTCLOUD_*` variables point at a
+disposable local HTTPS server; CI never provides them.
 
 ## Principles
 
