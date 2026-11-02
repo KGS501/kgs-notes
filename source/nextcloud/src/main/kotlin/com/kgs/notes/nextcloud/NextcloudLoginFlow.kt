@@ -66,7 +66,7 @@ class HttpNextcloudLoginFlow(
             if (!response.isSuccessful) {
                 throw NextcloudConnectionException(NextcloudConnectionFailure.SERVER_REJECTED_REQUEST)
             }
-            val root = parseObject(response.body.string())
+            val root = parseObject(response.body.boundedString(ResponseLimits.SMALL_DOCUMENT_BYTES))
             val poll = root["poll"]?.jsonObject
                 ?: throw NextcloudConnectionException(NextcloudConnectionFailure.INVALID_RESPONSE)
             val token = poll.string("token")
@@ -96,7 +96,7 @@ class HttpNextcloudLoginFlow(
             if (!response.isSuccessful) {
                 throw NextcloudConnectionException(NextcloudConnectionFailure.SERVER_REJECTED_REQUEST)
             }
-            val root = parseObject(response.body.string())
+            val root = parseObject(response.body.boundedString(ResponseLimits.SMALL_DOCUMENT_BYTES))
             NextcloudCredentials(
                 serverUrl = requireHttpsUrl(root.string("server")).toString(),
                 loginName = root.string("loginName"),

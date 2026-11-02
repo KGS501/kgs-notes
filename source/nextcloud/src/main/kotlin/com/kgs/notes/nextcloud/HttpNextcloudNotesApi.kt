@@ -72,6 +72,7 @@ class HttpNextcloudNotesApi(
         val cursors = hashSetOf<String>()
         var cursor: String? = null
         var chunks = 0
+        var listedBytes = 0L
         do {
             val endpointBuilder = requireNotNull(serverUrl.resolve("index.php/apps/notes/api/v1/notes"))
                 .newBuilder()
@@ -80,7 +81,12 @@ class HttpNextcloudNotesApi(
             val request = authenticatedRequest(endpointBuilder.build()).get().build()
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) throw NextcloudApiException(response.code)
-                parseNotes(response.body.string()).forEach { element ->
+                val page = response.body.boundedString(ResponseLimits.NOTES_RESPONSE_BYTES)
+                listedBytes += page.length
+                if (listedBytes > ResponseLimits.NOTES_LISTING_BYTES) {
+                    throw NextcloudConnectionException(NextcloudConnectionFailure.INVALID_RESPONSE)
+                }
+                parseNotes(page).forEach { element ->
                     val id = element.requiredLong("id")
                     referencedIds += id
                     // The terminal chunk also includes id-only references to
@@ -174,7 +180,7 @@ class HttpNextcloudNotesApi(
 
     private fun executeObject(request: Request, via: OkHttpClient = client): JsonObject = via.newCall(request).execute().use { response ->
         if (!response.isSuccessful) throw NextcloudApiException(response.code)
-        parseElement(response.body.string()).jsonObject
+        parseElement(response.body.boundedString(ResponseLimits.NOTES_RESPONSE_BYTES)).jsonObject
     }
 
     private fun parseNotes(value: String): List<JsonObject> {
