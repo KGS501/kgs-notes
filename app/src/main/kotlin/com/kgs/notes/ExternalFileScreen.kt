@@ -60,6 +60,8 @@ import com.kgs.notes.design.LocalKgsSheetDock
 import com.kgs.notes.design.kgsSheetControls
 import com.kgs.notes.design.kgsHorizontalTextFade
 import com.kgs.notes.editor.EditorMode
+import androidx.compose.ui.platform.LocalContext
+import com.kgs.notes.engine.LocalSourceId
 import com.kgs.notes.editor.KgsMarkdownEditor
 import com.kgs.notes.engine.SourceId
 import androidx.compose.ui.unit.dp
@@ -81,6 +83,7 @@ internal fun ExternalFileScreen(
     onEditOriginal: () -> Unit = {},
 ) {
     val strings = androidx.compose.ui.platform.LocalResources.current
+    val context = LocalContext.current
 
     val fallbackDock = remember { KgsSheetDock() }
     val dock = LocalKgsSheetDock.current ?: fallbackDock
@@ -182,6 +185,8 @@ internal fun ExternalFileScreen(
                     allowRemoteResources = false,
                     readOnly = !file.writable || file.copying || file.closing || freezingInput,
                     onSnapshotReaderReady = { snapshotReader[0] = it },
+                    // An opened file isn't part of the library, so only outside links can open.
+                    onOpenLink = { href -> context.openLinkTarget(resolveNoteLink(href, LocalSourceId, "", emptyList())) },
                     modifier = Modifier.weight(1f).fillMaxWidth(),
                 )
             } else Spacer(Modifier.weight(1f))

@@ -210,6 +210,7 @@ import com.kgs.notes.design.fastSpatialSpec
 import com.kgs.notes.design.rememberKgsHapticClick
 import com.kgs.notes.design.collectIsVisuallyPressedAsState
 import com.kgs.notes.editor.EditorMode
+import com.kgs.notes.editor.EditorPosition
 import androidx.compose.foundation.isSystemInDarkTheme
 import com.kgs.notes.editor.KgsMarkdownEditor
 import com.kgs.notes.engine.Note
@@ -274,6 +275,11 @@ data class NotesActions(
     val onRefreshSources: () -> Unit = {},
     val onEditSourceConnection: (SourceId) -> Unit = {},
     val onOpenProjectLink: (String) -> Unit = {},
+    /** A link tapped in [Note]: another Note opens here, anything else outside the app. */
+    val onOpenLink: (Note, String) -> Unit = { _, _ -> },
+    /** Where each Note was last read, kept while the app runs so recreated editors return there. */
+    val editorPosition: (NoteId) -> EditorPosition? = { null },
+    val onEditorPositionChange: (NoteId, EditorPosition) -> Unit = { _, _ -> },
     /** Copies the open Note, with any unsaved draft, into a new Local Note; works offline. */
     val onCopyToLocal: () -> Unit = {},
     val onExport: () -> Unit = {},
@@ -427,6 +433,14 @@ fun KgsNotesApp(viewModel: NotesViewModel, onExternalPreviewClosed: () -> Unit =
                 onCopyPendingNotesToLocal = viewModel::copyPendingNotesToLocal,
                 onRescueUnreadableRecord = viewModel::rescueUnreadableRecord,
                 onDiscardUnreadableRecord = viewModel::discardUnreadableRecord,
+                onOpenLink = { note, href ->
+                    when (val target = viewModel.resolveLink(note, href)) {
+                        is NoteLinkTarget.Note -> viewModel.selectNote(target.id)
+                        else -> context.openLinkTarget(target)
+                    }
+                },
+                editorPosition = viewModel::editorPosition,
+                onEditorPositionChange = viewModel::rememberEditorPosition,
                 onOpenProjectLink = { url ->
                     runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
                         .onFailure { android.widget.Toast.makeText(context, strings.getString(UiR.ui_no_browser_is_available), android.widget.Toast.LENGTH_SHORT).show() }
@@ -1040,6 +1054,7 @@ private fun NotesActions.forPane(pane: NotePane): NotesActions {
         onExport = focused(onExport),
         onRetrySave = focused(onRetrySave),
         onDiscardUnsavedChanges = focused(onDiscardUnsavedChanges),
+        onOpenLink = { note, href -> onActivatePane(pane); onOpenLink(note, href) },
     )
 }
 
@@ -3161,9 +3176,13 @@ private fun EditorPane(
         if (note.state == NoteState.TRASHED) {
             TrashedNote(note, actions, Modifier.fillMaxSize())
         } else {
+            key(note.id) {
             KgsMarkdownEditor(
                 markdown = note.markdown,
                 requestedMode = state.editorMode,
+                initialPosition = remember { actions.editorPosition(note.id) },
+                onPositionChange = { actions.onEditorPositionChange(note.id, it) },
+                onOpenLink = { actions.onOpenLink(note, it) },
                 onMarkdownChange = actions.onContentChange,
                 onModeChange = actions.onEditorModeChange,
                 onAddImage = actions.onAddImage,
@@ -3187,6 +3206,7 @@ private fun EditorPane(
                     }
                 },
             )
+            }
         }
     }
     }

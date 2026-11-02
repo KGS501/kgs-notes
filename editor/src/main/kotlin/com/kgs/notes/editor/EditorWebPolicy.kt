@@ -57,6 +57,19 @@ internal object EditorWebPolicy {
 
     fun allowsTopLevelNavigation(url: String?): Boolean = isEditorDocument(url)
 
+    private val EXTERNAL_LINK_SCHEMES = setOf("http", "https", "mailto", "tel", "sms", "geo")
+
+    /**
+     * A navigation the page tried on its own, as a link the host may open outside the editor.
+     * Bundled-asset addresses are relative links the page already reported, so they're dropped.
+     */
+    fun externalLink(url: String?): String? {
+        val uri = parse(url ?: return null) ?: return null
+        if (uri.scheme?.lowercase() !in EXTERNAL_LINK_SCHEMES) return null
+        if (uri.rawAuthority == ASSET_HOST) return null
+        return url
+    }
+
     /** A main-frame request is permitted only for the editor document itself. */
     fun allowsMainFrameRequest(url: String?): Boolean = isEditorDocument(url)
 

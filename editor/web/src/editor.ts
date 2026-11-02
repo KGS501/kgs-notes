@@ -375,5 +375,45 @@ function focus() {
   editor.view.focus()
 }
 
-window.kgsEditor = { load, markdown: exactMarkdown, setDarkMode, setLabels, run, focus, ...viewportBridge(editor, exactMarkdown) }
+const viewportAccess = viewportBridge(editor, exactMarkdown)
+
+// The host remembers where each Note was read, so a recreated editor (a fold,
+// rotation or relaunch) can return to the same content.
+let viewportReport = 0
+function reportViewport() {
+  window.clearTimeout(viewportReport)
+  viewportReport = window.setTimeout(() => {
+    try { post({ type: 'viewport', viewport: viewportAccess.viewport() }) } catch { /* layout not ready */ }
+  }, 150)
+}
+window.addEventListener('scroll', reportViewport, { passive: true })
+editor.on('selectionUpdate', reportViewport)
+
+// Links never navigate the editor document: the host opens Notes in the app and
+// everything else outside it. A tap while typing still places the caret, so
+// linked text stays editable; a tap while reading opens the link.
+let linkTap: { id: number; x: number; y: number; href: string } | null = null
+paper.addEventListener('pointerdown', event => {
+  linkTap = null
+  const link = (event.target as Element | null)?.closest?.('a[href]')
+  if (!link || event.button !== 0 || (editor.isEditable && editor.isFocused)) return
+  linkTap = { id: event.pointerId, x: event.clientX, y: event.clientY, href: link.getAttribute('href') ?? '' }
+  // Keep the keyboard closed: the tap opens the link instead of focusing it.
+  event.preventDefault()
+}, true)
+paper.addEventListener('pointermove', event => {
+  if (linkTap && Math.hypot(event.clientX - linkTap.x, event.clientY - linkTap.y) > 8) linkTap = null
+}, true)
+paper.addEventListener('pointercancel', () => { linkTap = null }, true)
+paper.addEventListener('pointerup', event => {
+  const tap = linkTap
+  linkTap = null
+  if (!tap || tap.id !== event.pointerId || Math.hypot(event.clientX - tap.x, event.clientY - tap.y) > 8) return
+  if (tap.href.trim()) post({ type: 'openLink', href: tap.href })
+}, true)
+document.addEventListener('click', event => {
+  if ((event.target as Element | null)?.closest?.('a[href]')) event.preventDefault()
+}, true)
+
+window.kgsEditor = { load, markdown: exactMarkdown, setDarkMode, setLabels, run, focus, ...viewportAccess }
 post({ type: 'ready' })

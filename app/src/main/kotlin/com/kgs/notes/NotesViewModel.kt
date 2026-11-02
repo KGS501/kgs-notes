@@ -9,6 +9,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.kgs.notes.editor.DefaultMarkdownEditor
 import com.kgs.notes.editor.EditorMode
+import com.kgs.notes.editor.EditorPosition
 import com.kgs.notes.editor.MarkdownAttachment
 import com.kgs.notes.editor.MarkdownSelection
 import com.kgs.notes.engine.AttachmentImport
@@ -469,6 +470,17 @@ class NotesViewModel internal constructor(
             setSlotEditorMode(s, controls.value.defaultEditorMode)
         }
     }
+
+    private val editorPositions = mutableMapOf<NoteId, EditorPosition>()
+
+    fun editorPosition(id: NoteId): EditorPosition? = editorPositions[id]
+
+    fun rememberEditorPosition(id: NoteId, position: EditorPosition) {
+        editorPositions[id] = position
+    }
+
+    fun resolveLink(from: Note, href: String): NoteLinkTarget =
+        resolveNoteLink(href, from.sourceId, from.category, engine.library.value.active)
 
     fun selectNote(id: NoteId) {
         // One Editing Session per Note: a Note already open on the other page is focused there.
