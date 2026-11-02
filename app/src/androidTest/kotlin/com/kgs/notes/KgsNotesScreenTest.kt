@@ -911,13 +911,21 @@ class KgsNotesScreenTest {
         val firstTop = compose.onNodeWithTag("note-card-${notes[0].id.value}").fetchSemanticsNode().boundsInRoot.top
         val survivor = compose.onNodeWithTag("note-card-${notes[2].id.value}")
         compose.runOnIdle { state.value = state.value.copy(notes = notes.drop(1)) }
-        compose.mainClock.advanceTimeBy(80)
+        compose.mainClock.advanceTimeBy(64)
+        val previousFrame = survivor.fetchSemanticsNode().boundsInRoot
+        compose.mainClock.advanceTimeByFrame()
         val moving = survivor.fetchSemanticsNode().boundsInRoot
         compose.runOnIdle { state.value = state.value.copy(notes = notes.drop(2)) }
         compose.mainClock.advanceTimeByFrame()
         val retargeted = survivor.fetchSemanticsNode().boundsInRoot
-        assertTrue("A second removal must continue from the visible position, without a jump",
-            kotlin.math.abs(retargeted.top - moving.top) < moving.height / 10f)
+        // The frame that picks up the second removal may still carry the first reflow's
+        // motion, so compare with the speed the card already had rather than demanding a
+        // stationary frame. A jump (to either target or back to the start) moves a card height.
+        val speed = kotlin.math.abs(moving.top - previousFrame.top)
+        val step = moving.top - retargeted.top
+        assertTrue("A second removal must continue from the visible position, without a jump " +
+            "(${previousFrame.top} -> ${moving.top} -> ${retargeted.top})",
+            step >= -1f && step <= 2f * speed + moving.height / 10f && retargeted.top > firstTop)
         compose.mainClock.advanceTimeBy(1000)
         assertEquals(firstTop, survivor.fetchSemanticsNode().boundsInRoot.top, 1f)
         compose.onNodeWithTag("note-card-${notes[0].id.value}").assertDoesNotExist()
@@ -2625,13 +2633,21 @@ class KgsNotesScreenTest {
         compose.mainClock.advanceTimeBy(80)
         compose.onNodeWithContentDescription("Rename").assertIsDisplayed()
         val during = compose.onNodeWithContentDescription("Favourite").fetchSemanticsNode().boundsInRoot.center.x
-        compose.mainClock.advanceTimeBy(160)
-        val nearlyDone = compose.onNodeWithContentDescription("Favourite").fetchSemanticsNode().boundsInRoot.center.x
-        compose.mainClock.advanceTimeBy(500)
+        // Follow the reflow frame by frame instead of sampling at a fixed time, so the
+        // check does not depend on which frame the 260 ms fade happened to start on.
+        val positions = mutableListOf(during)
+        repeat(60) {
+            compose.mainClock.advanceTimeByFrame()
+            positions += compose.onNodeWithContentDescription("Favourite").fetchSemanticsNode().boundsInRoot.center.x
+        }
         compose.onNodeWithContentDescription("Rename").assertDoesNotExist()
-        val after = compose.onNodeWithContentDescription("Favourite").fetchSemanticsNode().boundsInRoot.center.x
+        val after = positions.last()
         assertTrue("Neighboring actions must move continuously while Rename disappears", during < before && during > after)
-        assertEquals("Removing the last invisible slot must not cause a final position jump", nearlyDone, after, 2f)
+        val steps = positions.zipWithNext { previous, next -> previous - next }
+        assertTrue("Actions must only move towards their final slots: $positions", steps.all { it >= -.5f })
+        val lastMove = steps.indexOfLast { kotlin.math.abs(it) > .01f }
+        assertTrue("Removing the last invisible slot must not cause a final position jump: $positions",
+            lastMove < 0 || steps[lastMove] < 2f)
     }
 
     @Test
