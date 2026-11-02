@@ -101,9 +101,11 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.ScrollAxisRange
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.verticalScrollAxisRange
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.layout.onSizeChanged
@@ -498,6 +500,15 @@ private fun SourceMarkdownEditor(
                 .graphicsLayer { alpha = opacity }
                 .onSizeChanged { viewportSize = it }
                 .focusRequester(focusRequester)
+                // BasicTextField offers ScrollBy for its internal scroll but reports no
+                // position. Publish it, like the library list does, so accessibility
+                // services (and tests) can tell where in a long Note the reader is.
+                .semantics {
+                    verticalScrollAxisRange = ScrollAxisRange(
+                        value = { scroll.value.toFloat() },
+                        maxValue = { scroll.maxValue.toFloat() },
+                    )
+                }
                 .testTag("source-editor"),
         )
     }
