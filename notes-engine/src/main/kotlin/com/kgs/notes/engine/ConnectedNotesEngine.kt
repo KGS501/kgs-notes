@@ -1338,7 +1338,13 @@ class ConnectedNotesEngine private constructor(
                 Files.list(recoveryRoot).use { dirs -> dirs.iterator().asSequence().filter { it.isDirectory() }.sorted().toList() }
                     .forEach { directory ->
                         val known = unreadable.any { it.id == WORKING_COPY_RECORD_PREFIX + directory.fileName }
-                        if (!known) readRecoveryRecord(directory)?.let { record ->
+                        if (known) return@forEach
+                        val record = readRecoveryRecord(directory) ?: return@forEach
+                        val restored = record.takeIf { it.reason == UnreadableReason.UNSUPPORTED_VERSION }
+                            ?.let { restoreSupportedRecord(root, directory, loaded) }
+                        if (restored != null) {
+                            loaded[restored.id] = restored
+                        } else {
                             unreadable += record
                             record.noteId?.let(quarantined::add)
                         }
@@ -1391,6 +1397,29 @@ class ConnectedNotesEngine private constructor(
                 runCatching { directory.deleteIfExists() }
                 describe(sourceFiles, "notes/$stem")
             }
+        }
+
+        /**
+         * A record quarantined only because its schema was newer than this version (for example after a
+         * downgrade) returns to the live store once it can be read, unless its identity was reused meanwhile.
+         */
+        private fun restoreSupportedRecord(root: Path, directory: Path, loaded: Map<NoteId, WorkingCopy>): WorkingCopy? {
+            val evidence = runCatching {
+                Files.list(directory).use { paths -> paths.iterator().asSequence().filter { it.extension == "properties" }.toList() }
+            }.getOrNull()?.singleOrNull() ?: return null
+            val copy = try {
+                readWorkingCopy(root, evidence)
+            } catch (_: RecordLoadFailure) {
+                return null
+            }
+            val live = root.resolve("notes/${copy.id.value}.properties")
+            if (copy.id in loaded || live.exists()) return null
+            return runCatching {
+                Files.move(evidence, live)
+                directory.resolve(RECOVERY_DESCRIPTOR).deleteIfExists()
+                directory.deleteIfExists()
+                copy
+            }.getOrNull()
         }
 
         private fun readRecoveryRecord(directory: Path): UnreadableRecord? = runCatching {

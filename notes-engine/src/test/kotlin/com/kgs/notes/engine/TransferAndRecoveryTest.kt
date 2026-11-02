@@ -422,6 +422,30 @@ class TransferAndRecoveryTest {
         assertTrue(open().unreadableRecords.value.isEmpty())
     }
 
+    @Test
+    fun `a Working Copy from a newer schema is preserved and returns once it can be read again`() = runBlocking {
+        val source = FakeSource(SourceId("cloud"), listOf(SourceNote("1", "r0", "Remote", "server body", "", false, Instant.EPOCH, false)))
+        val engine = connected(source)
+        val id = engine.library.value.active.single().id
+        engine.updateContent(id, "unsynced edit")
+        val record = workingRoot.resolve("notes/${id.value}.properties")
+        val current = record.readText()
+        record.writeText(current.replace("schema=2", "schema=9"))
+
+        val older = open()
+        assertEquals(UnreadableReason.UNSUPPORTED_VERSION, older.unreadableRecords.value.single().reason)
+        assertNull(older.note(id))
+
+        // "Upgrade": the preserved record becomes readable and returns with its unsynchronized edit.
+        val preserved = Paths.get(older.unreadableRecords.value.single().files.single { it.endsWith(".properties") })
+        preserved.writeText(preserved.readText().replace("schema=9", "schema=2"))
+        val upgraded = open().also { it.attachSource(source) }
+        assertTrue(upgraded.unreadableRecords.value.isEmpty())
+        assertEquals("unsynced edit", assertNotNull(upgraded.note(id)).markdown)
+        upgraded.synchronize(id)
+        assertEquals("unsynced edit", source.server("1").markdown)
+    }
+
     // ------------------------------------------------------------------ #44 attachment paths
 
     @Test
