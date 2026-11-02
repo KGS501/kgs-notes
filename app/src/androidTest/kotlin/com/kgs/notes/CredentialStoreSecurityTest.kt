@@ -44,7 +44,7 @@ class CredentialStoreSecurityTest {
     @Test fun storedFilesNeverContainCredentialsInPlainText() {
         NextcloudAccountStore(root).save("Security test", credentials)
 
-        val files = Files.walk(root).use { paths -> paths.filter(Files::isRegularFile).toList() }
+        val files = Files.walk(root).use { paths -> paths.filter(Files::isRegularFile).collect(java.util.stream.Collectors.toList()) }
         assertEquals("Expected one profile and one sealed secret", 2, files.size)
         for (file in files) {
             val bytes = file.readBytes()

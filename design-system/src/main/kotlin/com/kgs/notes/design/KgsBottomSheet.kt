@@ -85,6 +85,8 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.layout.positionOnScreen
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.window.DialogWindowProvider
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
@@ -137,7 +139,8 @@ fun Modifier.kgsSheetDock(dock: KgsSheetDock?): Modifier =
     }
 
 /**
- * The window bounds of the pane a sheet opens from. In a split screen, sheets rise from the
+ * The on-screen bounds of the pane a sheet opens from. Screen coordinates, because the sheet
+ * draws in its own window, whose origin differs from the app window's on some Android versions. In a split screen, sheets rise from the
  * bottom of their own pane, as if that pane were the whole app, instead of the window's middle.
  */
 class KgsSheetRegion {
@@ -155,7 +158,7 @@ val LocalKgsSheetRegion = staticCompositionLocalOf<KgsSheetRegion?> { null }
 
 fun Modifier.kgsSheetRegion(region: KgsSheetRegion?): Modifier =
     if (region == null) this else onGloballyPositioned {
-        val position = it.positionInWindow()
+        val position = it.positionOnScreen()
         region.left = position.x
         region.top = position.y
         region.width = it.size.width.toFloat()
@@ -329,6 +332,8 @@ fun KgsBottomSheet(
             }
         }
         val sideRegion = region?.takeIf { it.known }
+        // Where this sheet's own window starts on screen, to place the pane region inside it.
+        var frameOrigin by remember { mutableStateOf(Offset.Zero) }
         // Modal sheets live in their own window; convert pane pixels with that window's density.
         val sheetDensity = LocalDensity.current
         BoxWithConstraints((if (sideRegion != null) Modifier.fillMaxSize() else if (dock != null) {
@@ -337,13 +342,16 @@ fun KgsBottomSheet(
             Modifier.offset(x = paneLeft).then(if (paneWidth > 0.dp) Modifier.width(paneWidth) else Modifier.fillMaxWidth())
                 .requiredHeight(dockHeight).clipToBounds()
         } else if (modal) Modifier.fillMaxSize() else Modifier.fillMaxWidth())
+            .onGloballyPositioned { frameOrigin = it.positionOnScreen() }
             .testTag("kgs-sheet-frame")
             .then(if (dock != null || sideRegion != null) Modifier else if (modal && focusable) Modifier.imePadding() else Modifier.padding(bottom = parentKeyboard))) {
             val windowHeight = maxHeight
             val navigationBar = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
             val statusBar = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
             // Within a pane, system bars and the keyboard count only where they cover that pane.
-            val paneTop = with(sheetDensity) { (sideRegion?.top ?: 0f).toDp() }
+            val regionLeft = (sideRegion?.left ?: 0f) - frameOrigin.x
+            val regionTop = (sideRegion?.top ?: 0f) - frameOrigin.y
+            val paneTop = with(sheetDensity) { (if (sideRegion != null) regionTop else 0f).toDp() }
             val paneHeight = with(sheetDensity) { (sideRegion?.height ?: 0f).toDp() }
             val paneBottom = paneTop + paneHeight
             val navigation = when {
@@ -363,7 +371,7 @@ fun KgsBottomSheet(
             }
             val sheetShape = RoundedCornerShape(topStart = 30.dp, topEnd = 30.dp)
             Box(if (sideRegion != null) {
-                Modifier.offset { IntOffset(sideRegion.left.roundToInt(), sideRegion.top.roundToInt()) }
+                Modifier.offset { IntOffset(regionLeft.roundToInt(), regionTop.roundToInt()) }
                     .size(with(sheetDensity) { sideRegion.width.toDp() }, paneHeight)
                     .padding(bottom = keyboard)
                     // The sheet slides out of its own pane, never across the other one.
