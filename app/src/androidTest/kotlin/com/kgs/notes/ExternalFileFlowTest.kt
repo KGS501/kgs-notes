@@ -377,7 +377,12 @@ class ExternalFileFlowTest {
             fixture.viewModel.openExternalFile(ExternalFileRequest.from(
                 Intent(Intent.ACTION_VIEW).setDataAndType(secondUri, "text/plain"))!!)
         }
-        compose.waitUntil(5_000) { fixture.viewModel.state.value.externalFile?.sessionKey?.let { it != previousKey } == true }
+        // Wait for the second file to finish loading: its own permission probe must run before
+        // the fixture starts granting write access, or it legitimately reports a writable file.
+        compose.waitUntil(5_000) {
+            fixture.viewModel.state.value.externalFile?.let { it.sessionKey != previousKey && !it.loading && it.text == "Same contents" } == true
+        }
+        assertEquals(false, fixture.viewModel.state.value.externalFile!!.writable)
         fixture.application.writable = true
         compose.runOnIdle { fixture.picker.dispatchResult(firstPicker, Activity.RESULT_OK, Intent().setData(fixture.provider.uri)) }
         compose.waitForIdle()
