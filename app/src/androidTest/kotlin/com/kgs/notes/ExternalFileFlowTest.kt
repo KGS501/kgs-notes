@@ -212,8 +212,8 @@ class ExternalFileFlowTest {
         compose.waitForIdle()
         assertEquals(true, fixture.viewModel.state.value.externalFile!!.dirty)
         compose.onNodeWithContentDescription("Close file").performClick()
-        compose.onNodeWithText("Keep editing").assertExists()
-        compose.onNodeWithText("Keep editing").performClick()
+        compose.onNodeWithText("Keep editing", useUnmergedTree = true).assertExists()
+        compose.onNodeWithText("Keep editing", useUnmergedTree = true).performClick()
         assertEquals(key, fixture.viewModel.state.value.externalFile!!.sessionKey)
         // Reopening the same document keeps the full text instead of adopting the empty provider copy.
         compose.runOnIdle {

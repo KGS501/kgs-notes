@@ -517,6 +517,11 @@ class NoteSafetyFlowTest {
         override fun query(uri: Uri, projection: Array<out String>?, selection: String?, selectionArgs: Array<out String>?, sortOrder: String?): Cursor =
             MatrixCursor(arrayOf(OpenableColumns.DISPLAY_NAME)).apply { addRow(arrayOf("Pine.png")) }
         override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor {
+            // ContentResolver.wrap routes every URI here; export destinations are plain files, opened as
+            // the platform resolver opens file URIs.
+            if (uri.scheme == ContentResolver.SCHEME_FILE) {
+                return ParcelFileDescriptor.open(File(uri.path!!), ParcelFileDescriptor.parseMode(mode))
+            }
             val file = File.createTempFile("image", ".png", context!!.cacheDir).apply { writeBytes(bytes); deleteOnExit() }
             return ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
         }

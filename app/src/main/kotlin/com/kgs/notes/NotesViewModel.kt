@@ -854,7 +854,8 @@ class NotesViewModel internal constructor(
                 showMessage(UiR.ui_the_note_was_exported)
             } catch (cancelled: CancellationException) {
                 throw cancelled
-            } catch (_: Exception) {
+            } catch (failure: Exception) {
+                android.util.Log.w("KgsNotes", "Note export failed", failure)
                 val removed = withContext(NonCancellable + Dispatchers.IO) {
                     runCatching { android.provider.DocumentsContract.deleteDocument(resolver, destination) }.getOrDefault(false)
                 }
