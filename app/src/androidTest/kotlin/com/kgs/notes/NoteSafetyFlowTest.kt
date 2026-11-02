@@ -25,6 +25,13 @@ import com.kgs.notes.engine.Note
 import com.kgs.notes.engine.NoteId
 import com.kgs.notes.engine.NotesEngine
 import com.kgs.notes.engine.SourceId
+import java.time.Instant
+import kotlinx.coroutines.flow.MutableStateFlow
+import com.kgs.notes.engine.SourceNoteDraft
+import com.kgs.notes.engine.SourceNote
+import com.kgs.notes.engine.SourceDescriptor
+import com.kgs.notes.engine.SourceCapabilities
+import com.kgs.notes.engine.NoteState
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -283,6 +290,71 @@ class NoteSafetyFlowTest {
         main { f.vm.updateContent(f.vm.state.value.selectedNote!!.markdown + "\n\nZucchini") }
         main { f.vm.setQuery("zucchini") }
         waitUntil { f.vm.state.value.notes.map { it.id } == listOf(shopping) }
+    }
+
+    // #16: explicit Trash intent survives a save that lands around the Trash action, on an external Source.
+
+    @Test
+    fun aDraftSavedAroundTrashKeepsAnExternalNoteTrashedUntilRestore() {
+        for (bulk in listOf(false, true)) for (typeAfterTrash in listOf(false, true)) {
+            val f = fixture()
+            val server = TrashTestSource()
+            runBlocking { f.inner.attachSource(server); f.inner.refreshSources() }
+            val id = f.inner.library.value.active.single { it.sourceId == server.descriptor.id }.id
+            f.open(id)
+            val case = "bulk=$bulk typeAfterTrash=$typeAfterTrash"
+            main {
+                if (!typeAfterTrash) f.vm.updateContent("Shared body typed before Trash")
+                if (bulk) f.vm.applyToNotes(setOf(id), NoteSelectionOperation.TRASH) else f.vm.moveToTrash()
+                // A keystroke whose debounce fires after the Trash request.
+                if (typeAfterTrash) f.vm.updateContent("Shared body typed after Trash")
+            }
+            settle()
+            waitUntil { f.stored(id).state == NoteState.TRASHED && server.notes.value.isEmpty() }
+            settle()
+
+            assertEquals(case, NoteState.TRASHED, f.stored(id).state)
+            assertEquals(case, NoteState.TRASHED, f.reopenedNote(id).state)
+            assertTrue(case, server.notes.value.isEmpty())
+            assertEquals(case, 1, server.deletes)
+            assertEquals(case, 0, server.creates)
+
+            // Only Restore reverses it, republishing what was kept locally.
+            runBlocking { f.inner.restore(id); f.inner.synchronize(id) }
+            assertEquals(case, NoteState.ACTIVE, f.stored(id).state)
+            assertEquals(case, f.stored(id).markdown, server.notes.value.single().markdown)
+            main { viewModels.clear() }
+        }
+    }
+
+    /** A minimal Notes server: one existing Note, creates and deletes counted. */
+    private class TrashTestSource : Source {
+        override val descriptor = SourceDescriptor(SourceId("trash-test-server"), "Test cloud",
+            SourceCapabilities(markdown = true, categories = true, favorites = true, attachments = false, writable = true))
+        override val notes = MutableStateFlow(listOf(
+            SourceNote("1", "r1", "Shared", "Shared body", "", false, Instant.parse("2026-08-24T08:00:00Z"), false),
+        ))
+        @Volatile var creates = 0
+        @Volatile var deletes = 0
+        private var revision = 1
+        override suspend fun refresh() {}
+        override suspend fun createNote(note: SourceNoteDraft): SourceNote {
+            creates++
+            return SourceNote("c$creates", "r${++revision}", note.title, note.markdown, note.category, note.favorite, note.modifiedAt, false)
+                .also { notes.value = notes.value + it }
+        }
+        override suspend fun updateNote(remoteId: String, expectedRevision: String, note: SourceNoteDraft): SourceNote {
+            val current = notes.value.single { it.remoteId == remoteId }
+            if (current.revision != expectedRevision) throw com.kgs.notes.engine.SourceConflictException()
+            return current.copy(revision = "r${++revision}", title = note.title, markdown = note.markdown, category = note.category,
+                favorite = note.favorite, modifiedAt = note.modifiedAt).also { updated ->
+                notes.value = notes.value.map { if (it.remoteId == remoteId) updated else it }
+            }
+        }
+        override suspend fun deleteNote(remoteId: String, expectedRevision: String) {
+            if (notes.value.any { it.remoteId == remoteId }) deletes++
+            notes.value = notes.value.filterNot { it.remoteId == remoteId }
+        }
     }
 
     // #12: offline copy and export.
