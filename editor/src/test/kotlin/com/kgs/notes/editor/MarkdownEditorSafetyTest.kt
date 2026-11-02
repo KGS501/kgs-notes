@@ -156,4 +156,50 @@ class MarkdownEditorSafetyTest {
             result.markdown,
         )
     }
+
+    private val lineMarkers = mapOf(
+        MarkdownCommand.HEADING_2 to "## ",
+        MarkdownCommand.BULLET_LIST to "- ",
+        MarkdownCommand.NUMBERED_LIST to "1. ",
+        MarkdownCommand.TASK_LIST to "- [ ] ",
+        MarkdownCommand.BLOCKQUOTE to "> ",
+    )
+
+    @Test
+    fun `line marker commands at offset zero format an empty first line without crashing`() {
+        for ((command, marker) in lineMarkers) {
+            for (leading in listOf("\n", "\n\n", "\n\n\n")) {
+                val markdown = "${leading}Text"
+                val result = editor.applyCommand(markdown, MarkdownSelection(0, 0), command)
+                assertEquals("$command after ${leading.length} newlines", "$marker${leading}Text", result.markdown)
+                assertEquals("$command caret", MarkdownSelection(marker.length, marker.length), result.selection)
+            }
+        }
+    }
+
+    @Test
+    fun `line marker commands keep empty-note and later-line behavior`() {
+        for ((command, marker) in lineMarkers) {
+            val empty = editor.applyCommand("", MarkdownSelection(0, 0), command)
+            assertEquals(marker, empty.markdown)
+            assertEquals(MarkdownSelection(marker.length, marker.length), empty.selection)
+
+            val firstLine = editor.applyCommand("Text", MarkdownSelection(0, 0), command)
+            assertEquals("${marker}Text", firstLine.markdown)
+            assertEquals(MarkdownSelection(marker.length, marker.length), firstLine.selection)
+
+            // The caret after a leading newline belongs to the second line.
+            val secondLine = editor.applyCommand("\nText", MarkdownSelection(1, 1), command)
+            assertEquals("\n${marker}Text", secondLine.markdown)
+            assertEquals(MarkdownSelection(1 + marker.length, 1 + marker.length), secondLine.selection)
+
+            val middle = editor.applyCommand("First\nSecond\nThird", MarkdownSelection(9, 9), command)
+            assertEquals("First\n${marker}Second\nThird", middle.markdown)
+            assertEquals(MarkdownSelection(9 + marker.length, 9 + marker.length), middle.selection)
+
+            val selected = editor.applyCommand("First\nSecond", MarkdownSelection(6, 12), command)
+            assertEquals("First\n${marker}Second", selected.markdown)
+            assertEquals(MarkdownSelection(6 + marker.length, 12 + marker.length), selected.selection)
+        }
+    }
 }
