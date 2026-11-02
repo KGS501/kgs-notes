@@ -142,6 +142,13 @@ class HttpNextcloudNotesApi(
         }
     }
 
+    override suspend fun updateFavorite(id: Long, favorite: Boolean): RemoteNote = withContext(Dispatchers.IO) {
+        val endpoint = requireNotNull(serverUrl.resolve("index.php/apps/notes/api/v1/notes/$id"))
+        // Notes allows changing only `favorite` on read-only Notes; any other attribute would be rejected.
+        val body = buildJsonObject { put("favorite", favorite) }.toString().toRequestBody(JSON_MEDIA_TYPE)
+        parseNote(executeObject(authenticatedRequest(endpoint).put(body).build(), writeClient))
+    }
+
     override suspend fun updateSettings(fileSuffix: String): NotesSettings = withContext(Dispatchers.IO) {
         val endpoint = requireNotNull(serverUrl.resolve("index.php/apps/notes/api/v1/settings"))
         val body = buildJsonObject { put("fileSuffix", fileSuffix) }
@@ -190,15 +197,19 @@ class HttpNextcloudNotesApi(
             throw NextcloudConnectionException(NextcloudConnectionFailure.INVALID_RESPONSE, failure)
         }
         return try {
+            // error=true: the server could not read the file. Its `content` is an error message and its
+            // `readonly` describes the failure, not permissions; neither may become Note data.
+            val readError = (note["error"] as? kotlinx.serialization.json.JsonPrimitive)?.booleanOrNull == true
             RemoteNote(
                 id = note.requiredLong("id"),
                 etag = note.requiredString("etag"),
                 title = note.requiredString("title"),
-                markdown = note.requiredString("content"),
+                markdown = if (readError) "" else note.requiredString("content"),
                 category = note.optionalString("category"),
                 favorite = note["favorite"]?.jsonPrimitive?.booleanOrNull ?: false,
                 modifiedAt = Instant.ofEpochSecond(note.requiredLong("modified")),
-                readOnly = note["readonly"]?.jsonPrimitive?.booleanOrNull ?: false,
+                readOnly = if (readError) false else note["readonly"]?.jsonPrimitive?.booleanOrNull ?: false,
+                contentUnavailable = readError,
             )
         } catch (failure: NextcloudConnectionException) {
             throw failure

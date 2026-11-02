@@ -2,6 +2,7 @@ package com.kgs.notes.engine
 
 import java.io.Writer
 import java.io.InputStream
+import java.nio.charset.StandardCharsets
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.Path
@@ -31,6 +32,7 @@ class LocalNotesEngine private constructor(
     loadedNotes: Map<NoteId, StoredNote>,
     loadedAttachments: Map<AttachmentId, StoredAttachment>,
     loadedCategories: Set<String>,
+    loadedUnreadable: List<UnreadableRecord>,
 ) : NotesEngine {
     private val metadataRoot = root.resolve(".kgs/notes")
     private val attachmentMetadataRoot = root.resolve(".kgs/attachments")
@@ -42,6 +44,8 @@ class LocalNotesEngine private constructor(
     private var retainedCategories: Set<String> = loadedCategories
     private val mutableLibrary = MutableStateFlow(snapshotOf(notes.values, retainedCategories))
     private val mutableSources = MutableStateFlow(listOf(LOCAL_SOURCE_DESCRIPTOR))
+    private val mutableUnreadable = MutableStateFlow(loadedUnreadable)
+    override val unreadableRecords: StateFlow<List<UnreadableRecord>> = mutableUnreadable.asStateFlow()
 
     override val library: StateFlow<LibrarySnapshot> = mutableLibrary.asStateFlow()
     override val sources: StateFlow<List<SourceDescriptor>> = mutableSources.asStateFlow()
@@ -110,7 +114,7 @@ class LocalNotesEngine private constructor(
             trashedAt = note.trashedAt,
             titleFixed = true,
             relativePath = relativePath,
-            markdown = note.markdown,
+            markdown = rewriteManagedAttachmentTargets(note.markdown, note.id, previous?.relativePath.orEmpty(), relativePath),
         )
         writeTextAtomically(contentPath(relativePath), stored.markdown)
         persistMetadata(stored)
@@ -162,13 +166,22 @@ class LocalNotesEngine private constructor(
         } else {
             availableContentPath(cleanTitle, current.category, current.id, current.relativePath)
         }
-        writeTextAtomically(contentPath(desiredPath), current.markdown)
+        // A rename can relocate the file (for example after a Category change made while in Trash),
+        // so portable attachment targets must follow the file like they do for content updates.
+        val storedMarkdown = rewriteManagedAttachmentTargets(
+            markdown = current.markdown,
+            noteId = id,
+            fromNotePath = current.relativePath,
+            toNotePath = desiredPath,
+        )
+        writeTextAtomically(contentPath(desiredPath), storedMarkdown)
         val updated = current.copy(
             title = cleanTitle,
             titleFixed = true,
             state = if (current.state == NoteState.DRAFT) NoteState.ACTIVE else current.state,
             relativePath = desiredPath,
             updatedAt = clock.instant(),
+            markdown = storedMarkdown,
         )
         persistMetadata(updated)
         if (desiredPath != current.relativePath) contentPath(current.relativePath).deleteIfExists()
@@ -259,9 +272,13 @@ class LocalNotesEngine private constructor(
     }
 
     override suspend fun deletePermanently(id: NoteId) = mutex.withLock {
-        val removed = notes.remove(id) ?: return@withLock
-        contentPath(removed.relativePath).deleteIfExists()
+        val removed = notes[id] ?: return@withLock
+        // Metadata first: an interrupted deletion leaves an orphan file, never a record without content,
+        // and memory changes only after the durable record is gone.
         metadataPath(id).deleteIfExists()
+        notes.remove(id)
+        publish()
+        contentPath(removed.relativePath).deleteIfExists()
         val removedAttachments = attachments.values.filter { it.noteId == id }
         removedAttachments.forEach { attachment ->
             contentPath(attachment.relativePath).deleteIfExists()
@@ -275,15 +292,151 @@ class LocalNotesEngine private constructor(
     override suspend fun close(id: NoteId) = mutex.withLock {
         val current = notes[id] ?: return@withLock
         if (current.state == NoteState.DRAFT && current.markdown.isBlank() && !current.titleFixed) {
+            metadataPath(id).deleteIfExists()
             notes.remove(id)
             contentPath(current.relativePath).deleteIfExists()
-            metadataPath(id).deleteIfExists()
         } else if (!current.titleFixed) {
             val closed = current.copy(titleFixed = true)
             persistMetadata(closed)
             notes[id] = closed
         }
         publish()
+    }
+
+    override suspend fun copyToLocal(id: NoteId, markdown: String?): NoteId {
+        val note = requireNotNull(note(id)) { "Cannot copy a missing Note" }
+        return copyNote(note, markdown ?: note.markdown, attachmentsOf = id)
+    }
+
+    /**
+     * Creates an independent ACTIVE Local Note from [note]. Managed attachments of [attachmentsOf] are copied
+     * and every relative target in [markdown] is rebased to the copy, so neither Note depends on the other.
+     */
+    internal suspend fun copyNote(note: Note, markdown: String, attachmentsOf: NoteId?): NoteId = mutex.withLock {
+        val id = NoteId(UUID.randomUUID().toString())
+        val title = normalizeTitle(note.title)
+        val category = normalizeCategory(note.category)
+        val relativePath = availableContentPath(title, category, id, "")
+        val copies = attachments.values.filter { attachmentsOf != null && it.noteId == attachmentsOf }.sortedBy(StoredAttachment::createdAt)
+        var content = markdown
+        val written = mutableListOf<StoredAttachment>()
+        try {
+            copies.forEach { original ->
+                val copyId = AttachmentId(UUID.randomUUID().toString())
+                val extension = original.relativePath.substringAfterLast('/').substringAfter('.', "")
+                val storageName = copyId.value + extension.takeIf(String::isNotBlank)?.let { ".$it" }.orEmpty()
+                val copy = original.copy(id = copyId, noteId = id, relativePath = ".kgs-notes-attachments/${id.value}/$storageName")
+                Files.newInputStream(contentPath(original.relativePath)).use { writeStreamAtomically(contentPath(copy.relativePath), it) }
+                persistAttachmentMetadata(copy)
+                written += copy
+                content = replaceVaultTargets(content, original.relativePath, markdownTarget(relativePath, copy.relativePath))
+            }
+            val now = clock.instant()
+            val stored = StoredNote(
+                id = id,
+                title = title,
+                category = category,
+                favorite = note.favorite,
+                state = NoteState.ACTIVE,
+                createdAt = note.createdAt,
+                updatedAt = now,
+                trashedAt = null,
+                titleFixed = true,
+                relativePath = relativePath,
+                markdown = content,
+            )
+            writeTextAtomically(contentPath(relativePath), content)
+            persistMetadata(stored)
+            notes[id] = stored
+        } catch (failure: Exception) {
+            // Leave the original untouched and no half-made copy behind.
+            written.forEach {
+                contentPath(it.relativePath).deleteIfExists()
+                attachmentMetadataPath(it.id).deleteIfExists()
+            }
+            deleteEmptyDirectories(attachmentVaultRoot.resolve(id.value))
+            contentPath(relativePath).deleteIfExists()
+            metadataPath(id).deleteIfExists()
+            throw failure
+        }
+        written.forEach { attachments[it.id] = it }
+        publish()
+        id
+    }
+
+    override suspend fun rescueUnreadableRecord(recordId: String): NoteId {
+        val record = requireNotNull(mutableUnreadable.value.firstOrNull { it.id == recordId }) { "This record is no longer listed" }
+        val metadata = record.files.firstOrNull()?.let(::readEvidenceText)
+        val title = "Recovered: " + (record.title ?: record.noteId?.value ?: "note")
+        val now = clock.instant()
+        val shell = Note(NoteId(""), LocalSourceId, NoteSyncState.LOCAL_SOURCE, title, "", "", false, NoteState.ACTIVE, now, now)
+        return when (record.kind) {
+            UnreadableRecordKind.LOCAL_ATTACHMENT -> {
+                val bytesPath = record.files.drop(1).firstOrNull()?.let { java.nio.file.Paths.get(it) }
+                if (record.hasContent && bytesPath != null) {
+                    val noteId = copyNote(shell, "", attachmentsOf = null)
+                    val imported = importManagedAttachment(noteId, AttachmentImport(
+                        displayName = record.title ?: bytesPath.fileName.toString(),
+                        mediaType = metadataProperty(metadata, "mediaType") ?: "application/octet-stream",
+                    ) { Files.newInputStream(bytesPath) })
+                    val image = imported.mediaType.startsWith("image/")
+                    updateContent(noteId, (if (image) "!" else "") + "[${imported.displayName}](${imported.markdownTarget})\n")
+                    noteId
+                } else {
+                    copyNote(shell, fencedEvidence(record, metadata), attachmentsOf = null)
+                }
+            }
+            else -> {
+                val content = if (record.hasContent) record.files.drop(1).firstOrNull()?.let(::readEvidenceText) else null
+                copyNote(shell, content ?: fencedEvidence(record, metadata), attachmentsOf = null)
+            }
+        }
+    }
+
+    override suspend fun discardUnreadableRecord(recordId: String) {
+        val record = requireNotNull(mutableUnreadable.value.firstOrNull { it.id == recordId }) { "This record is no longer listed" }
+        mutex.withLock {
+            record.files.forEach { Files.deleteIfExists(java.nio.file.Paths.get(it)) }
+            mutableUnreadable.value = mutableUnreadable.value.filterNot { it.id == recordId }
+        }
+    }
+
+    /** Non-suspending access used only while [ConnectedNotesEngine.open] recovers transfers, before the engine is shared. */
+    internal fun noteAtOpen(id: NoteId): Note? = notes[id]?.toPublic()
+
+    internal fun hasAttachmentsAtOpen(id: NoteId): Boolean = attachments.values.any { it.noteId == id }
+
+    /** Removes a transfer shadow while opening; see [noteAtOpen]. */
+    internal fun discardAtOpen(id: NoteId) {
+        val removed = notes[id] ?: return
+        metadataPath(id).deleteIfExists()
+        notes.remove(id)
+        contentPath(removed.relativePath).deleteIfExists()
+        attachments.values.filter { it.noteId == id }.forEach { attachment ->
+            contentPath(attachment.relativePath).deleteIfExists()
+            attachmentMetadataPath(attachment.id).deleteIfExists()
+            attachments.remove(attachment.id)
+        }
+        deleteEmptyDirectories(attachmentVaultRoot.resolve(id.value))
+        publish()
+    }
+
+    /** Gives a Local Note that collides with a Working Copy its own identity while opening; see [noteAtOpen]. */
+    internal fun rekeyAtOpen(id: NoteId): NoteId {
+        val current = requireNotNull(notes[id])
+        val newId = NoteId(UUID.randomUUID().toString())
+        val moved = current.copy(id = newId)
+        persistMetadata(moved)
+        attachments.values.filter { it.noteId == id }.forEach { attachment ->
+            val rekeyed = attachment.copy(noteId = newId)
+            persistAttachmentMetadata(rekeyed)
+            attachments[attachment.id] = rekeyed
+        }
+        metadataPath(id).deleteIfExists()
+        notes.remove(id)
+        notes[newId] = moved
+        publish()
+        return newId
     }
 
     private suspend fun updateMetadata(id: NoteId, transform: (StoredNote) -> StoredNote) = mutex.withLock {
@@ -400,16 +553,20 @@ class LocalNotesEngine private constructor(
         fromNotePath: String,
         toNotePath: String,
     ): String {
-        if (fromNotePath == toNotePath) return markdown
+        // Rewrite every relative spelling of each managed attachment, not only the one expected for
+        // [fromNotePath]: this also repairs targets left stale by earlier relocations.
         return attachments.values
             .filter { it.noteId == noteId }
             .fold(markdown) { content, attachment ->
-                content.replace(
-                    markdownTarget(fromNotePath, attachment.relativePath),
-                    markdownTarget(toNotePath, attachment.relativePath),
-                )
+                replaceVaultTargets(content, attachment.relativePath, markdownTarget(toNotePath, attachment.relativePath))
             }
     }
+
+    private fun replaceVaultTargets(markdown: String, vaultRelativePath: String, target: String): String =
+        vaultTargetPattern(vaultRelativePath).replace(markdown) { target }
+
+    private fun vaultTargetPattern(vaultRelativePath: String) =
+        Regex("(?<![A-Za-z0-9_./%-])(?:\\./)?(?:\\.\\./)*" + Regex.escape(vaultRelativePath) + "(?![A-Za-z0-9_./%-])")
 
     private fun markdownTarget(noteRelativePath: String, attachmentRelativePath: String): String {
         val noteDirectory = root.resolve(noteRelativePath).normalize().parent
@@ -440,80 +597,187 @@ class LocalNotesEngine private constructor(
             normalizedRoot.resolve(".kgs/drafts").createDirectories()
             normalizedRoot.resolve(".kgs/attachments").createDirectories()
             normalizedRoot.resolve(".kgs-notes-attachments").createDirectories()
-            val loaded = loadNotes(normalizedRoot)
-            val loadedAttachments = loadAttachments(normalizedRoot)
+            val unreadable = mutableListOf<UnreadableRecord>()
+            val loaded = loadNotes(normalizedRoot, unreadable)
+            val loadedAttachments = loadAttachments(normalizedRoot, unreadable)
             val categories = normalizedRoot.resolve(CATEGORIES_PATH).takeIf(Path::exists)?.readText()
                 ?.lineSequence()?.filter(String::isNotBlank)?.toSet().orEmpty()
-            return LocalNotesEngine(normalizedRoot, clock, loaded, loadedAttachments, categories)
+            return LocalNotesEngine(normalizedRoot, clock, loaded, loadedAttachments, categories, unreadable.sortedBy { it.id })
         }
 
-        private fun loadNotes(root: Path): Map<NoteId, StoredNote> {
+        private fun loadNotes(root: Path, unreadable: MutableList<UnreadableRecord>): Map<NoteId, StoredNote> {
             val metadataRoot = root.resolve(".kgs/notes")
             if (!metadataRoot.exists()) return emptyMap()
-            return Files.list(metadataRoot).use { paths ->
-                paths.iterator().asSequence()
-                    .filter { it.isRegularFile() && it.extension == "properties" }
-                    .map { path -> runCatching { readStoredNote(root, path) }.getOrNull() }
-                    .filter { it != null }
-                    .map { it!! }
-                    .toList()
-                    .associateBy(StoredNote::id)
+            val loaded = linkedMapOf<NoteId, StoredNote>()
+            listRecords(metadataRoot).forEach { path ->
+                try {
+                    val note = readStoredNote(root, path)
+                    loaded[note.id] = note
+                } catch (failure: RecordLoadFailure) {
+                    unreadable += failure.toRecord(UnreadableRecordKind.LOCAL_NOTE, path, root)
+                }
             }
+            return loaded
         }
 
-        private fun readStoredNote(root: Path, metadataPath: Path): StoredNote {
+        private fun listRecords(directory: Path): List<Path> = Files.list(directory).use { paths ->
+            paths.iterator().asSequence().filter { it.isRegularFile() && it.extension == "properties" }.sorted().toList()
+        }
+
+        /** Reads a record's metadata, classifying every failure instead of dropping the record silently. */
+        private fun loadRecordProperties(metadataPath: Path): Properties {
             val properties = Properties()
-            Files.newBufferedReader(metadataPath).use(properties::load)
-            require(properties.getProperty("schema") == "1")
-            val id = NoteId(properties.getProperty("id") ?: metadataPath.nameWithoutExtension)
-            val relativePath = requireNotNull(properties.getProperty("relativePath"))
-            val contentPath = root.resolve(relativePath).normalize()
-            require(contentPath.startsWith(root))
-            return StoredNote(
-                id = id,
-                title = properties.getProperty("title", DEFAULT_TITLE),
-                category = normalizeCategory(properties.getProperty("category", "")),
-                favorite = properties.getProperty("favorite", "false").toBoolean(),
-                pinned = properties.getProperty("pinned", "false").toBoolean(),
-                state = NoteState.valueOf(properties.getProperty("state", NoteState.ACTIVE.name)),
-                createdAt = Instant.parse(properties.getProperty("createdAt")),
-                updatedAt = Instant.parse(properties.getProperty("updatedAt")),
-                trashedAt = properties.getProperty("trashedAt").takeUnless(String?::isNullOrBlank)?.let(Instant::parse),
-                titleFixed = properties.getProperty("titleFixed", "true").toBoolean(),
-                relativePath = relativePath,
-                markdown = if (contentPath.exists()) contentPath.readText() else "",
+            try {
+                Files.newBufferedReader(metadataPath, StandardCharsets.UTF_8).use(properties::load)
+            } catch (failure: java.io.IOException) {
+                // Malformed UTF-8 is a damaged record; any other I/O problem means the file is inaccessible.
+                val reason = if (failure is java.nio.charset.CharacterCodingException) UnreadableReason.MALFORMED_METADATA else UnreadableReason.INACCESSIBLE
+                throw RecordLoadFailure(reason, "${failure.javaClass.simpleName}: ${failure.message.orEmpty()}", metadataPath = metadataPath)
+            } catch (failure: IllegalArgumentException) {
+                throw RecordLoadFailure(UnreadableReason.MALFORMED_METADATA, "Unreadable properties: ${failure.message.orEmpty()}", metadataPath = metadataPath)
+            }
+            val schema = properties.getProperty("schema")
+            if (schema != "1") {
+                val reason = if ((schema?.trim()?.toIntOrNull() ?: 0) > 1) UnreadableReason.UNSUPPORTED_VERSION else UnreadableReason.MALFORMED_METADATA
+                throw RecordLoadFailure(reason, "schema=${schema ?: "(missing)"}", properties, metadataPath)
+            }
+            return properties
+        }
+
+        private fun <T> parsingRecord(properties: Properties, metadataPath: Path, block: () -> T): T = try {
+            block()
+        } catch (failure: RecordLoadFailure) {
+            throw failure
+        } catch (failure: Exception) {
+            throw RecordLoadFailure(
+                UnreadableReason.MALFORMED_METADATA,
+                "${failure.javaClass.simpleName}: ${failure.message.orEmpty()}",
+                properties,
+                metadataPath,
             )
         }
 
-        private fun loadAttachments(root: Path): Map<AttachmentId, StoredAttachment> {
+        private fun readStoredNote(root: Path, metadataPath: Path): StoredNote {
+            val properties = loadRecordProperties(metadataPath)
+            val (relativePath, contentPath) = parsingRecord(properties, metadataPath) {
+                val relativePath = requireNotNull(properties.getProperty("relativePath")) { "relativePath is missing" }
+                val contentPath = root.resolve(relativePath).normalize()
+                require(contentPath.startsWith(root)) { "relativePath leaves the Local Source" }
+                relativePath to contentPath
+            }
+            val note = parsingRecord(properties, metadataPath) {
+                StoredNote(
+                    id = NoteId(properties.getProperty("id") ?: metadataPath.nameWithoutExtension),
+                    title = properties.getProperty("title", DEFAULT_TITLE),
+                    category = normalizeCategory(properties.getProperty("category", "")),
+                    favorite = properties.getProperty("favorite", "false").toBoolean(),
+                    pinned = properties.getProperty("pinned", "false").toBoolean(),
+                    state = NoteState.valueOf(properties.getProperty("state", NoteState.ACTIVE.name)),
+                    createdAt = Instant.parse(properties.getProperty("createdAt")),
+                    updatedAt = Instant.parse(properties.getProperty("updatedAt")),
+                    trashedAt = properties.getProperty("trashedAt").takeUnless(String?::isNullOrBlank)?.let(Instant::parse),
+                    titleFixed = properties.getProperty("titleFixed", "true").toBoolean(),
+                    relativePath = relativePath,
+                    markdown = "",
+                )
+            }
+            if (!contentPath.exists()) {
+                throw RecordLoadFailure(UnreadableReason.MISSING_CONTENT, "Content file $relativePath is missing", properties, metadataPath)
+            }
+            val markdown = try {
+                contentPath.readText()
+            } catch (failure: java.io.IOException) {
+                throw RecordLoadFailure(UnreadableReason.INACCESSIBLE, "${failure.javaClass.simpleName}: ${failure.message.orEmpty()}",
+                    properties, metadataPath, contentPath)
+            }
+            return note.copy(markdown = markdown)
+        }
+
+        private fun loadAttachments(root: Path, unreadable: MutableList<UnreadableRecord>): Map<AttachmentId, StoredAttachment> {
             val metadataRoot = root.resolve(".kgs/attachments")
             if (!metadataRoot.exists()) return emptyMap()
-            return Files.list(metadataRoot).use { paths ->
-                paths.iterator().asSequence()
-                    .filter { it.isRegularFile() && it.extension == "properties" }
-                    .map { path -> runCatching { readStoredAttachment(root, path) }.getOrNull() }
-                    .filter { it != null }
-                    .map { it!! }
-                    .toList()
-                    .associateBy(StoredAttachment::id)
+            val loaded = linkedMapOf<AttachmentId, StoredAttachment>()
+            listRecords(metadataRoot).forEach { path ->
+                try {
+                    val attachment = readStoredAttachment(root, path)
+                    loaded[attachment.id] = attachment
+                } catch (failure: RecordLoadFailure) {
+                    unreadable += failure.toRecord(UnreadableRecordKind.LOCAL_ATTACHMENT, path, root)
+                }
             }
+            return loaded
         }
 
         private fun readStoredAttachment(root: Path, metadataPath: Path): StoredAttachment {
-            val properties = Properties()
-            Files.newBufferedReader(metadataPath).use(properties::load)
-            require(properties.getProperty("schema") == "1")
-            val relativePath = requireNotNull(properties.getProperty("relativePath"))
-            val contentPath = root.resolve(relativePath).normalize()
-            require(contentPath.startsWith(root))
-            require(contentPath.isRegularFile())
-            return StoredAttachment(
-                id = AttachmentId(properties.getProperty("id") ?: metadataPath.nameWithoutExtension),
-                noteId = NoteId(requireNotNull(properties.getProperty("noteId"))),
-                displayName = normalizeAttachmentDisplayName(properties.getProperty("displayName", "Attachment")),
-                mediaType = normalizeMediaType(properties.getProperty("mediaType", "application/octet-stream")),
-                relativePath = relativePath,
-                createdAt = Instant.parse(properties.getProperty("createdAt")),
+            val properties = loadRecordProperties(metadataPath)
+            val attachment = parsingRecord(properties, metadataPath) {
+                val relativePath = requireNotNull(properties.getProperty("relativePath")) { "relativePath is missing" }
+                require(root.resolve(relativePath).normalize().startsWith(root)) { "relativePath leaves the Local Source" }
+                StoredAttachment(
+                    id = AttachmentId(properties.getProperty("id") ?: metadataPath.nameWithoutExtension),
+                    noteId = NoteId(requireNotNull(properties.getProperty("noteId")) { "noteId is missing" }),
+                    displayName = normalizeAttachmentDisplayName(properties.getProperty("displayName", "Attachment")),
+                    mediaType = normalizeMediaType(properties.getProperty("mediaType", "application/octet-stream")),
+                    relativePath = relativePath,
+                    createdAt = Instant.parse(properties.getProperty("createdAt")),
+                )
+            }
+            val contentPath = root.resolve(attachment.relativePath).normalize()
+            if (!contentPath.isRegularFile()) {
+                throw RecordLoadFailure(UnreadableReason.MISSING_CONTENT, "Attachment file ${attachment.relativePath} is missing",
+                    properties, metadataPath)
+            }
+            if (!Files.isReadable(contentPath)) {
+                throw RecordLoadFailure(UnreadableReason.INACCESSIBLE, "Attachment file ${attachment.relativePath} is not readable",
+                    properties, metadataPath, contentPath)
+            }
+            return attachment
+        }
+
+        private fun readEvidenceText(path: String): String? = runCatching {
+            // Malformed bytes are replaced, never rejected: the user gets whatever is still legible.
+            String(Files.readAllBytes(java.nio.file.Paths.get(path)), StandardCharsets.UTF_8)
+        }.getOrNull()
+
+        private fun metadataProperty(metadata: String?, name: String): String? = metadata?.let {
+            runCatching { Properties().apply { load(java.io.StringReader(it)) }.getProperty(name) }.getOrNull()
+        }
+
+        private fun fencedEvidence(record: UnreadableRecord, metadata: String?): String {
+            val fence = "~~~~~~"
+            return buildString {
+                append("Recovered record ").append(record.id).append(" (").append(record.reason.name).append(")\n\n")
+                append(record.detail).append("\n\n")
+                append(fence).append("properties\n").append(metadata ?: "(metadata unreadable)").append('\n').append(fence).append('\n')
+            }
+        }
+
+        private fun RecordLoadFailure.toRecord(kind: UnreadableRecordKind, metadataPath: Path, root: Path? = null): UnreadableRecord {
+            val props = properties
+            val localRoot = root ?: metadataPath.parent.parent.parent
+            val content = contentPath ?: props?.getProperty("relativePath")
+                ?.let { runCatching { localRoot.resolve(it).normalize() }.getOrNull() }
+                ?.takeIf { it.startsWith(localRoot) && it.isRegularFile() }
+            val readable = content != null && Files.isReadable(content)
+            val title = when (kind) {
+                UnreadableRecordKind.LOCAL_ATTACHMENT -> props?.getProperty("displayName")
+                else -> props?.getProperty("title")
+            }
+            val noteId = when (kind) {
+                UnreadableRecordKind.LOCAL_ATTACHMENT -> props?.getProperty("noteId")
+                else -> props?.getProperty("id") ?: metadataPath.nameWithoutExtension
+            }
+            val prefix = if (kind == UnreadableRecordKind.LOCAL_ATTACHMENT) "local-attachment:" else "local-note:"
+            return UnreadableRecord(
+                id = prefix + metadataPath.fileName.toString(),
+                kind = kind,
+                reason = reason,
+                noteId = noteId?.takeIf(String::isNotBlank)?.let(::NoteId),
+                sourceId = LocalSourceId,
+                title = title?.takeIf(String::isNotBlank),
+                detail = "${metadataPath.fileName}: $message",
+                files = listOfNotNull(metadataPath, content).map { it.toAbsolutePath().toString() },
+                hasContent = readable,
             )
         }
 
@@ -664,6 +928,15 @@ class LocalNotesEngine private constructor(
         }
     }
 }
+
+/** Why one stored record could not be loaded; the record stays on disk untouched. */
+internal class RecordLoadFailure(
+    val reason: UnreadableReason,
+    message: String,
+    val properties: Properties? = null,
+    val metadataPath: Path? = null,
+    val contentPath: Path? = null,
+) : Exception(message)
 
 private data class StoredAttachment(
     val id: AttachmentId,
