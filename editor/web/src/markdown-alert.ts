@@ -6,6 +6,9 @@ export const MarkdownAlert = Node.create({
   name: 'markdownAlert', group: 'block', content: 'block+', defining: true,
   addAttributes: () => ({ alertType: {
     default: 'NOTE', rendered: false,
+    validate: (value: unknown) => {
+      if (!['NOTE', 'TIP', 'IMPORTANT', 'WARNING', 'CAUTION'].includes(value as string)) throw new RangeError('Unknown alert type')
+    },
     parseHTML: element => {
       const type = element.getAttribute('data-markdown-alert') ?? 'NOTE'
       return ['NOTE', 'TIP', 'IMPORTANT', 'WARNING', 'CAUTION'].includes(type) ? type : 'NOTE'

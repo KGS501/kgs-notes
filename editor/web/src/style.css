@@ -113,6 +113,7 @@ main { min-height: 100vh; }
   -webkit-user-drag: none;
   transition: transform 180ms cubic-bezier(.2, 0, 0, 1), box-shadow 180ms cubic-bezier(.2, 0, 0, 1), opacity 120ms ease;
 }
+.inline-image--linked { border-radius: 4px; vertical-align: middle; }
 .inline-image--dragging {
   opacity: .9;
   transform: scale(1.025);
