@@ -166,6 +166,11 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onInterceptKeyBeforeSoftKeyboard
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.AwaitPointerEventScope
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.positionChanged
@@ -1456,6 +1461,14 @@ private fun LibraryCollection(
                     interactionSource = searchInteractions,
                     modifier = Modifier.weight(1f)
                         .onGloballyPositioned { searchBounds = it.boundsInRoot() }
+                        // Back while the keyboard is still appearing reaches the IME, which
+                        // hides it before its insets were ever reported, so the IME-dismissal
+                        // effect above never fires. Handle Back here first: it leaves search.
+                        .onInterceptKeyBeforeSoftKeyboard { event ->
+                            if (event.key != Key.Back || !searchFocused) return@onInterceptKeyBeforeSoftKeyboard false
+                            if (event.type == KeyEventType.KeyUp) focusManager.clearFocus()
+                            true
+                        }
                         .testTag("notes-search"),
                 )
             }
