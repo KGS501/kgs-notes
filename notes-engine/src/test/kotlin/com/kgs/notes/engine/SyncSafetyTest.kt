@@ -664,6 +664,101 @@ class SyncSafetyTest {
 
     // ------------------------------------------------------------------ helpers
 
+    // ------------------------------------------------------------------ review follow-ups
+
+    private fun candidateId(source: FakeSource, remoteId: String) = NoteId(
+        java.util.UUID.nameUUIDFromBytes("${source.descriptor.id.value}\n$remoteId".toByteArray(Charsets.UTF_8)).toString(),
+    )
+
+    /** A lost create plus an identical Note from another client: two candidates nobody can tell apart. */
+    private suspend fun ambiguousCreate(): Triple<FakeSource, ConnectedNotesEngine, NoteId> {
+        val source = FakeSource(SourceId("cloud"))
+        val engine = connected(source)
+        val id = engine.createDraft(sourceId = source.descriptor.id)
+        engine.updateContent(id, "body")
+        engine.close(id)
+        source.loseNextResponse = true
+        engine.synchronize(id)
+        val created = source.serverNotes.single()
+        source.addRemotely(created.copy(remoteId = "other", revision = "r-other"))
+        engine.refreshSources()
+        assertEquals(NoteAttention.UNCERTAIN_CREATE, assertNotNull(engine.note(id)).attention)
+        return Triple(source, engine, id)
+    }
+
+    @Test
+    fun `opening one ambiguous candidate never binds the uncertain create to the other one`() = runBlocking {
+        val (source, engine, id) = ambiguousCreate()
+        val created = source.serverNotes.first { it.remoteId != "other" }.remoteId
+        for (opened in listOf(created, "other")) {
+            engine.openEditingSession(candidateId(source, opened))
+            engine.refreshSources()
+            engine.synchronize(id)
+
+            assertEquals(NoteAttention.UNCERTAIN_CREATE, assertNotNull(engine.note(id)).attention, "opened $opened")
+            assertEquals(1, source.creates)
+            assertEquals(2, source.serverNotes.size)
+            assertEquals(0, source.updates)
+            engine.close(candidateId(source, opened))
+        }
+    }
+
+    @Test
+    fun `opening every ambiguous candidate never makes the create look absent and retry it`() = runBlocking {
+        val (source, engine, id) = ambiguousCreate()
+        source.serverNotes.forEach { engine.openEditingSession(candidateId(source, it.remoteId)) }
+
+        engine.refreshSources()
+        engine.synchronize(id)
+
+        assertEquals(NoteAttention.UNCERTAIN_CREATE, assertNotNull(engine.note(id)).attention)
+        assertEquals(1, source.creates)
+        assertEquals(2, source.serverNotes.size)
+    }
+
+    @Test
+    fun `a permission change reaches an open editor and blocks further edits`() = runBlocking {
+        val source = FakeSource(SourceId("cloud"), listOf(remote("1", "Shared", "Their text")))
+        val engine = connected(source)
+        val id = engine.library.value.active.single().id
+        engine.openEditingSession(id)
+
+        source.editRemotely("1") { it.copy(readOnly = true) }
+        engine.refreshSources()
+
+        assertTrue(assertNotNull(engine.note(id)).readOnly)
+        assertFailsWith<ReadOnlyNoteException> { engine.updateContent(id, "my edit") }
+
+        // Granted again while still open: editing works and syncs.
+        source.editRemotely("1") { it.copy(readOnly = false) }
+        engine.refreshSources()
+        assertFalse(assertNotNull(engine.note(id)).readOnly)
+        engine.updateContent(id, "my edit")
+        engine.synchronize(id)
+        assertEquals("my edit", source.server("1").markdown)
+    }
+
+    @Test
+    fun `revoking permission while an open editor holds unsynced edits keeps them and asks for attention`() = runBlocking {
+        val source = FakeSource(SourceId("cloud"), listOf(remote("1", "Shared", "Their text")))
+        val engine = connected(source)
+        val id = engine.library.value.active.single().id
+        engine.openEditingSession(id)
+        source.offline = true
+        engine.updateContent(id, "my unsynced edit")
+        runCatching { engine.synchronize(id) }
+        source.offline = false
+
+        source.editRemotely("1") { it.copy(readOnly = true, markdown = "Their newer text") }
+        engine.refreshSources()
+
+        val note = assertNotNull(engine.note(id))
+        assertTrue(note.readOnly)
+        assertEquals("my unsynced edit", note.markdown)
+        assertTrue(note.attention == NoteAttention.READ_ONLY_CHANGES || note.attention == NoteAttention.CONFLICT, "attention=${note.attention}")
+        assertEquals("Their newer text", source.server("1").markdown)
+    }
+
     private fun remote(remoteId: String, title: String, markdown: String) = SourceNote(
         remoteId = remoteId,
         revision = "r0",

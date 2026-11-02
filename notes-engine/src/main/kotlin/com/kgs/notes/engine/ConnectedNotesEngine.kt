@@ -523,7 +523,29 @@ class ConnectedNotesEngine private constructor(
         }
     }
 
-    private fun reconcileExisting(existing: WorkingCopy, remote: SourceNote): WorkingCopy = when {
+    private fun reconcileExisting(existing: WorkingCopy, remote: SourceNote): WorkingCopy =
+        reconcileBody(existing, remote).withPermissionsOf(remote)
+
+    /**
+     * Permissions follow every healthy snapshot, even when the body is kept for an open editor or the revision
+     * is unchanged, so the write boundary and the UI agree with the Source.
+     */
+    private fun WorkingCopy.withPermissionsOf(remote: SourceNote): WorkingCopy {
+        if (remote.contentUnavailable || readOnly == remote.readOnly) return this
+        val updated = copy(readOnly = remote.readOnly)
+        val blocked = updated.readOnly && updated.remoteId.isNotBlank() && updated.hasNonFavoriteChanges()
+        return when {
+            blocked -> updated.copy(syncState = NoteSyncState.NEEDS_ATTENTION)
+            updated.problem == NoteAttention.READ_ONLY_CHANGES || (updated.problem == null && updated.syncState == NoteSyncState.NEEDS_ATTENTION) ->
+                updated.copy(
+                    problem = null,
+                    syncState = if (updated.hasLocalChanges()) NoteSyncState.SAVED_LOCALLY else NoteSyncState.SYNCED,
+                )
+            else -> updated
+        }
+    }
+
+    private fun reconcileBody(existing: WorkingCopy, remote: SourceNote): WorkingCopy = when {
         // A read error never replaces the last good body, base, revision or permissions.
         remote.contentUnavailable -> if (existing.contentUnavailable) existing else existing.copy(contentUnavailable = true)
         existing.revision == remote.revision && !existing.contentUnavailable ->
@@ -553,19 +575,29 @@ class ConnectedNotesEngine private constructor(
             // clean, automatically imported candidate shown during an earlier ambiguity.
             val owners = workingCopies.values.filter { it.sourceId == sourceId && it.remoteId.isNotBlank() }
                 .associateBy(WorkingCopy::remoteId)
-            val eligible = remoteNotes.filter { remote ->
+            // Every remote Note that might be this create counts towards ambiguity, including automatically
+            // imported candidates that are open or were edited since: being unsafe to adopt never proves absence.
+            fun isImportedCandidate(owner: WorkingCopy, remote: SourceNote) =
+                owner.id == stableWorkingCopyId(sourceId, remote.remoteId) && owner.problem == null &&
+                    owner.attempts.isEmpty() && owner.transfer == null
+            val candidates = remoteNotes.filter { remote ->
                 val owner = owners[remote.remoteId]
-                owner == null || (owner.id == stableWorkingCopyId(sourceId, remote.remoteId) && owner.isCleanImport() && owner.id !in editingNotes)
+                owner == null || isImportedCandidate(owner, remote)
+            }
+            fun adoptable(remote: SourceNote): Boolean {
+                val owner = owners[remote.remoteId] ?: return true
+                return owner.isCleanImport() && owner.id !in editingNotes
             }
             fun unknownBefore(remote: SourceNote, attempt: WriteAttempt) = attempt.knownRemoteIds?.contains(remote.remoteId) != true
-            var strong = eligible.filter { remote -> creates.any { unknownBefore(remote, it) && it.matches(remote) } }
-            val weak = eligible.filter { remote -> creates.any { unknownBefore(remote, it) && it.couldHaveProduced(remote) } }
+            var strong = candidates.filter { remote -> creates.any { unknownBefore(remote, it) && it.matches(remote) } }
+            val weak = candidates.filter { remote -> creates.any { unknownBefore(remote, it) && it.couldHaveProduced(remote) } }
             if (strong.size > 1) {
                 strong = strong.filter { remote -> creates.any { it.matches(remote) && it.modifiedEpochSecond == remote.modifiedAt.epochSecond } }
                     .takeIf { it.size == 1 } ?: strong
             }
             when {
-                strong.size == 1 -> {
+                // A single proven match that is open or edited stays unresolved until it is safe to adopt.
+                strong.size == 1 && adoptable(strong.single()) -> {
                     val remote = strong.single()
                     owners[remote.remoteId]?.takeIf { it.id != copy.id }?.let { removeWorkingCopyLocked(it.id) }
                     val attempt = creates.last { it.matches(remote) }
