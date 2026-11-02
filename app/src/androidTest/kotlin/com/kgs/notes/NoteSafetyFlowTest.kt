@@ -24,6 +24,7 @@ import com.kgs.notes.engine.ManagedAttachment
 import com.kgs.notes.engine.Note
 import com.kgs.notes.engine.NoteId
 import com.kgs.notes.engine.NotesEngine
+import com.kgs.notes.engine.Source
 import com.kgs.notes.engine.SourceId
 import java.time.Instant
 import kotlinx.coroutines.flow.MutableStateFlow
