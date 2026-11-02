@@ -8,6 +8,8 @@ import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.union
 import com.kgs.notes.design.R.string as UiR
+import java.util.Collections
+import java.util.WeakHashMap
 
 import com.kgs.notes.design.LocalKgsSheetDock
 import com.kgs.notes.design.kgsSheetDock
@@ -653,7 +655,7 @@ private fun RichMarkdownEditor(
                             view: WebView,
                             detail: RenderProcessGoneDetail,
                         ): Boolean {
-                            view.destroy()
+                            view.destroyEditor()
                             rendererGeneration += 1
                             return true
                         }
@@ -683,7 +685,7 @@ private fun RichMarkdownEditor(
                                 "fallback" -> if (connectedWebView === view) latestOnFallback()
                                 "viewportRestored" -> if (connectedWebView === view) {
                                     val restored = runCatching { EditorViewport.from(payload.getJSONObject("viewport")) }.getOrNull()
-                                    view.postVisualStateCallback(0L, object : WebView.VisualStateCallback() {
+                                    view.postVisualStateCallbackIfAlive(0L, object : WebView.VisualStateCallback() {
                                         override fun onComplete(requestId: Long) {
                                             if (connectedWebView === view) {
                                                 restored?.let(latestOnViewportRestored)
@@ -702,7 +704,7 @@ private fun RichMarkdownEditor(
                                         // JavaScript readiness precedes the rendered Note.
                                         // Reveal only a frame containing the loaded Markdown.
                                         view.setReadOnly(latestReadOnly, force = latestReadOnly) {
-                                            view.postVisualStateCallback(0L, object : WebView.VisualStateCallback() {
+                                            view.postVisualStateCallbackIfAlive(0L, object : WebView.VisualStateCallback() {
                                                 override fun onComplete(requestId: Long) {
                                                     if (connectedWebView === view) {
                                                         if (initialViewport == null) latestOnReady()
@@ -778,7 +780,7 @@ private fun RichMarkdownEditor(
             onRelease = { webView ->
                 commands.disconnect(webView)
                 if (connectedWebView === webView) connectedWebView = null
-                webView.destroy()
+                webView.destroyEditor()
             },
             modifier = modifier,
         )
@@ -1151,6 +1153,19 @@ private fun WebView.setThemeColors(colors: Map<String, String>) {
         "Object.entries($properties).forEach(([name, value]) => document.documentElement.style.setProperty('--kgs-' + name, value))",
         null,
     )
+}
+
+// Asynchronous JavaScript callbacks can arrive after the editor left composition or its renderer died.
+// WebView.postVisualStateCallback throws on a destroyed WebView, so such late callbacks are dropped.
+private val destroyedEditorWebViews: MutableSet<WebView> = Collections.newSetFromMap(WeakHashMap())
+
+private fun WebView.destroyEditor() {
+    destroyedEditorWebViews += this
+    destroy()
+}
+
+private fun WebView.postVisualStateCallbackIfAlive(requestId: Long, callback: WebView.VisualStateCallback) {
+    if (this !in destroyedEditorWebViews) postVisualStateCallback(requestId, callback)
 }
 
 private fun WebView.setDarkMode(enabled: Boolean) {
