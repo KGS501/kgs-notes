@@ -2796,7 +2796,9 @@ class KgsNotesScreenTest {
         compose.mainClock.autoAdvance = false
         compose.runOnIdle { selected.value = null }
         compose.mainClock.advanceTimeBy(176)
-        val shadow = compose.onNodeWithTag("new-note-shadow").fetchSemanticsNode().boundsInRoot
+        // The shadow layer is a plain child of the New note button's tooltip anchor, whose
+        // semantics merge their descendants, so its tag lives in the unmerged tree.
+        val shadow = compose.onNodeWithTag("new-note-shadow", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
         val pixels = compose.onRoot().captureToImage().toPixelMap()
         val y = shadow.center.y.toInt().coerceIn(0, pixels.height - 1)
         val near = pixels[(shadow.left - 4f * density).toInt().coerceIn(0, pixels.width - 1), y]
