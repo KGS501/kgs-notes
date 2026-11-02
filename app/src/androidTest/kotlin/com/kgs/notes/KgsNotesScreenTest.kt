@@ -1716,9 +1716,16 @@ class KgsNotesScreenTest {
         }
 
         val favorite = compose.onNodeWithContentDescription("Favorite notes")
+        // Hold the press for less than the long-press timeout. With the clock running,
+        // waiting for idle while the finger is down lets the tooltip's long press elapse.
+        compose.mainClock.autoAdvance = false
         favorite.performTouchInput { down(center) }
-        compose.runOnIdle { assertTrue(feedback.isEmpty()) }
+        compose.mainClock.advanceTimeBy(100)
+        compose.runOnIdle { assertTrue("Pressing an app button must stay silent: $feedback", feedback.isEmpty()) }
         favorite.performTouchInput { up() }
+        compose.mainClock.advanceTimeBy(100)
+        compose.runOnIdle { assertTrue("Releasing an app button must stay silent: $feedback", feedback.isEmpty()) }
+        compose.mainClock.autoAdvance = true
         compose.runOnIdle { feedback.clear() }
         favorite.performClick()
         compose.runOnIdle { assertTrue(feedback.isEmpty()) }
