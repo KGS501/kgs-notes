@@ -23,6 +23,7 @@ import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
+import android.view.ViewGroup
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.kgs.notes.design.LocalKgsDarkTheme
@@ -611,6 +612,12 @@ private fun RichMarkdownEditor(
                     .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(context))
                     .build()
                 WebView(context).apply {
+                    // AndroidView gives its view WRAP_CONTENT layout params. A WebView whose
+                    // height wraps its content resolves CSS vh units to 0, so the page would
+                    // only be as tall as the text and taps on the blank area below it would
+                    // land outside the editor's page and dismiss the keyboard. The view is
+                    // always sized by its Compose modifier, so declare it as filling.
+                    layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
                     setBackgroundColor(AndroidColor.TRANSPARENT)
                     importantForAccessibility = WebView.IMPORTANT_FOR_ACCESSIBILITY_YES
                     settings.apply {
