@@ -7,7 +7,10 @@ import { Markdown } from '@tiptap/markdown'
 import StarterKit from '@tiptap/starter-kit'
 import { MarkdownAlert } from './markdown-alert'
 import { viewportBridge, type EditorViewport } from './editor-viewport'
-import { preservingMarked, SourceBlock, SourceFootnoteReference, SourceHtmlBlock, SourceHtmlInline } from './source-capsules'
+import { preservingMarked, SourceBlock, SourceDefinition, SourceFootnoteReference, SourceHtmlBlock, SourceHtmlInline, SourceLinkedImage } from './source-capsules'
+import { imageMarkdown, validateString, SafeCodeBlock, SafeHeading, SafeLink, SafeParagraph } from './markdown-serialization'
+import { SourcePreservation } from './source-preservation'
+import { EditorState } from '@tiptap/pm/state'
 import './style.css'
 import { editorLabel, setLabels as applyLabels } from './editor-labels'
 
@@ -30,6 +33,12 @@ declare global {
 const IMAGE_EXTENSIONS = /\.(avif|gif|jpe?g|png|svg|webp)(?:[?#].*)?$/i
 
 const attachmentImage = Image.extend({
+  addAttributes() {
+    const parent = this.parent?.() ?? {}
+    return Object.fromEntries(Object.entries(parent).map(([name, attribute]) =>
+      ['src', 'alt', 'title'].includes(name) ? [name, { ...attribute, validate: validateString }] : [name, attribute]))
+  },
+  renderMarkdown: node => imageMarkdown(node.attrs),
   addNodeView() {
     return ({ node, editor: currentEditor }) => {
       const source = String(node.attrs.src ?? '')
@@ -167,6 +176,7 @@ const attachmentImage = Image.extend({
   },
 })
 
+const preservation = new SourcePreservation()
 let originalMarkdown = ''
 let dirty = false
 let suppressUpdates = false
@@ -175,7 +185,12 @@ let loadedSuccessfully = true
 const editor = new Editor({
   element: document.querySelector('#editor') as HTMLElement,
   extensions: [
-    StarterKit,
+    StarterKit.configure({ paragraph: false, heading: false, codeBlock: false, link: false }),
+    SafeParagraph,
+    SafeHeading,
+    SafeCodeBlock,
+    // Links never navigate the editor document; the native client blocks every other page.
+    SafeLink.configure({ openOnClick: false }),
     TableKit.configure({ table: { resizable: false } }),
     TaskList,
     TaskItem.configure({ nested: true }),
@@ -185,6 +200,8 @@ const editor = new Editor({
     SourceHtmlInline,
     SourceBlock,
     SourceFootnoteReference,
+    SourceDefinition,
+    SourceLinkedImage,
     Markdown.configure({
       marked: preservingMarked(),
       markedOptions: { gfm: true, breaks: false, pedantic: false },
@@ -203,7 +220,7 @@ const editor = new Editor({
   onUpdate: () => {
     if (suppressUpdates) return
     dirty = true
-    post({ type: 'changed', markdown: editor.getMarkdown() })
+    post({ type: 'changed', markdown: preservation.serialize(editor) })
   },
   onTransaction: ({ editor: currentEditor }) => {
     if (currentEditor.isFocused) postActiveFormatting(currentEditor)
@@ -257,7 +274,7 @@ function post(payload: Record<string, unknown>) {
 }
 
 function exactMarkdown() {
-  return dirty ? editor.getMarkdown() : originalMarkdown
+  return dirty ? preservation.serialize(editor) : originalMarkdown
 }
 
 function postActiveFormatting(currentEditor: Editor = editor) {
@@ -284,9 +301,22 @@ function load(markdown: string) {
   dirty = false
   suppressUpdates = true
   try {
-    loadedSuccessfully = editor.commands.setContent(markdown, { contentType: 'markdown', emitUpdate: false })
+    const parsed = preservation.parse(editor, markdown)
+    // A programmatic load is never an undoable edit: it replaces the document
+    // outside history, then starts a fresh history at the loaded Note.
+    loadedSuccessfully = editor.chain().setMeta('addToHistory', false)
+      .setContent(parsed.content, { emitUpdate: false }).run()
     if (!loadedSuccessfully) post({ type: 'fallback' })
-    else postActiveFormatting()
+    else {
+      resetHistory()
+      // Without exact block boundaries an edit could normalize unrelated
+      // source, so the Note stays in Source Mode instead.
+      if (parsed.apply(editor)) postActiveFormatting()
+      else {
+        loadedSuccessfully = false
+        post({ type: 'fallback' })
+      }
+    }
   } catch {
     loadedSuccessfully = false
     // Never forward parser exceptions or Note contents through diagnostic messages.
@@ -294,6 +324,11 @@ function load(markdown: string) {
   } finally {
     suppressUpdates = false
   }
+}
+
+function resetHistory() {
+  const { state } = editor
+  editor.view.updateState(EditorState.create({ schema: state.schema, doc: state.doc, selection: state.selection, plugins: state.plugins }))
 }
 
 function setLabels(labels: Record<string, string>, language: string) {

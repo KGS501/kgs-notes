@@ -4,6 +4,7 @@ const labels: Record<string, string> = {
   sourceTitle: 'Preserved source — edit in Source Mode', sourceHint: 'Edit this fragment in Source Mode.',
   Comment: 'Comment', HTML: 'HTML', Metadata: 'Metadata', Footnote: 'Footnote', Math: 'Math',
   Directive: 'Directive', 'Footnote reference': 'Footnote reference',
+  'Link reference': 'Link reference', 'Linked image': 'Linked image',
   NOTE: 'Note', TIP: 'Tip', IMPORTANT: 'Important', WARNING: 'Warning', CAUTION: 'Caution',
 }
 export function editorLabel(key: string): string { return labels[key] ?? key }

@@ -152,8 +152,9 @@ class DefaultMarkdownEditor : MarkdownEditor {
         selection: MarkdownSelection,
         marker: String,
     ): MarkdownEdit {
-        val lineStart = lastIndexOf('\n', startIndex = (selection.start - 1).coerceAtLeast(0))
-            .let { if (it < 0) 0 else it + 1 }
+        // Offset zero is the first line start; a newline at that offset ends the
+        // first (empty) line and must not be found by the backward search.
+        val lineStart = if (selection.start == 0) 0 else lastIndexOf('\n', startIndex = selection.start - 1) + 1
         val lineEnd = indexOf('\n', startIndex = selection.start).let { if (it < 0) length else it }
         val line = substring(lineStart, lineEnd)
         val match = LINE_MARKER.find(line)
@@ -164,8 +165,9 @@ class DefaultMarkdownEditor : MarkdownEditor {
         val updated = replaceRange(lineStart, lineEnd, replacement)
         val delta = marker.length - oldMarkerLength
 
+        // A caret at the start of the line content continues after the new marker.
         fun shift(position: Int): Int = when {
-            position <= lineStart + indentation.length -> position
+            position < lineStart + indentation.length -> position
             else -> (position + delta).coerceIn(lineStart + indentation.length + marker.length, updated.length)
         }
 

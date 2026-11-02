@@ -22,7 +22,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 
-prosemirror-changeset 2.4.1 (MIT)
+prosemirror-changeset 2.4.5 (MIT)
 
 Copyright (C) 2017 by Marijn Haverbeke <marijn@haverbeke.berlin> and others
 
@@ -46,16 +46,16 @@ THE SOFTWARE.
 
 
 prosemirror-commands 1.7.2 (MIT)
-prosemirror-dropcursor 1.8.3 (MIT)
+prosemirror-dropcursor 1.8.4 (MIT)
 prosemirror-gapcursor 1.4.1 (MIT)
-prosemirror-history 1.5.0 (MIT)
+prosemirror-history 1.5.1 (MIT)
 prosemirror-inputrules 1.5.1 (MIT)
 prosemirror-keymap 1.2.3 (MIT)
-prosemirror-model 1.25.11 (MIT)
+prosemirror-model 1.25.12 (MIT)
 prosemirror-schema-list 1.5.1 (MIT)
 prosemirror-state 1.4.4 (MIT)
-prosemirror-transform 1.12.0 (MIT)
-prosemirror-view 1.42.2 (MIT)
+prosemirror-transform 1.12.4 (MIT)
+prosemirror-view 1.42.9 (MIT)
 
 Copyright (C) 2015-2017 by Marijn Haverbeke <marijn@haverbeke.berlin> and others
 
