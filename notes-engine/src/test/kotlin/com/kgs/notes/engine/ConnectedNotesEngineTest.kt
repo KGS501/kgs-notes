@@ -250,7 +250,9 @@ class ConnectedNotesEngineTest {
         engine.updateContent(id, "Initial content")
         val transfer = async { engine.moveToSource(id, source.descriptor.id) }
         entered.await()
-        assertEquals(LocalSourceId, assertNotNull(engine.note(id)).sourceId)
+        // The transfer intent is durable before the create is sent: the Note is listed under its destination.
+        assertEquals(source.descriptor.id, assertNotNull(engine.note(id)).sourceId)
+        assertEquals(NoteAttention.TRANSFER_PENDING, assertNotNull(engine.note(id)).attention)
         engine.updateContent(id, "Newer content")
         release.complete(Unit)
         assertEquals(id, transfer.await())
@@ -630,7 +632,12 @@ class ConnectedNotesEngineTest {
         val preserved = assertNotNull(engine.note(id))
         assertEquals("My offline edit", preserved.markdown)
         assertEquals(NoteSyncState.NEEDS_ATTENTION, preserved.syncState)
-        assertTrue(root.resolve("working/base/${id.value}.md").isRegularFile())
+        assertEquals(NoteAttention.CONFLICT, preserved.attention)
+        // One record holds body, base and sync state (schema 2).
+        assertTrue(root.resolve("working/notes/${id.value}.properties").isRegularFile())
+        val reopened = ConnectedNotesEngine.open(root.resolve("local"), root.resolve("working"))
+        assertEquals("My offline edit", assertNotNull(reopened.note(id)).markdown)
+        assertEquals(NoteSyncState.NEEDS_ATTENTION, assertNotNull(reopened.note(id)).syncState)
     }
 
     @Test
@@ -909,7 +916,8 @@ class ConnectedNotesEngineTest {
 
         override suspend fun deleteNote(remoteId: String, expectedRevision: String) {
             beforeWrite()
-            val current = mutableNotes.value.single { it.remoteId == remoteId }
+            // An already absent Note counts as deleted (Source contract).
+            val current = mutableNotes.value.singleOrNull { it.remoteId == remoteId } ?: return respond(Unit)
             if (current.revision != expectedRevision) throw SourceConflictException()
             lastDeletedRevision = expectedRevision
             mutableNotes.value = mutableNotes.value.filterNot { it.remoteId == remoteId }

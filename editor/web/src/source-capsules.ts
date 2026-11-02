@@ -1,6 +1,6 @@
 import { editorLabel } from './editor-labels'
 import { Node } from '@tiptap/core'
-import { Lexer, Marked, Tokenizer, type marked } from 'marked'
+import { Lexer, Marked, Tokenizer, type marked, type Tokens } from 'marked'
 
 /** Unsupported syntax stays canonical source, independent of edits around it. */
 const VOID_TAGS = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr'])
@@ -20,6 +20,16 @@ function pairedHtmlLength(source: string, opening: string): number {
   return opening.length
 }
 
+let duplicateDefinitions = 0
+
+/** Links around images have no editable rich form; keep their exact source. */
+function linkedImage(token: Tokens.Link): Tokens.Generic | undefined {
+  const image = token.tokens?.find((child): child is Tokens.Image => child.type === 'image')
+  if (!image) return undefined
+  return { type: 'sourceLinkedImage', raw: token.raw, text: token.raw, kind: 'Linked image',
+    src: image.href, alt: image.text, href: token.href }
+}
+
 /** A private Marked instance avoids accumulating global tokenizer registrations. */
 export function preservingMarked(): typeof marked {
   const instance = new Marked({
@@ -34,6 +44,24 @@ export function preservingMarked(): typeof marked {
       html(source) {
         const token = Tokenizer.prototype.html.call(this, source)
         return token ? { ...token, type: 'sourceHtmlBlock' } : false
+      },
+      def(source) {
+        const token = Tokenizer.prototype.def.call(this, source)
+        // Marked drops later duplicate labels from the token stream. Keep their
+        // source under a label no reference can match (Rich Mode rejects NUL).
+        if (token && this.lexer.tokens.links[token.tag]) {
+          duplicateDefinitions += 1
+          return { ...token, tag: `\u0000duplicate-${duplicateDefinitions}` }
+        }
+        return token
+      },
+      link(source) {
+        const token = Tokenizer.prototype.link.call(this, source)
+        return token && token.type === 'link' ? linkedImage(token) ?? token : token
+      },
+      reflink(source, links) {
+        const token = Tokenizer.prototype.reflink.call(this, source, links)
+        return token && token.type === 'link' ? linkedImage(token) ?? token : token
       },
       tag(source) {
         const before = { ...this.lexer.state }
@@ -83,10 +111,14 @@ function htmlPreview(source: string): DocumentFragment {
   return preview
 }
 
+const KINDS = new Set(['HTML', 'Metadata', 'Footnote', 'Math', 'Directive', 'Footnote reference', 'Link reference', 'Linked image'])
+function requireString(value: unknown) { if (typeof value !== 'string') throw new RangeError('Expected source text') }
+function requireKind(value: unknown) { if (typeof value !== 'string' || !KINDS.has(value)) throw new RangeError('Unknown source kind') }
+
 function capsule(name: string, inline: boolean, tokenName: string) {
   return Node.create({
     name, group: inline ? 'inline' : 'block', inline, atom: true, selectable: true, marks: '',
-    addAttributes: () => ({ source: { default: '' }, kind: { default: 'HTML' } }),
+    addAttributes: () => ({ source: { default: '', validate: requireString }, kind: { default: 'HTML', validate: requireKind } }),
     parseHTML: () => [],
     renderHTML: ({ node }) => [inline ? 'span' : 'div', { 'data-source-capsule': name }, node.attrs.source],
     markdownTokenName: tokenName,
@@ -153,7 +185,12 @@ function directive(source: string): string | undefined {
 export const SourceBlock = capsule('sourceBlock', false, 'sourceBlock').extend({
   markdownTokenizer: {
     name: 'sourceBlock', level: 'block',
-    start: source => source.search(/^ {0,3}(?:\[\^[^\]\n]+\]:|\$\$|:{3,}|---[ \t]*$|\+\+\+[ \t]*$)/m),
+    // Marked passes the remaining source without its first character, so only a
+    // position after a newline is a real line start; `\---` stays a paragraph.
+    start: source => {
+      const match = /\n {0,3}(?:\[\^[^\]\n]+\]:|\$\$|:{3,}|---[ \t]*$|\+\+\+[ \t]*$)/m.exec(source)
+      return match ? match.index + 1 : -1
+    },
     tokenize(source, tokens) {
       const metadata = tokens.length === 0 && /^(---|\+\+\+)[ \t]*\n[\s\S]*?\n\1[ \t]*(?=\n|$)/.exec(source)
       if (metadata && /^[\w-]+\s*[:=]/m.test(metadata[0])) return { type: 'sourceBlock', raw: metadata[0], kind: 'Metadata' }
@@ -175,5 +212,53 @@ export const SourceFootnoteReference = capsule('sourceFootnoteReference', true, 
       const reference = /^\[\^[^\]\n]+\]/.exec(source)
       return reference ? { type: 'sourceFootnoteReference', raw: reference[0], kind: 'Footnote reference' } : undefined
     },
+  },
+})
+
+/** Link reference definitions stay visible, deletable and byte-exact. */
+export const SourceDefinition = capsule('sourceDefinition', false, 'def').extend({
+  parseMarkdown: token => ({ type: 'sourceDefinition', attrs: { source: (token.raw ?? '').replace(/\n+$/, ''), kind: 'Link reference' } }),
+})
+
+const PREVIEW_IMAGE = /\.(avif|gif|jpe?g|png|svg|webp)(?:[?#].*)?$/i
+
+/** A linked image previews its picture; the outer destination stays in its source. */
+export const SourceLinkedImage = capsule('sourceLinkedImage', true, 'sourceLinkedImage').extend({
+  addAttributes: () => ({ source: { default: '', validate: requireString }, kind: { default: 'Linked image', validate: requireKind },
+    src: { default: '', validate: requireString }, alt: { default: '', validate: requireString } }),
+  parseMarkdown: token => ({ type: 'sourceLinkedImage', attrs: {
+    source: token.raw ?? '', kind: 'Linked image', src: String(token.src ?? ''), alt: String(token.alt ?? ''),
+  } }),
+  addNodeView() {
+    return ({ node }) => {
+      const dom = document.createElement('span')
+      dom.contentEditable = 'false'
+      dom.dataset.sourceCapsule = 'sourceLinkedImage'
+      dom.dataset.sourceKind = 'Linked image'
+      dom.dataset.sourceComment = 'false'
+      dom.className = 'source-capsule source-capsule--inline source-capsule--linked-image'
+      dom.setAttribute('role', 'group')
+      dom.setAttribute('aria-label', `${editorLabel('Linked image')}. ${editorLabel('sourceHint')}`)
+      dom.title = editorLabel('sourceTitle')
+      const src = String(node.attrs.src)
+      // Only an image resource is requested; the outer link is never navigable here.
+      if (PREVIEW_IMAGE.test(src) && !/^\s*(?:javascript|data|blob|file|content):/i.test(src)) {
+        const image = document.createElement('img')
+        image.src = src
+        image.alt = String(node.attrs.alt)
+        image.className = 'inline-image inline-image--linked'
+        image.draggable = false
+        dom.classList.add('source-capsule--preview')
+        dom.append(image)
+      } else {
+        const label = document.createElement('span')
+        label.className = 'source-capsule-label'
+        label.textContent = editorLabel('Linked image')
+        const code = document.createElement('code')
+        code.textContent = String(node.attrs.source)
+        dom.append(label, code)
+      }
+      return { dom }
+    }
   },
 })

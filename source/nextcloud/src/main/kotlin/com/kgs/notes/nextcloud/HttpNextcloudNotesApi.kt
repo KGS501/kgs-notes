@@ -72,6 +72,7 @@ class HttpNextcloudNotesApi(
         val cursors = hashSetOf<String>()
         var cursor: String? = null
         var chunks = 0
+        var listedBytes = 0L
         do {
             val endpointBuilder = requireNotNull(serverUrl.resolve("index.php/apps/notes/api/v1/notes"))
                 .newBuilder()
@@ -80,7 +81,12 @@ class HttpNextcloudNotesApi(
             val request = authenticatedRequest(endpointBuilder.build()).get().build()
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) throw NextcloudApiException(response.code)
-                parseNotes(response.body.string()).forEach { element ->
+                val page = response.body.boundedString(ResponseLimits.NOTES_RESPONSE_BYTES)
+                listedBytes += page.length
+                if (listedBytes > ResponseLimits.NOTES_LISTING_BYTES) {
+                    throw NextcloudConnectionException(NextcloudConnectionFailure.INVALID_RESPONSE)
+                }
+                parseNotes(page).forEach { element ->
                     val id = element.requiredLong("id")
                     referencedIds += id
                     // The terminal chunk also includes id-only references to
@@ -142,6 +148,13 @@ class HttpNextcloudNotesApi(
         }
     }
 
+    override suspend fun updateFavorite(id: Long, favorite: Boolean): RemoteNote = withContext(Dispatchers.IO) {
+        val endpoint = requireNotNull(serverUrl.resolve("index.php/apps/notes/api/v1/notes/$id"))
+        // Notes allows changing only `favorite` on read-only Notes; any other attribute would be rejected.
+        val body = buildJsonObject { put("favorite", favorite) }.toString().toRequestBody(JSON_MEDIA_TYPE)
+        parseNote(executeObject(authenticatedRequest(endpoint).put(body).build(), writeClient))
+    }
+
     override suspend fun updateSettings(fileSuffix: String): NotesSettings = withContext(Dispatchers.IO) {
         val endpoint = requireNotNull(serverUrl.resolve("index.php/apps/notes/api/v1/settings"))
         val body = buildJsonObject { put("fileSuffix", fileSuffix) }
@@ -167,7 +180,7 @@ class HttpNextcloudNotesApi(
 
     private fun executeObject(request: Request, via: OkHttpClient = client): JsonObject = via.newCall(request).execute().use { response ->
         if (!response.isSuccessful) throw NextcloudApiException(response.code)
-        parseElement(response.body.string()).jsonObject
+        parseElement(response.body.boundedString(ResponseLimits.NOTES_RESPONSE_BYTES)).jsonObject
     }
 
     private fun parseNotes(value: String): List<JsonObject> {
@@ -190,15 +203,19 @@ class HttpNextcloudNotesApi(
             throw NextcloudConnectionException(NextcloudConnectionFailure.INVALID_RESPONSE, failure)
         }
         return try {
+            // error=true: the server could not read the file. Its `content` is an error message and its
+            // `readonly` describes the failure, not permissions; neither may become Note data.
+            val readError = (note["error"] as? kotlinx.serialization.json.JsonPrimitive)?.booleanOrNull == true
             RemoteNote(
                 id = note.requiredLong("id"),
                 etag = note.requiredString("etag"),
                 title = note.requiredString("title"),
-                markdown = note.requiredString("content"),
+                markdown = if (readError) "" else note.requiredString("content"),
                 category = note.optionalString("category"),
                 favorite = note["favorite"]?.jsonPrimitive?.booleanOrNull ?: false,
                 modifiedAt = Instant.ofEpochSecond(note.requiredLong("modified")),
-                readOnly = note["readonly"]?.jsonPrimitive?.booleanOrNull ?: false,
+                readOnly = if (readError) false else note["readonly"]?.jsonPrimitive?.booleanOrNull ?: false,
+                contentUnavailable = readError,
             )
         } catch (failure: NextcloudConnectionException) {
             throw failure

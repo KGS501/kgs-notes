@@ -33,12 +33,24 @@ class BottomSheetRegressionTest {
 
     @Test
     fun sortSheetFitsItsOptionsAndTouchesBothSidesAndTheBottom() {
-        compose.setContent { KgsNotesTheme { KgsNotesScreen(NotesUiState(), NotesActions()) } }
+        var density = 1f
+        compose.setContent {
+            density = androidx.compose.ui.platform.LocalDensity.current.density
+            KgsNotesTheme { KgsNotesScreen(NotesUiState(), NotesActions()) }
+        }
         compose.onNodeWithContentDescription("Sort notes").performClick()
         val frame = compose.onNodeWithTag("kgs-sheet-frame").fetchSemanticsNode().boundsInRoot
         val sheet = compose.onNodeWithTag("sort-options-menu").fetchSemanticsNode().boundsInRoot
-        assertEquals(frame.left, sheet.left, 1f)
-        assertEquals(frame.right, sheet.right, 1f)
+        val maxSheetWidth = 640f * density
+        if (frame.width <= maxSheetWidth + 1f) {
+            // Compact windows: the sheet spans the whole width.
+            assertEquals(frame.left, sheet.left, 1f)
+            assertEquals(frame.right, sheet.right, 1f)
+        } else {
+            // Wide windows (tablets) cap sheets at 640 dp and centre them.
+            assertEquals(maxSheetWidth, sheet.width, 1f)
+            assertEquals(frame.center.x, sheet.center.x, 1f)
+        }
         assertEquals(frame.bottom, sheet.bottom, 1f)
         assertTrue("Short sheets should fit content rather than fill the screen", sheet.height < frame.height * .75f)
         for (option in listOf("Last edited", "Last created", "Alphabetical")) compose.onNodeWithText(option).assertIsDisplayed()

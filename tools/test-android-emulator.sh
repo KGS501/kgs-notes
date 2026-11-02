@@ -3,6 +3,52 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FAKE_SDK="$PROJECT_ROOT/tools/test-fixtures/android-sdk"
+# Generous enough for loaded CI hosts, but well below the fake adb's 30 s hang.
+COMMAND_BOUND_SECONDS="${KGS_TEST_COMMAND_BOUND_SECONDS:-15}"
+SCRATCH="$(mktemp -d)"
+trap 'rm -rf "$SCRATCH"' EXIT
+
+fail() {
+    printf '%s\n' "$*" >&2
+    exit 1
+}
+
+# Resolves an environment variable through dev-env.sh in a scrubbed shell, so the
+# result does not depend on the developer's own SDK, JDK, or home directory.
+resolved() {
+    local variable="$1"
+    shift
+    env -i PATH=/usr/bin:/bin HOME="$SCRATCH/home" "$@" \
+        bash -c 'source "$1/tools/dev-env.sh" && printf "%s\n" "${!2}"' _ "$PROJECT_ROOT" "$variable"
+}
+
+mkdir -p "$SCRATCH/home" "$SCRATCH/sdk-a" "$SCRATCH/sdk-b"
+[[ "$(resolved ANDROID_SDK_ROOT KGS_NOTES_ANDROID_SDK_ROOT="$SCRATCH/sdk-a" ANDROID_HOME="$SCRATCH/sdk-b")" == "$SCRATCH/sdk-a" ]] ||
+    fail 'KGS_NOTES_ANDROID_SDK_ROOT must take precedence over ANDROID_HOME'
+[[ "$(resolved ANDROID_SDK_ROOT ANDROID_SDK_ROOT="$SCRATCH/sdk-a" ANDROID_HOME="$SCRATCH/sdk-b")" == "$SCRATCH/sdk-a" ]] ||
+    fail 'ANDROID_SDK_ROOT must take precedence over ANDROID_HOME'
+[[ "$(resolved ANDROID_HOME ANDROID_HOME="$SCRATCH/sdk-b")" == "$SCRATCH/sdk-b" ]] ||
+    fail 'ANDROID_HOME must be honoured and exported'
+mkdir -p "$SCRATCH/home/Android/Sdk"
+[[ "$(resolved ANDROID_SDK_ROOT)" == "$SCRATCH/home/Android/Sdk" ]] ||
+    fail 'The conventional ~/Android/Sdk location must be found without configuration'
+[[ "$(resolved ANDROID_AVD_HOME KGS_NOTES_ANDROID_USER_HOME="$SCRATCH/user")" == "$SCRATCH/user/avd" ]] ||
+    fail 'AVDs must default below the configured Android user home'
+[[ "$(resolved JAVA_HOME KGS_NOTES_JAVA_HOME="$SCRATCH/jdk")" == "$SCRATCH/jdk" ]] ||
+    fail 'KGS_NOTES_JAVA_HOME must select the JDK'
+rmdir "$SCRATCH/home/Android/Sdk"
+
+# A clean checkout without any SDK needs an actionable error, not a missing-file crash.
+set +e
+missing_sdk_output="$(
+    env -i PATH=/usr/bin:/bin HOME="$SCRATCH/home" \
+        timeout "$COMMAND_BOUND_SECONDS" "$PROJECT_ROOT/tools/android-emulator.sh" serial 2>&1
+)"
+missing_sdk_status=$?
+set -e
+if (( missing_sdk_status != 1 )) || [[ "$missing_sdk_output" != *"Android SDK not found"*"KGS_NOTES_ANDROID_SDK_ROOT"* ]]; then
+    fail "Expected an actionable missing-SDK error (status=$missing_sdk_status), got: $missing_sdk_output"
+fi
 
 actual="$(
     KGS_NOTES_ANDROID_SDK_ROOT="$FAKE_SDK" \
@@ -27,7 +73,7 @@ fi
 
 set +e
 launch_output="$(
-    timeout 2 env \
+    timeout "$COMMAND_BOUND_SECONDS" env \
         ANDROID_SERIAL=emulator-5554 \
         KGS_NOTES_ANDROID_SDK_ROOT="$FAKE_SDK" \
         "$PROJECT_ROOT/tools/android-emulator.sh" launch 2>&1
@@ -42,7 +88,7 @@ fi
 
 set +e
 bounded_wait_output="$(
-    timeout 4 env \
+    timeout "$COMMAND_BOUND_SECONDS" env \
         KGS_NOTES_ANDROID_SDK_ROOT="$FAKE_SDK" \
         FAKE_ADB_HANG_DISABLE=1 \
         KGS_ANDROID_SETUP_TIMEOUT_SECONDS=1 \

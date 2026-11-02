@@ -11,7 +11,9 @@ body { margin: 0; background: var(--kgs-surface, #ffffff); }
 button { font: inherit; }
 main { min-height: 100vh; }
 .paper { min-height: 100vh; padding: 16px 20px 72px; background: var(--kgs-surface, #ffffff); }
-.rich-editor { min-height: calc(100vh - 92px); outline: none; font-size: 1rem; line-height: 1.375; }
+/* flow-root keeps the first and last blocks' margins inside the editor; collapsing
+   them through it would make the page taller than the viewport and scrollable. */
+.rich-editor { display: flow-root; min-height: calc(100vh - 92px); outline: none; font-size: 1rem; line-height: 1.375; }
 .rich-editor p:first-child:last-child:has(> br.ProseMirror-trailingBreak)::before {
   float: left;
   height: 0;
@@ -113,6 +115,7 @@ main { min-height: 100vh; }
   -webkit-user-drag: none;
   transition: transform 180ms cubic-bezier(.2, 0, 0, 1), box-shadow 180ms cubic-bezier(.2, 0, 0, 1), opacity 120ms ease;
 }
+.inline-image--linked { border-radius: 4px; vertical-align: middle; }
 .inline-image--dragging {
   opacity: .9;
   transform: scale(1.025);
