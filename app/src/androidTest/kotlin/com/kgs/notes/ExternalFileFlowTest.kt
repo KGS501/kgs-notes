@@ -343,14 +343,19 @@ class ExternalFileFlowTest {
         }
         val uri = fixture.provider.addFile(second)
         val previousKey = fixture.viewModel.state.value.externalFile!!.sessionKey
+        // Hold composition on the first file's frame: its buttons stay attached, so their
+        // captured actions can still be delivered after the session already switched.
+        // Compose refuses to run actions of detached modifier nodes, which no real tap can reach.
+        compose.mainClock.autoAdvance = false
         compose.runOnIdle {
             fixture.viewModel.openExternalFile(ExternalFileRequest.from(
                 Intent(Intent.ACTION_VIEW).setDataAndType(uri, "text/plain"))!!)
         }
         compose.waitUntil(5_000) { fixture.viewModel.state.value.externalFile?.let { it.sessionKey != previousKey && it.text == "Second file" } == true }
-        compose.onNodeWithTag("source-dialog").assertDoesNotExist()
         compose.runOnIdle { oldSave(); oldClose() }
+        compose.mainClock.autoAdvance = true
         compose.waitForIdle()
+        compose.onNodeWithTag("source-dialog").assertDoesNotExist()
         compose.onNodeWithTag("source-editor").assertTextContains("Second file")
         assertTrue(fixture.engine.library.value.active.isEmpty())
         assertEquals(0, fixture.previewCloses.get())
