@@ -947,15 +947,24 @@ class KgsNotesScreenTest {
         compose.onNodeWithContentDescription("Back to Notes").performClick()
         compose.mainClock.advanceTimeBy(48)
         val list = compose.onNodeWithTag("notes-list")
-        fun scrollBy(delta: Float) {
+        fun scrolled() = list.fetchSemanticsNode().config[androidx.compose.ui.semantics.SemanticsProperties.VerticalScrollAxisRange].value()
+        // The ScrollBy accessibility action animates the scroll, so compare the card with the
+        // list's actual offset on each frame instead of assuming the full delta landed at once.
+        fun scrollBy(delta: Float, expectedTotal: Float) {
+            val start = scrolled()
             list.performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.ScrollBy) { it(0f, delta) }
             compose.mainClock.advanceTimeBy(32)
             compose.onRoot().captureToImage()
+            val offset = scrolled()
+            assertTrue("The list must already be scrolling", kotlin.math.abs(offset - start) > 1f)
+            assertEquals("The returning card must follow the scroll immediately", resting.top - offset,
+                card.fetchSemanticsNode().boundsInRoot.top, 2f)
+            repeat(60) { if (kotlin.math.abs(scrolled() - expectedTotal) > .5f) compose.mainClock.advanceTimeByFrame() }
+            assertEquals(expectedTotal, scrolled(), .5f)
+            assertEquals(resting.top - expectedTotal, card.fetchSemanticsNode().boundsInRoot.top, 2f)
         }
-        scrollBy(80f)
-        assertEquals("The returning card must follow the scroll immediately", resting.top - 80f,
-            card.fetchSemanticsNode().boundsInRoot.top, 2f)
-        scrollBy(-30f)
+        scrollBy(80f, 80f)
+        scrollBy(-30f, 50f)
         val afterScroll = card.fetchSemanticsNode().boundsInRoot
         assertEquals(resting.top - 50f, afterScroll.top, 2f)
         compose.mainClock.advanceTimeBy(1000)
