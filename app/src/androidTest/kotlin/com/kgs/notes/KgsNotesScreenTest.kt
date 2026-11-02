@@ -152,13 +152,28 @@ class KgsNotesScreenTest {
                 }
             }
         }
+        val restingCardHeight = compose.onNodeWithTag("note-card-${note.id.value}").fetchSemanticsNode().size.height
         compose.onNodeWithTag("note-card-${note.id.value}").performClick()
+        // Let the opening transition finish before freezing the clock; otherwise the
+        // editor (and its Back button) is never composed.
+        compose.onNodeWithTag("note-editor").assertIsDisplayed()
         compose.mainClock.autoAdvance = false
         compose.onNodeWithContentDescription("Back to Notes").performClick()
         val maxInkRows = 42 * ApplicationProvider.getApplicationContext<Application>().resources.displayMetrics.density
+        // The preview is a plain child of the clickable card, so it only exists in the unmerged
+        // tree, and the returning card places it a couple of frames into the morph. Sample the
+        // morph from the first frame it is drawn rather than at a fixed offset.
+        val preview = compose.onNodeWithTag("note-preview-${note.id.value}", useUnmergedTree = true)
+        fun previewHeight() = compose.onAllNodesWithTag("note-preview-${note.id.value}", useUnmergedTree = true)
+            .fetchSemanticsNodes().firstOrNull()?.boundsInRoot?.takeIf { it.width > 0f }?.height ?: 0f
+        repeat(30) { if (previewHeight() < 1f) compose.mainClock.advanceTimeByFrame() }
+        assertTrue("The returning card must draw its preview during the morph", previewHeight() >= 1f)
+        assertTrue("Sampling must start while the card is still morphing",
+            compose.onNodeWithTag("note-card-${note.id.value}").fetchSemanticsNode().size.height > restingCardHeight + 1)
+        var inkSeen = false
         for (frame in 1..4) {
-            compose.mainClock.advanceTimeBy(64)
-            val pixels = compose.onNodeWithTag("note-preview-${note.id.value}").captureToImage().toPixelMap()
+            if (frame > 1) compose.mainClock.advanceTimeBy(64)
+            val pixels = preview.captureToImage().toPixelMap()
             val inkRows = (0 until pixels.height).count { y ->
                 (0 until pixels.width / 2).any { x ->
                     val pixel = pixels[x, y]
@@ -166,7 +181,9 @@ class KgsNotesScreenTest {
                 }
             }
             assertTrue("One line must not stretch to the editor height on frame $frame", inkRows < maxInkRows)
+            inkSeen = inkSeen || inkRows > 0
         }
+        assertTrue("The preview line must be visible while the card morphs", inkSeen)
     }
 
     @Test
@@ -2246,6 +2263,8 @@ class KgsNotesScreenTest {
             }
         }
         compose.onNodeWithContentDescription("Open menu").performClick()
+        // The drawer must be open before the clock is frozen, or its rows never compose.
+        compose.onNodeWithTag("modal-choice-Trash").assertIsDisplayed()
         compose.mainClock.autoAdvance = false
         compose.onNodeWithTag("modal-choice-Trash").performClick()
         compose.mainClock.advanceTimeBy(80)
