@@ -23,7 +23,6 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.webkit.MimeTypeMap
 import com.kgs.notes.design.LocalKgsDarkTheme
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
@@ -172,6 +171,7 @@ fun KgsMarkdownEditor(
     onAddImage: () -> Unit = {},
     canAddImage: Boolean = true,
     openManagedAttachment: (String) -> InputStream? = { null },
+    managedAttachmentType: (String) -> String? = { null },
     modifier: Modifier = Modifier,
     bodyModifier: Modifier = Modifier,
     richLoadingContent: @Composable () -> Unit = {},
@@ -248,6 +248,7 @@ fun KgsMarkdownEditor(
                         initialViewport = viewport,
                         onViewportRestored = { readingBaseline = currentMarkdown to it },
                         openManagedAttachment = openManagedAttachment,
+                        managedAttachmentType = managedAttachmentType,
                         modifier = Modifier.fillMaxSize().graphicsLayer { alpha = richOpacity },
                         readOnly = readOnly,
                         allowRemoteResources = allowRemoteResources,
@@ -515,6 +516,7 @@ private fun RichMarkdownEditor(
     initialViewport: EditorViewport?,
     onViewportRestored: (EditorViewport) -> Unit,
     openManagedAttachment: (String) -> InputStream?,
+    managedAttachmentType: (String) -> String?,
     modifier: Modifier,
     readOnly: Boolean = false,
     allowRemoteResources: Boolean = true,
@@ -562,6 +564,7 @@ private fun RichMarkdownEditor(
     val latestRestoreFocus by rememberUpdatedState(restoreFocus)
     val latestOnFocusRestored by rememberUpdatedState(onFocusRestored)
     val latestOpenManagedAttachment by rememberUpdatedState(openManagedAttachment)
+    val latestManagedAttachmentType by rememberUpdatedState(managedAttachmentType)
     val latestReadOnly by rememberUpdatedState(readOnly)
     val latestAllowRemoteResources by rememberUpdatedState(allowRemoteResources)
     var rendererGeneration by remember { mutableIntStateOf(0) }
@@ -606,20 +609,30 @@ private fun RichMarkdownEditor(
                         allowUniversalAccessFromFileURLs = false
                         mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
                         cacheMode = WebSettings.LOAD_NO_CACHE
+                        setSupportMultipleWindows(false)
+                        javaScriptCanOpenWindowsAutomatically = false
                     }
                     webViewClient = object : WebViewClient() {
                         override fun shouldInterceptRequest(
                             view: WebView,
                             request: WebResourceRequest,
                         ): WebResourceResponse? {
-                            request.managedAttachmentRequest()?.let { attachmentRequest ->
+                            val url = request.url.toString()
+                            // Only the fixed editor document may become a page on the bridge origin.
+                            if (request.isForMainFrame) {
+                                if (!EditorWebPolicy.allowsMainFrameRequest(url)) return deniedResponse()
+                                val document = assetLoader.shouldInterceptRequest(request.url) ?: return deniedResponse()
+                                document.responseHeaders = (document.responseHeaders.orEmpty()) + EditorWebPolicy.editorDocumentHeaders()
+                                return document
+                            }
+                            EditorWebPolicy.attachmentRequest(url)?.let { attachmentRequest ->
                                 val content = latestOpenManagedAttachment(attachmentRequest.id)
-                                    ?: return WebResourceResponse(null, null, null)
-                                return WebResourceResponse(
-                                    attachmentRequest.mediaType,
-                                    null,
-                                    content,
-                                )
+                                    ?: return deniedResponse(404, "Not Found")
+                                val storedType = runCatching { latestManagedAttachmentType(attachmentRequest.id) }.getOrNull()
+                                val typed = EditorWebPolicy.typedAttachment(attachmentRequest, storedType, content)
+                                    ?: return deniedResponse()
+                                return WebResourceResponse(typed.mediaType, null, 200, "OK",
+                                    EditorWebPolicy.attachmentHeaders(), typed.data)
                             }
                             return assetLoader.shouldInterceptRequest(request.url)
                                 ?: if (!latestAllowRemoteResources) WebResourceResponse("text/plain", "UTF-8", java.io.ByteArrayInputStream(byteArrayOf())) else null
@@ -628,7 +641,7 @@ private fun RichMarkdownEditor(
                         override fun shouldOverrideUrlLoading(
                             view: WebView,
                             request: WebResourceRequest,
-                        ): Boolean = request.url.host != ASSET_HOST
+                        ): Boolean = !EditorWebPolicy.allowsTopLevelNavigation(request.url.toString())
 
                         override fun onReceivedSslError(
                             view: WebView,
@@ -658,7 +671,9 @@ private fun RichMarkdownEditor(
                             BRIDGE_NAME,
                             setOf(ASSET_ORIGIN),
                         ) { view, message, sourceOrigin, isMainFrame, _ ->
-                            if (!isMainFrame || sourceOrigin != Uri.parse(ASSET_ORIGIN)) {
+                            if (!isMainFrame || sourceOrigin != Uri.parse(ASSET_ORIGIN) ||
+                                !EditorWebPolicy.isEditorDocument(view.url)
+                            ) {
                                 return@addWebMessageListener
                             }
                             val payload = runCatching {
@@ -756,7 +771,7 @@ private fun RichMarkdownEditor(
                             }
                         }
                     }
-                    loadUrl("$ASSET_ORIGIN/assets/kgs-editor/index.html")
+                    loadUrl(EditorWebPolicy.EDITOR_URL)
                 }
             },
             update = {},
@@ -770,24 +785,9 @@ private fun RichMarkdownEditor(
     }
 }
 
-private data class ManagedAttachmentRequest(
-    val id: String,
-    val mediaType: String,
+private fun deniedResponse(status: Int = 403, reason: String = "Forbidden") = WebResourceResponse(
+    "text/plain", "UTF-8", status, reason, EditorWebPolicy.deniedHeaders(), java.io.ByteArrayInputStream(byteArrayOf()),
 )
-
-private fun WebResourceRequest.managedAttachmentRequest(): ManagedAttachmentRequest? {
-    if (url.host != ASSET_HOST) return null
-    val vaultIndex = url.pathSegments.indexOf(".kgs-notes-attachments")
-    if (vaultIndex < 0 || vaultIndex + 2 >= url.pathSegments.size) return null
-    val storageName = url.pathSegments[vaultIndex + 2]
-    val id = storageName.substringBefore('.')
-    if (!id.matches(Regex("[a-f0-9-]{36}"))) return null
-    val extension = storageName.substringAfterLast('.', "").lowercase()
-    val mediaType = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
-        ?.takeIf { it.startsWith("image/") }
-        ?: return null
-    return ManagedAttachmentRequest(id, mediaType)
-}
 
 private class EditorCommandDispatcher {
     private var owner: Any? = null
@@ -1206,8 +1206,7 @@ private fun WebView.runCommand(
     evaluateJavascript("window.kgsEditor?.run(${JSONObject.quote(name)})", null)
 }
 
-private const val ASSET_HOST = "appassets.androidplatform.net"
-private const val ASSET_ORIGIN = "https://$ASSET_HOST"
+private const val ASSET_ORIGIN = EditorWebPolicy.ASSET_ORIGIN
 private const val BRIDGE_NAME = "KgsNotesEditor"
 
 /**
