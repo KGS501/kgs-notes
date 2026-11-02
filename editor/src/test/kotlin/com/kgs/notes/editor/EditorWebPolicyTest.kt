@@ -16,6 +16,17 @@ class EditorWebPolicyTest {
         .toByteArray()
 
     @Test
+    fun `blocked navigations become links only for schemes another app may open`() {
+        listOf("https://example.org/a?b=1", "http://example.org", "mailto:me@example.org", "tel:+4912345", "geo:0,0")
+            .forEach { assertEquals(it, EditorWebPolicy.externalLink(it)) }
+        listOf(
+            "${EditorWebPolicy.ASSET_ORIGIN}/assets/kgs-editor/Other%20Note.md",
+            "javascript:alert(1)", "file:///sdcard/a.txt", "content://x/y", "intent://x#Intent;end", "data:text/html,x",
+            "not a url", null,
+        ).forEach { assertNull("$it", EditorWebPolicy.externalLink(it)) }
+    }
+
+    @Test
     fun `only the fixed bundled editor document may be a top-level page`() {
         assertTrue(EditorWebPolicy.allowsTopLevelNavigation(EditorWebPolicy.EDITOR_URL))
         assertTrue(EditorWebPolicy.allowsTopLevelNavigation("${EditorWebPolicy.EDITOR_URL}#section"))

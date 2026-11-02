@@ -11,6 +11,11 @@ body { margin: 0; background: var(--kgs-surface, #ffffff); }
 button { font: inherit; }
 main { min-height: 100vh; }
 .paper { min-height: 100vh; padding: 16px 20px 72px; background: var(--kgs-surface, #ffffff); }
+/* The page itself never scrolls sideways: text stays on screen, and only wide
+   content such as a table or code block scrolls within its own box. */
+html { overflow-x: hidden; }
+.paper { overflow-x: clip; }
+.rich-editor { overflow-wrap: break-word; }
 /* flow-root keeps the first and last blocks' margins inside the editor; collapsing
    them through it would make the page taller than the viewport and scrollable. */
 .rich-editor { display: flow-root; min-height: calc(100vh - 92px); outline: none; font-size: 1rem; line-height: 1.375; }
@@ -98,6 +103,9 @@ main { min-height: 100vh; }
 .rich-editor ul[data-type="taskList"] > li > label input:checked::before { transform: scale(1); }
 .rich-editor ul[data-type="taskList"] > li > label input:active { transform: scale(.86); }
 .rich-editor ul[data-type="taskList"] > li > label input:focus-visible { outline: 3px solid var(--kgs-primary-container, #dcebff); outline-offset: 2px; }
+.rich-editor .tableWrapper, .source-capsule--preview { max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; }
+.rich-editor .tableWrapper { margin: 20px 0; }
+.rich-editor .tableWrapper > table { margin: 0; }
 .rich-editor table { width: 100%; border-collapse: separate; border-spacing: 0; margin: 20px 0; overflow: hidden; border: 1px solid var(--kgs-outline, #d5e0ec); border-radius: 14px; }
 .rich-editor th, .rich-editor td { min-width: 76px; border-right: 1px solid var(--kgs-outline, #d5e0ec); border-bottom: 1px solid var(--kgs-outline, #d5e0ec); padding: 10px 12px; vertical-align: top; }
 .rich-editor tr:last-child > * { border-bottom: 0; }

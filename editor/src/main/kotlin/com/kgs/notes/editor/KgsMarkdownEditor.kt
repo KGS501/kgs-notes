@@ -127,7 +127,9 @@ import com.kgs.notes.design.fastSpatialSpec
 import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.collectLatest
 import org.json.JSONObject
 import org.json.JSONTokener
 import java.io.InputStream
@@ -142,7 +144,20 @@ enum class EditorMode {
     SOURCE,
 }
 
-private data class EditorViewport(
+/**
+ * Where a Note was being read: the content at the top of the editor and the selection.
+ * Hosts keep it across recreated editors (folds, rotation) and pass it back as
+ * `initialPosition`; a different window size re-anchors on the same content.
+ */
+class EditorPosition internal constructor(
+    internal val mode: EditorMode,
+    internal val viewport: EditorViewport,
+) {
+    /** Exact pixels only apply to the same editor at the same size; otherwise anchor on content. */
+    internal fun viewportFor(target: EditorMode) = if (target == mode) viewport else viewport.copy(scrollY = null)
+}
+
+internal data class EditorViewport(
     val sourceOffset: Int,
     val top: Float,
     val selectionStart: Int,
@@ -184,6 +199,10 @@ fun KgsMarkdownEditor(
     readOnly: Boolean = false,
     allowRemoteResources: Boolean = true,
     onSnapshotReaderReady: (suspend () -> String?) -> Unit = {},
+    initialPosition: EditorPosition? = null,
+    onPositionChange: (EditorPosition) -> Unit = {},
+    /** A tapped link's raw destination; the editor itself never navigates. */
+    onOpenLink: (String) -> Unit = {},
 ) {
     val strings = androidx.compose.ui.platform.LocalResources.current
 
@@ -204,7 +223,8 @@ fun KgsMarkdownEditor(
 
     val commands = remember { EditorCommandDispatcher() }
     val modeSwitchScope = rememberCoroutineScope()
-    var viewport by remember { mutableStateOf<EditorViewport?>(null) }
+    var viewport by remember { mutableStateOf(initialPosition?.viewportFor(effectiveMode)) }
+    val latestOnPositionChange by rememberUpdatedState(onPositionChange)
     var switchingMode by remember { mutableStateOf(false) }
     val modeSnapshots = remember { mutableMapOf<EditorMode, Pair<String, EditorViewport>>() }
     var readingBaseline by remember { mutableStateOf<Pair<String, EditorViewport>?>(null) }
@@ -252,6 +272,8 @@ fun KgsMarkdownEditor(
                         commands = commands,
                         initialViewport = viewport,
                         onViewportRestored = { readingBaseline = currentMarkdown to it },
+                        onViewportChange = { latestOnPositionChange(EditorPosition(EditorMode.RICH, it)) },
+                        onOpenLink = onOpenLink,
                         openManagedAttachment = openManagedAttachment,
                         managedAttachmentType = managedAttachmentType,
                         modifier = Modifier.fillMaxSize().graphicsLayer { alpha = richOpacity },
@@ -272,6 +294,7 @@ fun KgsMarkdownEditor(
                     editor = editor,
                     initialViewport = viewport,
                     onViewportRestored = { readingBaseline = currentMarkdown to it },
+                    onViewportChange = { latestOnPositionChange(EditorPosition(EditorMode.SOURCE, it)) },
                     restoreFocus = restoreKeyboardMode == EditorMode.SOURCE,
                     onFocusRestored = { restoreKeyboardMode = null },
                     modifier = Modifier.fillMaxSize(),
@@ -359,6 +382,7 @@ private fun SourceMarkdownEditor(
     editor: MarkdownEditor,
     initialViewport: EditorViewport?,
     onViewportRestored: (EditorViewport) -> Unit,
+    onViewportChange: (EditorViewport) -> Unit,
     restoreFocus: Boolean,
     onFocusRestored: () -> Unit,
     modifier: Modifier,
@@ -403,6 +427,14 @@ private fun SourceMarkdownEditor(
             withFrameNanos { }
             captureViewport()?.let(onViewportRestored)
             reportedViewport = true
+        }
+    }
+    val latestOnViewportChange by rememberUpdatedState(onViewportChange)
+    LaunchedEffect(Unit) {
+        snapshotFlow { listOf(scroll.value, field.selection, viewportSize, restoringViewport) }.collectLatest {
+            if (restoringViewport) return@collectLatest
+            delay(150)
+            captureViewport()?.let(latestOnViewportChange)
         }
     }
     val latestOnMarkdownChange by rememberUpdatedState(onMarkdownChange)
@@ -529,6 +561,8 @@ private fun RichMarkdownEditor(
     commands: EditorCommandDispatcher,
     initialViewport: EditorViewport?,
     onViewportRestored: (EditorViewport) -> Unit,
+    onViewportChange: (EditorViewport) -> Unit,
+    onOpenLink: (String) -> Unit,
     openManagedAttachment: (String) -> InputStream?,
     managedAttachmentType: (String) -> String?,
     modifier: Modifier,
@@ -574,6 +608,8 @@ private fun RichMarkdownEditor(
     val latestOnActiveCommandsChange by rememberUpdatedState(onActiveCommandsChange)
     val latestOnReady by rememberUpdatedState(onReady)
     val latestOnViewportRestored by rememberUpdatedState(onViewportRestored)
+    val latestOnViewportChange by rememberUpdatedState(onViewportChange)
+    val latestOnOpenLink by rememberUpdatedState(onOpenLink)
     val latestOnFallback by rememberUpdatedState(onFallback)
     val latestRestoreFocus by rememberUpdatedState(restoreFocus)
     val latestOnFocusRestored by rememberUpdatedState(onFocusRestored)
@@ -619,6 +655,11 @@ private fun RichMarkdownEditor(
                     // always sized by its Compose modifier, so declare it as filling.
                     layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
                     setBackgroundColor(AndroidColor.TRANSPARENT)
+                    // The page never scrolls sideways; wide tables scroll inside their own box.
+                    isHorizontalScrollBarEnabled = false
+                    // Positions arrive only once the Note's own position was restored, so
+                    // the blank first frame can't overwrite where the person was reading.
+                    var reportsViewport = false
                     importantForAccessibility = WebView.IMPORTANT_FOR_ACCESSIBILITY_YES
                     settings.apply {
                         javaScriptEnabled = true
@@ -661,7 +702,23 @@ private fun RichMarkdownEditor(
                         override fun shouldOverrideUrlLoading(
                             view: WebView,
                             request: WebResourceRequest,
-                        ): Boolean = !EditorWebPolicy.allowsTopLevelNavigation(request.url.toString())
+                        ): Boolean {
+                            val url = request.url.toString()
+                            if (EditorWebPolicy.allowsTopLevelNavigation(url)) return false
+                            // The page's own link handler normally reports taps; this catches the rest.
+                            EditorWebPolicy.externalLink(url)?.let { link -> if (connectedWebView === view) latestOnOpenLink(link) }
+                            return true
+                        }
+
+                        override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
+                            // Never leave the editor on another page without a way back:
+                            // rebuild it from the Note instead.
+                            if (!EditorWebPolicy.allowsTopLevelNavigation(url)) {
+                                view.stopLoading()
+                                view.destroyEditor()
+                                rendererGeneration += 1
+                            }
+                        }
 
                         override fun onReceivedSslError(
                             view: WebView,
@@ -701,12 +758,20 @@ private fun RichMarkdownEditor(
                             }.getOrNull() ?: return@addWebMessageListener
                             when (payload.optString("type")) {
                                 "fallback" -> if (connectedWebView === view) latestOnFallback()
+                                "viewport" -> if (connectedWebView === view && reportsViewport) {
+                                    runCatching { EditorViewport.from(payload.getJSONObject("viewport")) }.getOrNull()
+                                        ?.let(latestOnViewportChange)
+                                }
+                                "openLink" -> if (connectedWebView === view) {
+                                    payload.optString("href").trim().takeIf { it.isNotEmpty() }?.let(latestOnOpenLink)
+                                }
                                 "viewportRestored" -> if (connectedWebView === view) {
                                     val restored = runCatching { EditorViewport.from(payload.getJSONObject("viewport")) }.getOrNull()
                                     view.postVisualStateCallbackIfAlive(0L, object : WebView.VisualStateCallback() {
                                         override fun onComplete(requestId: Long) {
                                             if (connectedWebView === view) {
                                                 restored?.let(latestOnViewportRestored)
+                                                reportsViewport = true
                                                 latestOnReady()
                                             }
                                         }
@@ -725,7 +790,10 @@ private fun RichMarkdownEditor(
                                             view.postVisualStateCallbackIfAlive(0L, object : WebView.VisualStateCallback() {
                                                 override fun onComplete(requestId: Long) {
                                                     if (connectedWebView === view) {
-                                                        if (initialViewport == null) latestOnReady()
+                                                        if (initialViewport == null) {
+                                                            reportsViewport = true
+                                                            latestOnReady()
+                                                        }
                                                         else {
                                                             val notify = "window.$BRIDGE_NAME.postMessage(JSON.stringify({type:'viewportRestored',viewport:window.kgsEditor.viewport()}))"
                                                             view.evaluateJavascript(

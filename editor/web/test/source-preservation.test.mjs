@@ -356,6 +356,41 @@ test('links are not opened or navigated from inside the editor', () => {
   } finally { view.close() }
 })
 
+test('a tap on a link while reading asks the host to open it, without focusing the editor', async () => {
+  const view = renderer()
+  try {
+    view.bridge.load('See [the plan](../Work/Plan%20A.md) and [site](https://example.org/x).')
+    const [note, site] = view.root.querySelectorAll('a')
+    const tap = (anchor, move = 0) => {
+      const options = { bubbles: true, cancelable: true, button: 0, clientX: 10, clientY: 10 }
+      const down = new view.window.MouseEvent('pointerdown', options)
+      anchor.dispatchEvent(down)
+      if (move) anchor.dispatchEvent(new view.window.MouseEvent('pointermove', { ...options, clientY: 10 + move }))
+      anchor.dispatchEvent(new view.window.MouseEvent('pointerup', { ...options, clientY: 10 + move }))
+      const click = new view.window.MouseEvent('click', options)
+      anchor.dispatchEvent(click)
+      return { down, click }
+    }
+    const opened = () => view.messages.filter(message => message.type === 'openLink').map(message => message.href)
+    const first = tap(note)
+    tap(site)
+    assert.deepEqual(opened(), ['../Work/Plan%20A.md', 'https://example.org/x'])
+    assert.equal(first.down.defaultPrevented, true, 'the keyboard stays closed')
+    assert.equal(first.click.defaultPrevented, true, 'the editor document never navigates')
+    // A scroll that starts on a link is not a tap.
+    tap(site, 40)
+    assert.equal(opened().length, 2)
+    // While typing, a tap places the caret in the linked text instead.
+    view.editor.commands.focus()
+    await settle()
+    assert.equal(view.editor.isFocused, true)
+    const typing = tap(note)
+    assert.equal(opened().length, 2)
+    assert.equal(typing.down.defaultPrevented, false)
+    assert.equal(typing.click.defaultPrevented, true)
+  } finally { view.close() }
+})
+
 test('render-only normalization never replaces untouched source', () => {
   const source = '#  Spaced   heading  #\n\n*  item\n\n__strong__ and *em*\n\n<br/>\n\n| a |\n|:-|\n| b |'
   const view = renderer()

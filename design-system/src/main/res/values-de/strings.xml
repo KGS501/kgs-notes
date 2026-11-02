@@ -143,6 +143,8 @@
     <string name="ui_no_notes_in_this_category">"Keine Notizen in dieser Kategorie"</string>
     <string name="ui_no_notes_without_a_category">"Keine Notizen ohne Kategorie"</string>
     <string name="ui_no_browser_is_available">"Kein Browser verfügbar"</string>
+    <string name="ui_no_app_can_open_this_link">"Keine App kann diesen Link öffnen"</string>
+    <string name="ui_this_link_points_to_a_file_or_note_that_isn_t_in_kgs_notes">"Dieser Link verweist auf eine Datei oder Notiz, die nicht in KGS Notes ist"</string>
     <string name="ui_no_favorites_yet">"Noch keine Favoriten"</string>
     <string name="ui_no_file_picker_is_available">"Keine Dateiauswahl verfügbar"</string>
     <string name="ui_no_local_notes">"Keine lokalen Notizen"</string>
