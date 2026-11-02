@@ -61,7 +61,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
-import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -167,7 +166,9 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.input.pointer.AwaitPointerEventScope
 import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInParent
 import androidx.compose.ui.layout.boundsInRoot
@@ -1427,9 +1428,9 @@ private fun LibraryCollection(
                         requireUnconsumed = false,
                         pass = PointerEventPass.Final,
                     )
-                    val up = waitForUpOrCancellation(pass = PointerEventPass.Final)
+                    val tapped = awaitTapReleaseEvenIfConsumed(PointerEventPass.Final)
                     val bounds = searchBounds
-                    if (up != null && searchFocused && bounds != null && !bounds.contains(down.position + collectionOrigin)) {
+                    if (tapped && searchFocused && bounds != null && !bounds.contains(down.position + collectionOrigin)) {
                         focusManager.clearFocus()
                     }
                 }
@@ -1739,7 +1740,7 @@ private fun LibraryHeader(
             .pointerInput(Unit) {
                 awaitEachGesture {
                     awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Final)
-                    if (waitForUpOrCancellation(pass = PointerEventPass.Final) != null) {
+                    if (awaitTapReleaseEvenIfConsumed(PointerEventPass.Final)) {
                         focusManager.clearFocus()
                     }
                 }
@@ -3904,4 +3905,19 @@ private fun Modifier.editorTitleBackOverlap(overlap: androidx.compose.ui.unit.Dp
         minHeight = constraints.minHeight, maxHeight = constraints.maxHeight,
     ))
     layout(placeable.width - extra, placeable.height) { placeable.placeRelative(-extra, 0) }
+}
+
+/**
+ * Waits for the end of a gesture observed outside the focused control. Returns true for a
+ * tap, including taps whose release a child button already consumed, and false when a
+ * child consumed movement (scrolling or dragging) before the release.
+ * `waitForUpOrCancellation` treats a consumed release as cancelled, so a tap on a button
+ * such as a library filter would otherwise leave the search field focused.
+ */
+private suspend fun AwaitPointerEventScope.awaitTapReleaseEvenIfConsumed(pass: PointerEventPass): Boolean {
+    while (true) {
+        val event = awaitPointerEvent(pass)
+        if (event.changes.all { !it.pressed }) return true
+        if (event.changes.any { it.isConsumed && it.positionChanged() }) return false
+    }
 }
