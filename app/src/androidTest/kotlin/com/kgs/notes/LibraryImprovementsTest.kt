@@ -240,19 +240,26 @@ class LibraryImprovementsTest {
     }
 
     @Test fun sheetsStayContentSizedAndConstrainedOnLargeScreens() {
-        var pixelsPerDp = 1f
+        // Modal sheets render in their own window, which ForcedSize cannot resize and which
+        // provides its own density. Measure in that window's density: on the tablet runner
+        // the window is genuinely wide, and on phones the cap must still hold.
+        var pixelsPerDp = 0f
+        var windowWidth = 0f
         compose.setContent {
             DeviceConfigurationOverride(DeviceConfigurationOverride.ForcedSize(DpSize(1200.dp, 850.dp))) {
-                pixelsPerDp = LocalDensity.current.density
                 KgsNotesTheme {
                     com.kgs.notes.design.KgsBottomSheet(true, {}, modifier = androidx.compose.ui.Modifier.testTag("wide-sheet")) {
+                        pixelsPerDp = LocalDensity.current.density
+                        windowWidth = androidx.compose.ui.platform.LocalWindowInfo.current.containerSize.width.toFloat()
                         androidx.compose.material3.Text("Sheet content")
                     }
                 }
             }
         }
         val sheet = compose.onNodeWithTag("wide-sheet").fetchSemanticsNode().boundsInRoot
-        assertTrue(sheet.width <= 640f * pixelsPerDp + 1f)
+        assertTrue(pixelsPerDp > 0f)
+        assertTrue("Sheets must be capped at 640 dp: ${sheet.width}px at $pixelsPerDp", sheet.width <= 640f * pixelsPerDp + 1f)
+        assertTrue("Sheets fill narrower windows", sheet.width >= minOf(windowWidth, 640f * pixelsPerDp) - 1f)
         assertTrue(sheet.height < 400f * pixelsPerDp)
     }
 
