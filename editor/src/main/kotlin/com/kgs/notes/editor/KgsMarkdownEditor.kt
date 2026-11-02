@@ -23,6 +23,7 @@ import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
+import android.view.ViewGroup
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.kgs.notes.design.LocalKgsDarkTheme
@@ -101,9 +102,11 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.ScrollAxisRange
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.verticalScrollAxisRange
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.layout.onSizeChanged
@@ -498,6 +501,15 @@ private fun SourceMarkdownEditor(
                 .graphicsLayer { alpha = opacity }
                 .onSizeChanged { viewportSize = it }
                 .focusRequester(focusRequester)
+                // BasicTextField offers ScrollBy for its internal scroll but reports no
+                // position. Publish it, like the library list does, so accessibility
+                // services (and tests) can tell where in a long Note the reader is.
+                .semantics {
+                    verticalScrollAxisRange = ScrollAxisRange(
+                        value = { scroll.value.toFloat() },
+                        maxValue = { scroll.maxValue.toFloat() },
+                    )
+                }
                 .testTag("source-editor"),
         )
     }
@@ -600,6 +612,12 @@ private fun RichMarkdownEditor(
                     .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(context))
                     .build()
                 WebView(context).apply {
+                    // AndroidView gives its view WRAP_CONTENT layout params. A WebView whose
+                    // height wraps its content resolves CSS vh units to 0, so the page would
+                    // only be as tall as the text and taps on the blank area below it would
+                    // land outside the editor's page and dismiss the keyboard. The view is
+                    // always sized by its Compose modifier, so declare it as filling.
+                    layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
                     setBackgroundColor(AndroidColor.TRANSPARENT)
                     importantForAccessibility = WebView.IMPORTANT_FOR_ACCESSIBILITY_YES
                     settings.apply {
