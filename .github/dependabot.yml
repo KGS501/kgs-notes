@@ -5,10 +5,3 @@ updates:
     directory: /
     schedule:
       interval: weekly
-    ignore:
-      # setup-gradle v6 bundles a proprietary caching component under Gradle's
-      # Terms of Use (https://blog.gradle.org/github-actions-for-gradle-v6).
-      # Adopting it is a licensing decision, so stay on MIT-licensed v5 until
-      # the maintainers choose otherwise.
-      - dependency-name: gradle/actions
-        update-types: ["version-update:semver-major"]
