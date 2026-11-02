@@ -317,7 +317,8 @@ fun KgsBottomSheet(
     val velocityThreshold = with(density) { 900.dp.toPx() }
     val collapseThreshold = with(density) { 28.dp.toPx() }
     val dockHeight = with(density) { (dock?.top ?: 0f).toDp() }
-    val controlsHeight = with(density) { (dock?.controlsBottom ?: 0f).toDp() }
+    // Controls scrolled or animating above the window report a negative bottom; nothing is covered then.
+    val controlsHeight = with(density) { (dock?.controlsBottom ?: 0f).coerceAtLeast(0f).toDp() }
     val body: @Composable () -> Unit = {
         val focus = LocalFocusManager.current
         val keyboard = LocalSoftwareKeyboardController.current

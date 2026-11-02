@@ -482,8 +482,10 @@ class NotesViewModel internal constructor(
             // A draft that could not be saved keeps its page until it is retried, copied, or discarded.
             if (!flushSelectedContent(s)) return@launch
             s.note.value?.id?.takeIf { it != id }?.let { engine.close(it) }
-            s.note.value = engine.openEditingSession(id)
+            val opened = engine.openEditingSession(id)
+            // The mode is published first, so the Note never appears in another editor for a frame.
             setSlotEditorMode(s, previewModeFor(id))
+            s.note.value = opened
         }
     }
 
