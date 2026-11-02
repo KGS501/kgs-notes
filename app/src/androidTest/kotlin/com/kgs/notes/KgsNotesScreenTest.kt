@@ -1934,7 +1934,9 @@ class KgsNotesScreenTest {
 
     @Test
     fun sourceFallbackDeletesAMultiLineSelectionAsOneEdit() {
-        val original = "Before\n<table>\nAfter"
+        // Raw HTML such as <table> is preserved by Rich Mode since lossless block source
+        // preservation, so use content that still requires Source Mode: a NUL character.
+        val original = "Before\nraw \u0000 x\nAfter"
         var changed = original
         compose.setContent {
             KgsNotesTheme(theme = NotesTheme.BLUE) {
