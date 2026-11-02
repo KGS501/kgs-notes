@@ -5,6 +5,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.test.*
+import androidx.compose.ui.test.assertTextContains
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.text.intl.LocaleList
 import androidx.compose.ui.unit.DpSize
@@ -112,6 +114,13 @@ class LibraryImprovementsTest {
 
         compose.onNodeWithTag("manage-category-${LocalSourceId.value}-Work").performClick()
         compose.onNodeWithTag("rename-category-field").performTextReplacement("Office")
+        // Confirm is enabled only once the new name reached the field; slow emulators may lag a frame.
+        compose.waitUntil(5_000) {
+            runCatching {
+                compose.onNodeWithTag("rename-category-field").assertTextContains("Office")
+                compose.onNodeWithTag("category-rename-confirm").assertIsEnabled()
+            }.isSuccess
+        }
         compose.onNodeWithTag("category-rename-confirm").performClick()
         compose.runOnIdle { assertEquals(Triple(LocalSourceId, "Work", "Office"), renamed) }
 
@@ -217,9 +226,11 @@ class LibraryImprovementsTest {
         }
         compose.onNodeWithTag("library-view-options").performClick()
         compose.waitForIdle()
-        val library = compose.onNodeWithTag("library-pane").fetchSemanticsNode().boundsInRoot
-        val sheet = compose.onNodeWithTag("view-options-menu").fetchSemanticsNode().boundsInRoot
-        assertTrue("The sheet must stay within the library pane: $sheet in $library",
+        // The sheet has its own window, so compare where both appear on screen: their roots differ on
+        // Android versions whose app content starts below the status bar.
+        val library = compose.onNodeWithTag("library-pane").fetchSemanticsNode().screenBounds()
+        val sheet = compose.onNodeWithTag("view-options-menu").fetchSemanticsNode().screenBounds()
+        assertTrue("The sheet must stay within the library pane on screen: $sheet in $library",
             sheet.left >= library.left - 1f && sheet.right <= library.right + 1f && sheet.bottom <= library.bottom + 1f)
     }
 
@@ -270,3 +281,6 @@ class LibraryImprovementsTest {
         title = title, snippet = "Body", category = "", favorite = false,
         createdAt = Instant.EPOCH, updatedAt = Instant.EPOCH)
 }
+
+private fun androidx.compose.ui.semantics.SemanticsNode.screenBounds(): androidx.compose.ui.geometry.Rect =
+    androidx.compose.ui.geometry.Rect(positionOnScreen, androidx.compose.ui.geometry.Size(size.width.toFloat(), size.height.toFloat()))
