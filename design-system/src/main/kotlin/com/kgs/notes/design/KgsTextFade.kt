@@ -60,6 +60,7 @@ fun KgsNoteTitleField(
     modifier: Modifier = Modifier,
     textStyle: TextStyle = MaterialTheme.typography.titleLarge,
     height: Dp = 40.dp,
+    readOnly: Boolean = false,
 ) {
     val field = rememberTextFieldState(value, initialSelection = TextRange.Zero)
     val scroll = rememberScrollState()
@@ -83,6 +84,7 @@ fun KgsNoteTitleField(
     }
     BasicTextField(
         state = field,
+        readOnly = readOnly,
         lineLimits = TextFieldLineLimits.SingleLine,
         scrollState = scroll,
         textStyle = textStyle.copy(color = MaterialTheme.colorScheme.onSurface),

@@ -27,7 +27,17 @@ internal data class ExternalFileRequest(val uri: Uri, val mimeType: String?, val
     }
 }
 
-internal class ExternalFileProblem(val explanationRes: Int) : Exception()
+internal open class ExternalFileProblem(val explanationRes: Int, cause: Throwable? = null) : Exception(cause)
+
+/** The provider may now hold the original, nothing, or any prefix of [attempted]. */
+internal class UncertainExternalWrite(val attempted: ByteArray, cause: Throwable) :
+    ExternalFileProblem(UiR.ui_the_file_app_may_have_kept_only_part_of_this_file_your_full_text_is_kept_here, cause)
+
+/** Contents a failed write of ours can leave behind: the expected bytes or a prefix of an interrupted attempt. */
+internal fun providerHoldsOwnContents(actual: ByteArray, expected: ByteArray, interrupted: List<ByteArray>): Boolean =
+    actual.contentEquals(expected) || interrupted.any { attempt ->
+        actual.size <= attempt.size && actual.indices.all { actual[it] == attempt[it] }
+    }
 
 /** Encoding and line endings belong to the original file, not the Markdown renderer. */
 internal data class ExternalTextFormat(
@@ -167,15 +177,28 @@ internal class ExternalTextFiles(private val context: Context) {
         result.toByteArray()
     } ?: throw ExternalFileProblem(UiR.ui_the_file_app_couldn_t_open_this_file_try_opening_it_again)
 
-    fun write(uri: Uri, expected: ByteArray, bytes: ByteArray) {
-        if (!read(uri).contentEquals(expected)) {
+    /**
+     * Replaces the provider's contents only while they are still the ones this session left
+     * there. A failure after the provider may have truncated is reported as uncertain, so the
+     * caller keeps recovery even if the editor text later equals the original again.
+     */
+    fun write(uri: Uri, expected: ByteArray, bytes: ByteArray, interrupted: List<ByteArray> = emptyList()) {
+        val current = read(uri)
+        if (!providerHoldsOwnContents(current, expected, interrupted)) {
             throw ExternalFileProblem(UiR.ui_the_original_file_changed_elsewhere_your_edits_are_kept_here_save_a_copy_to_kgs_notes)
         }
-        // 'w' is provider-dependent; 'wt' explicitly truncates when replacing a longer file.
-        resolver.openOutputStream(uri, "wt")?.use { it.write(bytes) }
-            ?: throw ExternalFileProblem(UiR.ui_the_file_app_couldn_t_save_this_file_your_edits_are_kept_here)
-        if (!read(uri).contentEquals(bytes)) {
-            throw ExternalFileProblem(UiR.ui_the_file_app_didn_t_confirm_the_saved_contents_your_edits_are_kept_here_save_a_copy_t)
+        try {
+            // 'w' is provider-dependent; 'wt' explicitly truncates when replacing a longer file.
+            resolver.openOutputStream(uri, "wt")?.use { it.write(bytes) }
+                ?: throw ExternalFileProblem(UiR.ui_the_file_app_couldn_t_save_this_file_your_edits_are_kept_here)
+            if (!read(uri).contentEquals(bytes)) {
+                throw ExternalFileProblem(UiR.ui_the_file_app_didn_t_confirm_the_saved_contents_your_edits_are_kept_here_save_a_copy_t)
+            }
+        } catch (failure: Exception) {
+            val after = runCatching { read(uri) }.getOrNull()
+            // Only an unchanged readback proves the provider still holds what it held before.
+            if (after == null || !after.contentEquals(current)) throw UncertainExternalWrite(bytes, failure)
+            throw failure
         }
     }
 }

@@ -109,6 +109,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.CircularProgressIndicator
@@ -267,6 +268,14 @@ data class NotesActions(
     val onRefreshSources: () -> Unit = {},
     val onEditSourceConnection: (SourceId) -> Unit = {},
     val onOpenProjectLink: (String) -> Unit = {},
+    /** Copies the open Note, with any unsaved draft, into a new Local Note; works offline. */
+    val onCopyToLocal: () -> Unit = {},
+    val onExport: () -> Unit = {},
+    val onRetrySave: () -> Unit = {},
+    val onDiscardUnsavedChanges: () -> Unit = {},
+    val onCopyPendingNotesToLocal: (SourceId) -> Unit = {},
+    val onRescueUnreadableRecord: (String) -> Unit = {},
+    val onDiscardUnreadableRecord: (String) -> Unit = {},
 )
 
 @Composable
@@ -295,6 +304,23 @@ fun KgsNotesApp(viewModel: NotesViewModel, onExternalPreviewClosed: () -> Unit =
         }
         val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
             uri?.let { viewModel.importImage(it, removePrivateMetadata) }
+        }
+        val exportRequest = state.exportRequest
+        val latestExport by rememberUpdatedState(exportRequest)
+        val exportResult: (Uri?) -> Unit = { uri ->
+            val request = latestExport
+            if (uri != null && request != null) viewModel.exportNote(request, uri) else viewModel.cancelExport()
+        }
+        val markdownExport = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/markdown"), exportResult)
+        val archiveExport = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip"), exportResult)
+        LaunchedEffect(exportRequest) {
+            val request = exportRequest ?: return@LaunchedEffect
+            runCatching {
+                (if (request.file.archive) archiveExport else markdownExport).launch(request.file.fileName)
+            }.onFailure {
+                viewModel.cancelExport()
+                android.widget.Toast.makeText(context, strings.getString(UiR.ui_no_file_picker_is_available), android.widget.Toast.LENGTH_SHORT).show()
+            }
         }
         val externalFile = state.externalFile
         if (externalFile != null) {
@@ -388,6 +414,13 @@ fun KgsNotesApp(viewModel: NotesViewModel, onExternalPreviewClosed: () -> Unit =
                 onRemoveSource = viewModel::removeSource,
                 onRefreshSources = viewModel::refreshSources,
                 onEditSourceConnection = viewModel::editSourceConnection,
+                onCopyToLocal = viewModel::copyNoteToLocal,
+                onExport = viewModel::requestExport,
+                onRetrySave = viewModel::retrySave,
+                onDiscardUnsavedChanges = viewModel::discardUnsavedChanges,
+                onCopyPendingNotesToLocal = viewModel::copyPendingNotesToLocal,
+                onRescueUnreadableRecord = viewModel::rescueUnreadableRecord,
+                onDiscardUnreadableRecord = viewModel::discardUnreadableRecord,
                 onOpenProjectLink = { url ->
                     runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
                         .onFailure { android.widget.Toast.makeText(context, strings.getString(UiR.ui_no_browser_is_available), android.widget.Toast.LENGTH_SHORT).show() }
@@ -997,6 +1030,10 @@ private fun NotesActions.forPane(pane: NotePane): NotesActions {
         onDeletePermanently = focused(onDeletePermanently),
         onEditorModeChange = focused(onEditorModeChange),
         onAddImage = focused(onAddImage),
+        onCopyToLocal = focused(onCopyToLocal),
+        onExport = focused(onExport),
+        onRetrySave = focused(onRetrySave),
+        onDiscardUnsavedChanges = focused(onDiscardUnsavedChanges),
     )
 }
 
@@ -3105,6 +3142,8 @@ private fun EditorPane(
             .testTag("note-editor"),
     ) {
         EditorHeader(state, note, actions, showBack, noteMorph)
+        if (state.saveFailed) SaveFailureBanner(actions)
+        if (note.readOnly && note.state != NoteState.TRASHED) ReadOnlyBanner(actions)
         if (note.state == NoteState.TRASHED) {
             TrashedNote(note, actions, Modifier.fillMaxSize())
         } else {
@@ -3114,8 +3153,10 @@ private fun EditorPane(
                 onMarkdownChange = actions.onContentChange,
                 onModeChange = actions.onEditorModeChange,
                 onAddImage = actions.onAddImage,
-                canAddImage = state.sources.firstOrNull { it.id == note.sourceId }?.supportsAttachments
-                    ?: (note.sourceId == LocalSourceId),
+                canAddImage = !note.readOnly && (state.sources.firstOrNull { it.id == note.sourceId }?.supportsAttachments
+                    ?: (note.sourceId == LocalSourceId)),
+                // The Source only accepts Favorite changes for a shared read-only Note.
+                readOnly = note.readOnly,
                 openManagedAttachment = actions.openManagedAttachment,
                 modifier = Modifier.fillMaxSize(),
                 bodyModifier = Modifier.noteMorphBounds(noteMorph, note.id, "body"),
@@ -3177,6 +3218,7 @@ private fun EditorHeader(
             KgsNoteTitleField(
                 value = note.title,
                 onValueChange = actions.onRename,
+                readOnly = note.readOnly,
                 textStyle = noteMorphTitleStyle(noteMorph, editor = true),
                 height = 40.dp,
                 modifier = Modifier
@@ -3203,7 +3245,7 @@ private fun EditorHeader(
                 onClick = { toggleSheet(sourceDialogOpen) { sourceDialogOpen = it } },
             )
             if (note.state != NoteState.TRASHED) {
-                KgsTooltip(strings.getString(UiR.ui_category)) {
+                if (!note.readOnly) KgsTooltip(strings.getString(UiR.ui_category)) {
                     KgsExpressiveSurface(
                         onClick = { toggleSheet(categoryDialogOpen) { categoryDialogOpen = it } },
                         restingCorners = KgsCornerRadii(12.dp),
@@ -3261,7 +3303,27 @@ private fun EditorHeader(
                                 },
                             )
                         }
-                        KgsTooltip(strings.getString(UiR.ui_delete)) {
+                        if (note.sourceId != LocalSourceId) KgsTooltip(strings.getString(UiR.ui_copy_to_local_source)) {
+                            KgsDropdownMenuItem(
+                                text = strings.getString(UiR.ui_copy_to_local_source),
+                                icon = { LocalNotesGlyph(MaterialTheme.colorScheme.onSurfaceVariant) },
+                                onClick = {
+                                    actionsMenuOpen = false
+                                    actions.onCopyToLocal()
+                                },
+                            )
+                        }
+                        KgsTooltip(strings.getString(UiR.ui_export_note)) {
+                            KgsDropdownMenuItem(
+                                text = strings.getString(UiR.ui_export_note),
+                                icon = { Icon(Icons.Default.Share, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+                                onClick = {
+                                    actionsMenuOpen = false
+                                    actions.onExport()
+                                },
+                            )
+                        }
+                        if (!note.readOnly) KgsTooltip(strings.getString(UiR.ui_delete)) {
                             KgsDropdownMenuItem(
                                 text = strings.getString(UiR.ui_delete),
                                 contentColor = DestructiveRed,
@@ -3662,6 +3724,58 @@ internal fun CategoryIcon(filled: Boolean, color: Color) {
                     join = androidx.compose.ui.graphics.StrokeJoin.Round,
                 ),
             )
+        }
+    }
+}
+
+/** A failed save keeps the draft; leaving the Note waits until it is saved, copied, or discarded. */
+@Composable
+private fun SaveFailureBanner(actions: NotesActions) {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+    Surface(
+        color = MaterialTheme.colorScheme.errorContainer,
+        contentColor = MaterialTheme.colorScheme.onErrorContainer,
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp).testTag("save-failure-banner"),
+    ) {
+        Column(Modifier.padding(start = 16.dp, end = 8.dp, top = 10.dp, bottom = 4.dp)) {
+            Text(strings.getString(UiR.ui_your_latest_changes_couldn_t_be_saved_they_are_kept_on_screen), style = MaterialTheme.typography.bodyMedium)
+            Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
+                TextButton(onClick = actions.onDiscardUnsavedChanges, modifier = Modifier.testTag("discard-unsaved-changes")) {
+                    Text(strings.getString(UiR.ui_discard_unsaved_changes))
+                }
+                TextButton(onClick = actions.onCopyToLocal, modifier = Modifier.testTag("save-failure-copy")) {
+                    Text(strings.getString(UiR.ui_copy_to_local_source))
+                }
+                TextButton(onClick = actions.onRetrySave, modifier = Modifier.testTag("retry-save")) {
+                    Text(strings.getString(UiR.ui_retry_saving))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReadOnlyBanner(actions: NotesActions) {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp).testTag("read-only-banner"),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(start = 16.dp, end = 8.dp, top = 4.dp, bottom = 4.dp),
+        ) {
+            Text(
+                strings.getString(UiR.ui_shared_read_only_you_can_favourite_this_note_but_not_change_it),
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = actions.onCopyToLocal, modifier = Modifier.testTag("read-only-copy")) {
+                Text(strings.getString(UiR.ui_copy_to_local_source))
+            }
         }
     }
 }
