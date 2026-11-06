@@ -2,6 +2,8 @@ package com.kgs.notes
 
 import android.graphics.Rect
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.test.platform.app.InstrumentationRegistry
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.test.*
@@ -24,6 +26,98 @@ import org.junit.Test
 @OptIn(ExperimentalTestApi::class)
 class LibraryImprovementsTest {
     @get:Rule val compose = createComposeRule()
+
+    @Test fun phoneKeepsSeparateControlsUntilTheyActuallyRunOutOfRoom() {
+        val width = mutableStateOf(393.dp)
+        compose.setContent {
+            DeviceConfigurationOverride(DeviceConfigurationOverride.ForcedSize(DpSize(width.value, 850.dp))) {
+                KgsNotesTheme { KgsNotesScreen(NotesUiState(notes = listOf(
+                    summary("A long Note title with room around its sync indicator").copy(
+                        sourceId = SourceId("test-cloud"), syncState = NoteSyncState.SAVED_LOCALLY, syncFailed = true,
+                        previewMarkdown = "A quiet place for ideas.\n\n&nbsp;"),
+                    summary("Weekend ideas").copy(previewMarkdown = "A walk, a good book, and time to think."),
+                )), NotesActions()) }
+            }
+        }
+        compose.onNodeWithContentDescription("Sort notes").assertIsDisplayed()
+        compose.onNodeWithTag("library-view-options").assertDoesNotExist()
+        compose.mainClock.advanceTimeBy(4_500)
+        compose.onNodeWithTag("note-pending-sync-A long Note title with room around its sync indicator", useUnmergedTree = true).assertIsDisplayed()
+        captureReviewScreenshot("phone-navigation")
+        // Even a 360 dp phone, and the exact controls' footprint plus page padding,
+        // retain all actions. Only the flexible gap between groups shrinks.
+        for (fittingWidth in listOf(360.dp, 355.dp)) {
+            compose.runOnIdle { width.value = fittingWidth }
+            compose.onNodeWithContentDescription("Sort notes").assertIsDisplayed()
+            compose.onNodeWithTag("library-view-options").assertDoesNotExist()
+        }
+        compose.mainClock.autoAdvance = false
+        compose.runOnIdle { width.value = 320.dp }
+        compose.mainClock.advanceTimeBy(32)
+        compose.onNodeWithContentDescription("Sort notes").assertExists()
+        compose.onNodeWithTag("library-view-options").assertExists()
+        compose.mainClock.autoAdvance = true
+        compose.onNodeWithTag("library-view-options").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Sort notes").assertDoesNotExist()
+        captureReviewScreenshot("narrow-navigation")
+    }
+
+    @Test fun unfoldedSettingsKeepsTheHubBesideNestedPages() {
+        compose.setContent {
+            DeviceConfigurationOverride(DeviceConfigurationOverride.ForcedSize(DpSize(700.dp, 850.dp))) {
+                KgsNotesTheme { KgsNotesScreen(NotesUiState(destination = LibraryDestination.SETTINGS), NotesActions()) }
+            }
+        }
+        compose.onNodeWithTag("settings-two-pane").assertIsDisplayed()
+        compose.onNodeWithTag("settings-open-SOURCES").performClick()
+        compose.onNodeWithTag("source-settings-${LocalSourceId.value}").performClick()
+        val hub = compose.onNodeWithTag("settings-page-HOME").fetchSemanticsNode().boundsInRoot
+        val detail = compose.onNodeWithTag("settings-page-SOURCE_DETAILS").fetchSemanticsNode().boundsInRoot
+        assertTrue("The settings hub remains to the left of nested pages", hub.right < detail.left)
+        captureReviewScreenshot("settings-source")
+        compose.onNodeWithContentDescription("Back to Sources").performClick()
+        compose.onNodeWithTag("settings-page-SOURCES").assertIsDisplayed()
+        compose.onNodeWithTag("settings-page-HOME").assertIsDisplayed()
+        compose.onNodeWithTag("settings-open-APPEARANCE").performClick()
+        captureReviewScreenshot("settings-appearance")
+    }
+
+    private fun captureReviewScreenshot(name: String) {
+        if (InstrumentationRegistry.getArguments().getString("reviewScreenshots") != "true") return
+        val directory = java.io.File(InstrumentationRegistry.getInstrumentation().targetContext.externalCacheDir, "ui-review")
+        directory.mkdirs()
+        val bitmap = compose.onRoot().captureToImage().asAndroidBitmap()
+        java.io.File(directory, "$name.png").outputStream().use {
+            bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
+        }
+    }
+
+    @Test fun dividerTracksTheFingerAndReversesImmediatelyAtTheWidthLimit() {
+        val fraction = mutableStateOf(DefaultSplitFraction)
+        compose.setContent {
+            DeviceConfigurationOverride(DeviceConfigurationOverride.ForcedSize(DpSize(1000.dp, 850.dp))) {
+                KgsNotesTheme { KgsNotesScreen(NotesUiState(notes = listOf(summary("Resize fixture")),
+                    selectedNote = note(), editorMode = EditorMode.SOURCE, splitFraction = fraction.value),
+                    NotesActions(onSplitFractionChange = { fraction.value = it })) }
+            }
+        }
+        val divider = compose.onNodeWithTag("pane-divider")
+        val initial = divider.fetchSemanticsNode().boundsInRoot.center.x
+        divider.performTouchInput { down(center); moveBy(androidx.compose.ui.geometry.Offset(60f, 0f)) }
+        val first = divider.fetchSemanticsNode().boundsInRoot.center.x
+        assertTrue("The divider follows the ongoing drag", first > initial + 15f)
+        divider.performTouchInput { moveBy(androidx.compose.ui.geometry.Offset(2000f, 0f)) }
+        val limit = divider.fetchSemanticsNode().boundsInRoot.center.x
+        divider.performTouchInput { moveBy(androidx.compose.ui.geometry.Offset(-40f, 0f)) }
+        val reversed = divider.fetchSemanticsNode().boundsInRoot.center.x
+        assertEquals("Reversing at the limit has no dead travel", limit - 40f, reversed, 2f)
+        divider.performTouchInput { up() }
+        val settled = divider.fetchSemanticsNode().boundsInRoot.center.x
+        assertEquals(reversed, settled, 2f)
+        val library = compose.onNodeWithTag("notes-search").fetchSemanticsNode().boundsInRoot
+        val editor = compose.onNodeWithTag("source-editor").fetchSemanticsNode().boundsInRoot
+        assertTrue(library.right < editor.left)
+    }
 
     @Test fun titleKeepsEmptyTextAndTrailingSpaceWhileCanonicalMetadataChanges() {
         val selected = mutableStateOf(note())
@@ -217,6 +311,34 @@ class LibraryImprovementsTest {
         compose.runOnIdle { assertEquals(listOf(NotePane.SECONDARY to left.id), opened) }
     }
 
+    @Test fun aNarrowSplitScreenLibraryKeepsSeparateControlsWithoutThemTouching() {
+        compose.setContent {
+            DeviceConfigurationOverride(DeviceConfigurationOverride.ForcedSize(DpSize(323.dp, 800.dp))) {
+                KgsNotesTheme { KgsNotesScreen(NotesUiState(notes = listOf(summary("Library fixture"))), NotesActions()) }
+            }
+        }
+        compose.onNodeWithTag("library-view-options").assertDoesNotExist()
+        val filters = compose.onNodeWithContentDescription("Server notes").fetchSemanticsNode().boundsInRoot
+        val direction = compose.onNodeWithContentDescription("Descending").fetchSemanticsNode().boundsInRoot
+        assertTrue("Full controls must not touch", filters.right < direction.left)
+        compose.onNodeWithContentDescription("Sort notes").assertIsDisplayed()
+    }
+
+    @Test fun defaultViewOffersFiltersAndCategoriesAndShowsTheCurrentChoice() {
+        val state = mutableStateOf(NotesUiState(destination = LibraryDestination.SETTINGS, categories = listOf("Work")))
+        val actions = NotesActions(onLibraryHomeChange = { state.value = state.value.copy(libraryHome = it) })
+        compose.setContent { KgsNotesTheme { KgsNotesScreen(state.value, actions) } }
+        compose.onNodeWithTag("settings-open-APPEARANCE").performClick()
+        compose.onNodeWithTag("settings-page-APPEARANCE").performScrollToNode(hasTestTag("settings-default-view"))
+        compose.onNodeWithTag("settings-default-view").performClick()
+        compose.onNodeWithTag("default-view-ALL").assertIsSelected()
+        compose.onNodeWithTag("default-view-category-Work").performClick()
+        compose.runOnIdle { assertEquals(LibraryHome(category = "Work"), state.value.libraryHome) }
+        compose.onNodeWithTag("default-view-category-Work").assertIsSelected()
+        compose.onNodeWithTag("default-view-category-").performClick()
+        compose.runOnIdle { assertEquals(LibraryHome(category = ""), state.value.libraryHome) }
+    }
+
     @Test fun sheetsOpenOnTheSideOfTheSplitScreenTheyComeFrom() {
         compose.setContent {
             DeviceConfigurationOverride(DeviceConfigurationOverride.ForcedSize(DpSize(1000.dp, 850.dp))) {
@@ -224,12 +346,10 @@ class LibraryImprovementsTest {
                     editorMode = EditorMode.SOURCE), NotesActions()) }
             }
         }
-        compose.onNodeWithTag("library-view-options").performClick()
+        compose.onNodeWithContentDescription("Sort notes").performClick()
         compose.waitForIdle()
-        // The sheet has its own window, so compare where both appear on screen: their roots differ on
-        // Android versions whose app content starts below the status bar.
         val library = compose.onNodeWithTag("library-pane").fetchSemanticsNode().screenBounds()
-        val sheet = compose.onNodeWithTag("view-options-menu").fetchSemanticsNode().screenBounds()
+        val sheet = compose.onNodeWithTag("sort-options-menu").fetchSemanticsNode().screenBounds()
         assertTrue("The sheet must stay within the library pane on screen: $sheet in $library",
             sheet.left >= library.left - 1f && sheet.right <= library.right + 1f && sheet.bottom <= library.bottom + 1f)
     }

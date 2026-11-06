@@ -369,6 +369,9 @@
     <string name="ui_resize_panes">"Bereiche anpassen"</string>
     <string name="ui_view_options">"Ansichtsoptionen"</string>
     <string name="ui_layout">"Layout"</string>
+    <string name="ui_default_view">"Standardansicht"</string>
+    <string name="ui_back_to_appearance">"Zurück zu Darstellung"</string>
+    <string name="ui_kgs_notes_opens_here_and_back_returns_here">"KGS Notes öffnet sich hier, und Zurück führt hierher."</string>
     <string name="ui_a_copy_was_saved_in_the_local_source">"Eine Kopie wurde in der lokalen Quelle gespeichert."</string>
     <string name="ui_copied_value_notes_to_the_local_source">"In die lokale Quelle kopierte Notizen: %1$d. Die Originale wurden nicht verändert."</string>
     <string name="ui_copy_to_local_source">"In lokale Quelle kopieren"</string>

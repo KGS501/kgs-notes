@@ -486,6 +486,28 @@ class InteractionRegressionTest {
         val webView = AtomicReference<WebView>()
         compose.runOnIdle { webView.set(requireNotNull(findWebView(compose.activity.window.decorView))) }
         assertEquals("true", evaluateJavascript(webView.get(), "document.activeElement === document.querySelector('.rich-editor')"))
+        assertEquals("true", evaluateJavascript(webView.get(),
+            "document.querySelector('.rich-editor').editor.state.selection.from === document.querySelector('.rich-editor').editor.state.doc.content.size - 1"))
+    }
+
+    @Test
+    fun sourcePaperMarginOpensKeyboardAndPlacesCaretAfterLastCharacter() {
+        var content by mutableStateOf("Short paragraph")
+        compose.activityRule.scenario.onActivity { activity ->
+            activity.setContent {
+                KgsNotesTheme { KgsNotesScreen(NotesUiState(
+                    selectedNote = sampleNote(content), editorMode = EditorMode.SOURCE),
+                    NotesActions(onContentChange = { content = it })) }
+            }
+        }
+        val root = compose.onNodeWithTag("note-editor").fetchSemanticsNode().boundsInRoot
+        val field = compose.onNodeWithTag("source-editor").fetchSemanticsNode().boundsInRoot
+        compose.onNodeWithTag("note-editor").performTouchInput {
+            click(androidx.compose.ui.geometry.Offset(field.left - root.left - 4f, field.center.y - root.top))
+        }
+        compose.waitUntil(5_000) { keyboardVisible() }
+        compose.onNodeWithTag("source-editor").performTextInput(" appended")
+        compose.runOnIdle { assertEquals("Short paragraph appended", content) }
     }
 
     private fun keyboardVisible(): Boolean =

@@ -48,7 +48,9 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.ContentTransform
 import androidx.compose.animation.togetherWith
+import com.kgs.notes.design.KgsMotion
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.ui.semantics.Role
@@ -258,6 +260,7 @@ data class NotesActions(
     val onDeleteCategory: (SourceId, String) -> Unit = { _, _ -> },
     val onEditorLayoutChange: (EditorLayoutPreference) -> Unit = {},
     val onSplitFractionChange: (Float) -> Unit = {},
+    val onLibraryHomeChange: (LibraryHome) -> Unit = {},
     val onActivatePane: (NotePane) -> Unit = {},
     val onDualPagesChange: (Boolean) -> Unit = {},
     val onToggleSourceVisibility: (SourceId) -> Unit = {},
@@ -394,6 +397,7 @@ fun KgsNotesApp(viewModel: NotesViewModel, onExternalPreviewClosed: () -> Unit =
                 onDeleteCategory = viewModel::deleteCategory,
                 onEditorLayoutChange = viewModel::setEditorLayout,
                 onSplitFractionChange = viewModel::setSplitFraction,
+                onLibraryHomeChange = viewModel::setLibraryHome,
                 onActivatePane = viewModel::activatePane,
                 onDualPagesChange = viewModel::setDualPages,
                 onToggleSourceVisibility = viewModel::toggleSourceVisibility,
@@ -775,9 +779,9 @@ fun KgsNotesScreen(
     BackHandler(enabled = drawerOpen || pendingNavigation != null) { pendingNavigation = null; drawerOpen = false }
     BackHandler(
         enabled = state.selectedNote == null && selectedIds.isEmpty() && !drawerOpen && pendingNavigation == null &&
-            (state.destination != LibraryDestination.NOTES || state.libraryCategory != null),
+            (state.destination != LibraryDestination.NOTES || state.libraryCategory != state.libraryHome.category),
     ) {
-        if (state.destination == LibraryDestination.NOTES) actions.onLibraryCategoryChange(null)
+        if (state.destination == LibraryDestination.NOTES) actions.onLibraryCategoryChange(state.libraryHome.category)
         else actions.onDestinationChange(LibraryDestination.NOTES)
     }
 
@@ -905,6 +909,7 @@ fun KgsNotesScreen(
                             showBack = true,
                             noteMorph = if (newNoteMorphActive) null else noteMorph,
                             stableLayoutScope = sharedScope,
+                            openingTransitionMillis = if (newNoteMorphActive) NewNoteMorphMillis else 0,
 
                             modifier = Modifier
                                 .fillMaxSize()
@@ -1078,10 +1083,11 @@ private fun LibraryPane(
 
     val motion = LocalKgsMotion.current
     val navigationBottom = paneNavigationBottom()
-    val location = LibraryLocation(state.destination, state.libraryCategory.takeIf { state.destination == LibraryDestination.NOTES })
-    val latestLocation by rememberUpdatedState(location)
-    val snapshots = remember { mutableMapOf<LibraryLocation, LibraryDisplay>() }
-    SideEffect { snapshots[location] = LibraryDisplay(state, cardScrollOffset) }
+    // Sections move as a whole; switching Category inside Notes leaves the top bar in place.
+    val section = state.destination
+    val latestSection by rememberUpdatedState(section)
+    val snapshots = remember { mutableMapOf<LibraryDestination, LibraryDisplay>() }
+    SideEffect { snapshots[section] = LibraryDisplay(state, cardScrollOffset) }
     val background by animateColorAsState(
         if (state.destination == LibraryDestination.TRASH) {
             if (MaterialTheme.colorScheme.surface.luminance() > .5f) Color(0xFFE9E6E3) else Color(0xFF242526)
@@ -1124,30 +1130,17 @@ private fun LibraryPane(
                 .padding(horizontal = 18.dp),
         ) {
             AnimatedContent(
-                targetState = location,
-                transitionSpec = {
-                    if (targetState.destination == LibraryDestination.NOTES && targetState.category == null) {
-                        slideInHorizontally(motion.defaultSpatialSpec()) { -it / 5 } +
-                            fadeIn(motion.defaultEffectsSpec()) togetherWith
-                            slideOutHorizontally(motion.fastSpatialSpec()) { it / 5 } +
-                            fadeOut(motion.fastEffectsSpec())
-                    } else {
-                        slideInHorizontally(motion.defaultSpatialSpec()) { it / 5 } +
-                            fadeIn(motion.defaultEffectsSpec()) togetherWith
-                            slideOutHorizontally(motion.fastSpatialSpec()) { -it / 5 } +
-                            fadeOut(motion.fastEffectsSpec())
-                    }
-                },
+                targetState = section,
+                transitionSpec = { libraryPageTransition(motion, backward = targetState == LibraryDestination.NOTES) },
                 label = "library destination",
                 modifier = Modifier.fillMaxSize(),
-            ) { shownLocation ->
-                val destination = shownLocation.destination
-                val displayed = if (shownLocation == location) LibraryDisplay(state, cardScrollOffset)
-                    else snapshots[shownLocation] ?: LibraryDisplay(state, cardScrollOffset)
-                DisposableEffect(shownLocation) {
-                    onDispose { if (shownLocation != latestLocation) snapshots.remove(shownLocation) }
+            ) { shownSection ->
+                val displayed = if (shownSection == section) LibraryDisplay(state, cardScrollOffset)
+                    else snapshots[shownSection] ?: LibraryDisplay(state, cardScrollOffset)
+                DisposableEffect(shownSection) {
+                    onDispose { if (shownSection != latestSection) snapshots.remove(shownSection) }
                 }
-                if (destination == LibraryDestination.SETTINGS) {
+                if (shownSection == LibraryDestination.SETTINGS) {
                     NotesSettingsScreen(
                         state = displayed.state,
                         actions = actions,
@@ -1155,9 +1148,9 @@ private fun LibraryPane(
                     )
                 } else {
                     Column(Modifier.fillMaxSize()) {
-                        if (destination == LibraryDestination.TRASH) {
+                        if (shownSection == LibraryDestination.TRASH) {
                             LibraryHeader(
-                                destination = destination,
+                                destination = shownSection,
                                 onOpenDrawer = onOpenDrawer ?: {},
                                 onBackToNotes = { actions.onDestinationChange(LibraryDestination.NOTES) },
                             )
@@ -1165,10 +1158,10 @@ private fun LibraryPane(
                         LibraryCollection(
                             state = displayed.state,
                             actions = actions,
-                            destination = destination,
+                            destination = shownSection,
                             selectedId = selectedId,
                             cardScrollOffset = displayed.scrollOffset,
-                            noteMorph = noteMorph.takeIf { shownLocation == location },
+                            noteMorph = noteMorph.takeIf { shownSection == section },
                             onScroll = onScroll,
                             selectedIds = selectedIds,
                             onToggleSelection = onToggleSelection,
@@ -1182,8 +1175,18 @@ private fun LibraryPane(
     }
 }
 
+private fun libraryPageTransition(motion: KgsMotion, backward: Boolean): ContentTransform {
+    val direction = if (backward) -1 else 1
+    return slideInHorizontally(motion.defaultSpatialSpec()) { direction * it / 5 } +
+        fadeIn(motion.defaultEffectsSpec()) togetherWith
+        slideOutHorizontally(motion.fastSpatialSpec()) { -direction * it / 5 } +
+        fadeOut(motion.fastEffectsSpec())
+}
+
+/** An empty new Note has nothing to reveal, so its WebView can wait for the morph. */
+private const val NewNoteMorphMillis = 380L
+
 private data class LibraryDisplay(val state: NotesUiState, val scrollOffset: MutableFloatState)
-private data class LibraryLocation(val destination: LibraryDestination, val category: String?)
 
 @OptIn(ExperimentalSharedTransitionApi::class)
 private data class NoteMorph(
@@ -1487,17 +1490,15 @@ private fun LibraryCollection(
                         .testTag("notes-search"),
                 )
             }
-            state.libraryCategory?.let { category ->
-                BoxWithConstraints(Modifier.fillMaxWidth()) {
-                    LibraryCategoryHeader(category, state.notes.size,
-                        ((maxWidth - 143.dp) / 4).coerceIn(28.dp, 44.dp))
-                }
-            }
             Spacer(Modifier.height(10.dp))
             BoxWithConstraints(Modifier.fillMaxWidth()) {
             // Before the controls would crowd, sorting and layout share one button and a sheet.
             val compact = maxWidth < LibraryControlsCompactWidth
-            val filterBaseWidth = ((maxWidth - if (compact) 60.dp else 143.dp) / 4).coerceIn(28.dp, 44.dp)
+            val filterBaseWidth by animateDpAsState(
+                ((maxWidth - if (compact) 60.dp else LibraryControlsFixedWidth) / LibraryFilter.entries.size)
+                    .coerceIn(if (compact) 28.dp else LibraryFilterMinWidth, 44.dp),
+                motion.fastSpatialSpec(), label = "Filter width as controls fold",
+            )
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth(),
@@ -1537,7 +1538,17 @@ private fun LibraryCollection(
                     if (index != LibraryFilter.entries.lastIndex) Spacer(Modifier.width(3.dp))
                 }
                 Spacer(Modifier.weight(1f))
-                if (compact) {
+                AnimatedContent(
+                    targetState = compact,
+                    transitionSpec = {
+                        (fadeIn(motion.defaultEffectsSpec()) + scaleIn(motion.fastSpatialSpec(), initialScale = .92f)) togetherWith
+                            (fadeOut(motion.fastEffectsSpec()) + scaleOut(motion.fastSpatialSpec(), targetScale = .92f))
+                    },
+                    contentAlignment = Alignment.CenterEnd,
+                    label = "Library controls folding",
+                ) { folded ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                if (folded) {
                     LibraryViewOptionsButton(state, actions)
                 } else {
                 val directionInteractions = remember { MutableInteractionSource() }
@@ -1695,55 +1706,75 @@ private fun LibraryCollection(
                     onClick = actions.onToggleLibraryView,
                 )
                 }
+                }
+                }
             }
             }
             Spacer(Modifier.height(10.dp))
         } else {
             Spacer(Modifier.height(2.dp))
         }
-        Box(Modifier.fillMaxSize()) {
-            NoteCollection(
-                notes = state.notes,
-                view = state.libraryView,
-                previewModes = state.previewModes,
-                scrollOffset = cardScrollOffset,
-                bottomPadding = 92.dp + navigationBottom,
-                modifier = Modifier.noteViewportTopFade(),
-                groupByDate = state.groupByDate && destination == LibraryDestination.NOTES,
-                alphabetical = state.sort == LibrarySort.ALPHABETICAL,
-                ascending = state.ascending,
-                dateByCreated = state.sort == LibrarySort.LAST_CREATED,
-                onScroll = onScroll,
-            ) { note, cardModifier ->
-                SwipeToFavoriteNote(
-                    favorite = note.favorite,
-                    enabled = destination != LibraryDestination.TRASH && selectedIds.isEmpty(),
-                    onFavorite = { actions.onSelectedNotesAction(setOf(note.id), NoteSelectionOperation.FAVORITE, if (note.favorite) "remove" else "add") },
-                    modifier = cardModifier.testTag("note-swipe-${note.id.value}"),
-                ) { swipeModifier ->
-                    NoteCard(
-                        note = note,
-                        previewMode = state.previewModes[note.id] ?: EditorMode.RICH,
-                        trashed = destination == LibraryDestination.TRASH,
-                        selected = note.id == selectedId,
-                        highlighted = note.id in selectedIds,
-                        onClick = {
-                            if (selectedIds.isEmpty()) actions.onSelect(note.id) else onToggleSelection(note.id)
-                        },
-                        onLongClick = { onToggleSelection(note.id) },
-                        cardView = state.libraryView == LibraryView.CARDS,
-                        noteMorph = noteMorph,
-                        modifier = swipeModifier,
-                    )
-                }
+        val page = state.libraryCategory.takeIf { destination == LibraryDestination.NOTES }
+        val latestPage by rememberUpdatedState(page)
+        val pages = remember { mutableMapOf<String?, LibraryDisplay>() }
+        SideEffect { pages[page] = LibraryDisplay(state, cardScrollOffset) }
+        AnimatedContent(
+            targetState = page,
+            transitionSpec = { libraryPageTransition(motion, backward = targetState == null) },
+            label = "library category",
+            modifier = Modifier.fillMaxSize(),
+        ) { shownPage ->
+            val shown = if (shownPage == page) LibraryDisplay(state, cardScrollOffset)
+                else pages[shownPage] ?: LibraryDisplay(state, cardScrollOffset)
+            DisposableEffect(shownPage) {
+                onDispose { if (shownPage != latestPage) pages.remove(shownPage) }
             }
-            androidx.compose.animation.AnimatedVisibility(
-                visible = state.notes.isEmpty(),
-                enter = fadeIn(tween(180, delayMillis = 120)),
-                exit = fadeOut(tween(100)),
-            ) {
-                EmptyLibrary(state.filter, destination, state.query,
-                    Modifier.fillMaxSize().testTag("empty-library"), category = state.libraryCategory)
+            Column(Modifier.fillMaxSize()) {
+                shownPage?.let { LibraryCategoryHeader(it, shown.state.notes.size, 44.dp) }
+                Box(Modifier.fillMaxSize()) {
+                    NoteCollection(
+                        notes = shown.state.notes,
+                        view = shown.state.libraryView,
+                        previewModes = shown.state.previewModes,
+                        scrollOffset = shown.scrollOffset,
+                        bottomPadding = 92.dp + navigationBottom,
+                        modifier = Modifier.noteViewportTopFade(),
+                        groupByDate = shown.state.groupByDate && destination == LibraryDestination.NOTES,
+                        alphabetical = shown.state.sort == LibrarySort.ALPHABETICAL,
+                        ascending = shown.state.ascending,
+                        dateByCreated = shown.state.sort == LibrarySort.LAST_CREATED,
+                        onScroll = onScroll,
+                    ) { note, cardModifier ->
+                        SwipeToDeleteNote(
+                            enabled = destination != LibraryDestination.TRASH && selectedIds.isEmpty(),
+                            onDelete = { actions.onSelectedNotesAction(setOf(note.id), NoteSelectionOperation.TRASH, "") },
+                            modifier = cardModifier.testTag("note-swipe-${note.id.value}"),
+                        ) { swipeModifier ->
+                            NoteCard(
+                                note = note,
+                                previewMode = shown.state.previewModes[note.id] ?: EditorMode.RICH,
+                                trashed = destination == LibraryDestination.TRASH,
+                                selected = note.id == selectedId,
+                                highlighted = note.id in selectedIds,
+                                onClick = {
+                                    if (selectedIds.isEmpty()) actions.onSelect(note.id) else onToggleSelection(note.id)
+                                },
+                                onLongClick = { onToggleSelection(note.id) },
+                                cardView = shown.state.libraryView == LibraryView.CARDS,
+                                noteMorph = noteMorph.takeIf { shownPage == page },
+                                modifier = swipeModifier,
+                            )
+                        }
+                    }
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = shown.state.notes.isEmpty(),
+                        enter = fadeIn(tween(180, delayMillis = 120)),
+                        exit = fadeOut(tween(100)),
+                    ) {
+                        EmptyLibrary(shown.state.filter, destination, shown.state.query,
+                            Modifier.fillMaxSize().testTag("empty-library"), category = shownPage)
+                    }
+                }
             }
         }
     }
@@ -2037,7 +2068,12 @@ private fun LibraryViewButton(
     }
 }
 
-private val LibraryControlsCompactWidth = 360.dp
+// Three 3 dp joins, 134 dp of actions, and a small gap between the two groups.
+// Use the actual controls' footprint, not a phone/window size classification.
+// The filters give up width first, so buttons fold only once they would really crowd.
+private val LibraryControlsFixedWidth = 3.dp * (LibraryFilter.entries.size - 1) + 134.dp + 6.dp
+private val LibraryFilterMinWidth = 34.dp
+private val LibraryControlsCompactWidth = LibraryFilterMinWidth * LibraryFilter.entries.size + LibraryControlsFixedWidth
 
 /** Sort order, direction and layout behind one button when the library is narrow. */
 @Composable
@@ -2305,7 +2341,7 @@ private fun LibraryCategoryHeader(category: String, count: Int, filterBaseWidth:
     val strings = androidx.compose.ui.platform.LocalResources.current
 
     Row(
-        Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 2.dp)
+        Modifier.fillMaxWidth().padding(bottom = 6.dp)
             .semantics(mergeDescendants = true) {}.testTag("library-category-context"),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -2658,15 +2694,15 @@ private fun NoteCard(
                     )
                     PendingSyncIndicator(note.needsSyncNotice,
                         Modifier.align(Alignment.CenterEnd)) {
-                        Box(Modifier.background(container)
-                            .padding(start = 4.dp, end = 10.dp)) {
+                        Box(Modifier.padding(end = 6.dp).size(18.dp).background(container, CircleShape),
+                            contentAlignment = Alignment.Center) {
                             Surface(color = Color(0xFFF28C28), shape = CircleShape,
                                 modifier = Modifier.size(10.dp).testTag("note-pending-sync-${note.id.value}")
                                     .semantics { contentDescription = strings.getString(UiR.ui_awaiting_sync) }) {}
                         }
                     }
                 }
-                Spacer(Modifier.height(4.dp))
+                Spacer(Modifier.height(NoteCardTitleGap))
                 Box(
                     Modifier.fillMaxWidth().padding(end = 17.dp)
                         .weight(1f)
@@ -3158,6 +3194,7 @@ private fun EditorPane(
     modifier: Modifier,
     noteMorph: NoteMorph? = null,
     stableLayoutScope: SharedTransitionScope? = noteMorph?.scope,
+    openingTransitionMillis: Long = 0,
 ) {
     val strings = androidx.compose.ui.platform.LocalResources.current
 
@@ -3192,6 +3229,7 @@ private fun EditorPane(
                 readOnly = note.readOnly,
                 openManagedAttachment = actions.openManagedAttachment,
                 modifier = Modifier.fillMaxSize(),
+                openingTransitionMillis = openingTransitionMillis,
                 bodyModifier = Modifier.noteMorphBounds(noteMorph, note.id, "body"),
                 richLoadingContent = {
                     // An empty hint shares the editor's body metrics. Formatted

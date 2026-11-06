@@ -447,3 +447,43 @@ test('a Note whose block boundaries cannot be recorded falls back to Source Mode
     assert.equal(view.bridge.markdown(), '# XHeading\n\n[ref]: https://ref.example')
   } finally { view.close() }
 })
+
+for (const [name, source] of [
+  ['a bullet', '- one\n- two\n- '],
+  ['a star bullet', '* one\n* two\n* '],
+  ['a number', '1. one\n2. two\n3. '],
+  ['a nested bullet', '- one\n  - two\n  - '],
+  ['a bullet below other blocks', '# Title\n\nBody\n\n- one\n- '],
+  ['a bullet with more spaces', '- one\n-   '],
+  ['a bullet then a space line', '- one\n- \n  '],
+  ['a paragraph with trailing spaces', 'Body   '],
+]) {
+  test(`a Note ending in ${name} with no text stays in Rich Mode with its exact source`, () => {
+    const view = renderer()
+    try {
+      view.bridge.load(source)
+      assert.deepEqual(view.messages.filter(message => message.type === 'fallback'), [])
+      assert.equal(view.bridge.markdown(), source)
+    } finally { view.close() }
+  })
+}
+
+test('editing above a list ending in an empty bullet keeps that bullet exactly', () => {
+  const view = renderer()
+  try {
+    view.bridge.load('# Title\n\n- one\n- ')
+    insertText(view.editor, 1, 'X')
+    assert.equal(view.bridge.markdown(), '# XTitle\n\n- one\n- ')
+  } finally { view.close() }
+})
+
+test('editing a list ending in an empty bullet keeps the bullet as a list item', () => {
+  const { saved } = editAndReopen('- one\n- ', editor => insertText(editor, 4, 'X'))
+  assert.match(saved, /^- oXne\n-/)
+  const view = renderer()
+  try {
+    view.bridge.load(saved)
+    assert.deepEqual(view.messages.filter(message => message.type === 'fallback'), [])
+    assert.equal(view.editor.getJSON().content[0].content.length, 2)
+  } finally { view.close() }
+})

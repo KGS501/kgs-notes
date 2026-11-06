@@ -48,6 +48,32 @@ test('GitHub alerts render with a label and editable content and keep their Mark
   }
 })
 
+test('a list ending in an empty item stays in Rich Mode and keeps every line', () => {
+  const messages = []
+  window.KgsNotesEditor = { postMessage: message => messages.push(JSON.parse(message)) }
+  for (const source of ['- first\n- second\n-', '- first\n- second\n- ', '- first\n-\n', '-', '- ', '1. first\n2.', '* first\n*', '- [ ] first\n- [ ]', '- [ ] first\n-',
+    '- first\n  -', '> - quoted\n> -', '- first\n-\n\nAfter']) {
+    messages.length = 0
+    bridge.load(source)
+    assert.deepEqual(messages.filter(({ type }) => type === 'fallback'), [], `Fallback for ${JSON.stringify(source)}`)
+    assert.equal(bridge.markdown(), source)
+  }
+  bridge.load('- first\n- second\n-')
+  assert.equal(root.querySelectorAll('li').length, 3)
+  delete window.KgsNotesEditor
+})
+
+test('real headings, separators and code keep their meaning around dash lines', () => {
+  bridge.load('Title\n---')
+  assert.equal(root.querySelectorAll('h2').length, 1)
+  bridge.load('Title\n-\n\nBody')
+  assert.equal(root.querySelectorAll('h2').length, 1, 'Only the end of a Note is still being written')
+  bridge.load('```\ncode\n-')
+  assert.equal(root.querySelector('pre')?.textContent, 'code\n-')
+  bridge.load('---')
+  assert.equal(root.querySelectorAll('hr').length, 1)
+})
+
 test('ordinary quotes and literal or unknown alert markers remain ordinary Markdown', () => {
   bridge.load('> An ordinary quote.\n\n> [!UNKNOWN]\n> Keep the marker.\n\n```md\n> [!WARNING]\n> Example only\n```\n\n`[!TIP]`')
   assert.equal(root.querySelectorAll('[data-markdown-alert]').length, 0)
@@ -340,5 +366,29 @@ test('German presentation labels change without translating or rewriting Markdow
     bridge.setLabels({ WARNING: 'Warning', Comment: 'Comment', Math: 'Math',
       content: 'Rich note content', empty: 'Start writing…',
       sourceHint: 'Edit this fragment in Source Mode.', sourceTitle: 'Preserved source — edit in Source Mode' }, 'en')
+  }
+})
+
+for (const surface of ['.paper', 'html', 'body', 'main']) test(`a blank ${surface} tap focuses synchronously at the end without changing content`, () => {
+  bridge.load('A short paragraph')
+  root.editor.view.dom.blur()
+  root.editor.commands.setTextSelection(1)
+  assert.equal(window.document.activeElement === root, false)
+  const originalHit = root.editor.view.posAtCoords
+  root.editor.view.posAtCoords = () => null
+  const paper = window.document.querySelector(surface)
+  const pointer = type => {
+    const event = new window.Event(type, { bubbles: true, cancelable: true })
+    Object.assign(event, { pointerId: 1, clientX: 150, clientY: 400 })
+    paper.dispatchEvent(event)
+  }
+  try {
+    pointer('pointerdown')
+    pointer('pointerup')
+    assert.equal(window.document.activeElement === root, true)
+    assert.equal(root.editor.state.selection.from, root.editor.state.doc.content.size - 1)
+    assert.equal(bridge.markdown(), 'A short paragraph')
+  } finally {
+    root.editor.view.posAtCoords = originalHit
   }
 })

@@ -90,7 +90,9 @@ export class SourcePreservation {
     if (!instrumented) return
 
     const normalized = markdown.replace(/\r\n|\r/g, '\n')
-    if (records.map(record => record.raw).join('') !== normalized) return
+    // The lexer rewrites whitespace at the very end of a Note, such as the space of
+    // a final empty list item. The last block keeps the exact source either way.
+    if (records.map(record => record.raw).join('').trimEnd() !== normalized.trimEnd()) return
     if (records.reduce((sum, record) => sum + record.count, 0) !== nodeCount) return
 
     // Map normalized offsets back to the original text (CRLF and lone CR).
@@ -100,6 +102,7 @@ export class SourcePreservation {
       if (markdown[index] === '\r' && markdown[index + 1] === '\n') index += 1
     }
     original.push(markdown.length)
+    const originalOffset = (offset: number) => original[Math.min(offset, normalized.length)]
 
     let offset = 0
     let pendingStart: number | undefined
@@ -107,7 +110,7 @@ export class SourcePreservation {
       const start = offset
       offset += record.raw.length
       if (record.count > 0) {
-        this.groups.push({ start: original[pendingStart ?? start], end: original[offset], nodes: [], count: record.count })
+        this.groups.push({ start: originalOffset(pendingStart ?? start), end: originalOffset(offset), nodes: [], count: record.count })
         pendingStart = undefined
       } else if (record.raw.trim()) {
         // Source without a rich node travels with the next block (or the last one).
@@ -116,7 +119,7 @@ export class SourcePreservation {
     }
     if (pendingStart !== undefined) {
       if (!this.groups.length) return
-      this.groups[this.groups.length - 1].end = original[offset]
+      this.groups[this.groups.length - 1].end = originalOffset(offset)
     }
 
     const doc = editor.state.doc

@@ -549,7 +549,7 @@ class KgsNotesScreenTest {
         }
         compose.onNodeWithTag("note-swipe-${notes.first().id.value}").performTouchInput {
             down(Offset(width * .1f, height * .8f))
-            // Start vertically, then drift far enough right to exceed the Favorite threshold.
+            // Start vertically, then drift far enough right to exceed the delete threshold.
             moveTo(Offset(width * .12f, height * .45f), delayMillis = 40)
             moveTo(Offset(width * .9f, -height * 1.5f), delayMillis = 120)
             up()
@@ -590,11 +590,8 @@ class KgsNotesScreenTest {
         val backgroundX = (beforeBounds.left + 4f * density).toInt()
         val centerY = beforeBounds.center.y.toInt()
         val swipeColor = outline[backgroundX, centerY]
-        assertTrue("The Favorite reveal must use a red hue, including in the blue theme",
+        assertTrue("The delete reveal must use a red hue, including in the blue theme",
             swipeColor.red > swipeColor.green && swipeColor.red > swipeColor.blue)
-        val iconX = (beforeBounds.left + 24f * density).toInt()
-        val iconY = (beforeBounds.center.y - 3f * density).toInt()
-        assertEquals(outline[backgroundX, centerY], outline[iconX, iconY])
         swipe.performTouchInput {
             moveTo(Offset(width * .05f + threshold * 1.05f, height / 2f), delayMillis = 100)
         }
@@ -602,14 +599,13 @@ class KgsNotesScreenTest {
         assertTrue(card.fetchSemanticsNode().boundsInRoot.left - before > threshold * .65f)
         val filled = compose.onRoot().captureToImage().toPixelMap()
         assertEquals("The swipe color must remain fixed", outline[backgroundX, centerY], filled[backgroundX, centerY])
-        assertNotEquals("The heart must fill at the threshold", outline[iconX, iconY], filled[iconX, iconY])
         swipe.performTouchInput { up() }
     }
 
     @Test
-    fun swipeArmsWhileHeldAndCommitsOnlyOnRelease() {
-        val note = sampleSummary(LocalSourceId, NoteSyncState.LOCAL_SOURCE, "Release to favorite")
-        var favorites = 0
+    fun swipeArmsWhileHeldAndDeletesOnlyOnRelease() {
+        val note = sampleSummary(LocalSourceId, NoteSyncState.LOCAL_SOURCE, "Release to delete")
+        val operations = mutableListOf<NoteSelectionOperation>()
         val feedback = mutableListOf<HapticFeedbackType>()
         val haptics = object : HapticFeedback {
             override fun performHapticFeedback(hapticFeedbackType: HapticFeedbackType) { feedback += hapticFeedbackType }
@@ -617,7 +613,7 @@ class KgsNotesScreenTest {
         compose.setContent {
             CompositionLocalProvider(LocalHapticFeedback provides haptics) {
                 KgsNotesTheme(theme = NotesTheme.BLUE) { KgsNotesScreen(NotesUiState(notes = listOf(note)),
-                    NotesActions(onSelectedNotesAction = { _, _, _ -> favorites++ })) }
+                    NotesActions(onSelectedNotesAction = { _, operation, _ -> operations += operation })) }
             }
         }
         val swipe = compose.onNodeWithTag("note-swipe-${note.id.value}")
@@ -628,14 +624,16 @@ class KgsNotesScreenTest {
             moveTo(Offset(width * .9f, height / 2f), delayMillis = 100)
         }
         compose.runOnIdle {
-            assertEquals(0, favorites)
+            assertTrue(operations.isEmpty())
             assertEquals(listOf(HapticFeedbackType.LongPress), feedback)
         }
         compose.waitForIdle()
         assertTrue(card.fetchSemanticsNode().boundsInRoot.left > before.left)
         swipe.performTouchInput { up() }
-        compose.waitForIdle()
-        assertEquals(1, favorites)
+        compose.mainClock.advanceTimeBy(400)
+        compose.runOnIdle { assertEquals(listOf(NoteSelectionOperation.TRASH), operations) }
+        // Only a delete the library refused brings the card back.
+        compose.mainClock.advanceTimeBy(2_000)
         assertEquals(before.left, card.fetchSemanticsNode().boundsInRoot.left, 1f)
     }
 
@@ -845,10 +843,10 @@ class KgsNotesScreenTest {
     }
 
     @Test
-    fun swipingRightFavoritesOnceWithOneThresholdPulseAndDoesNotOpenTheEditor() {
+    fun swipingRightDeletesOnceWithoutConfirmationOrOpeningTheEditor() {
         val note = sampleSummary(LocalSourceId, NoteSyncState.LOCAL_SOURCE, "Swipe me")
-        val favoriteChanges = mutableListOf<String>()
-        val favorite = mutableStateOf(false)
+        val operations = mutableListOf<Pair<Set<NoteId>, NoteSelectionOperation>>()
+        val notes = mutableStateOf(listOf(note))
         var opened = false
         val feedback = mutableListOf<HapticFeedbackType>()
         val haptics = object : HapticFeedback {
@@ -857,26 +855,40 @@ class KgsNotesScreenTest {
         compose.setContent {
             CompositionLocalProvider(LocalHapticFeedback provides haptics) {
                 KgsNotesTheme(theme = NotesTheme.BLUE) {
-                    KgsNotesScreen(NotesUiState(notes = listOf(note.copy(favorite = favorite.value))), NotesActions(
+                    KgsNotesScreen(NotesUiState(notes = notes.value), NotesActions(
                         onSelect = { opened = true },
-                        onSelectedNotesAction = { ids, operation, value ->
-                            assertEquals(setOf(note.id), ids)
-                            assertEquals(NoteSelectionOperation.FAVORITE, operation)
-                            favoriteChanges += value
-                            favorite.value = value == "add"
+                        onSelectedNotesAction = { ids, operation, _ ->
+                            operations += ids to operation
+                            notes.value = emptyList()
                         },
                     ))
                 }
             }
         }
         compose.onNodeWithTag("note-card-${note.id.value}").performTouchInput { swipeRight() }
-        compose.waitForIdle()
-        assertEquals(listOf("add"), favoriteChanges)
-        compose.onNodeWithTag("note-card-${note.id.value}").performTouchInput { swipeRight() }
-        compose.waitForIdle()
-        assertEquals(listOf("add", "remove"), favoriteChanges)
+        compose.mainClock.advanceTimeBy(600)
+        compose.runOnIdle { assertEquals(listOf(setOf(note.id) to NoteSelectionOperation.TRASH), operations) }
+        compose.onNodeWithText("Delete", substring = true).assertDoesNotExist()
         assertEquals(false, opened)
-        assertEquals(listOf(HapticFeedbackType.LongPress, HapticFeedbackType.LongPress), feedback)
+        assertEquals(listOf(HapticFeedbackType.LongPress), feedback)
+    }
+
+    @Test
+    fun switchingCategoryAnimatesOnlyTheNotesBelowTheTopBar() {
+        val state = mutableStateOf(NotesUiState(notes = listOf(sampleSummary(LocalSourceId, NoteSyncState.LOCAL_SOURCE, "All notes fixture"))))
+        compose.mainClock.autoAdvance = false
+        compose.setContent { KgsNotesTheme { KgsNotesScreen(state.value, NotesActions()) } }
+        compose.mainClock.advanceTimeBy(1000)
+        val search = compose.onNodeWithTag("notes-search")
+        val filter = compose.onNodeWithContentDescription("All notes")
+        val before = search.fetchSemanticsNode().boundsInRoot to filter.fetchSemanticsNode().boundsInRoot
+        compose.runOnIdle { state.value = state.value.copy(libraryCategory = "Work", notes = emptyList()) }
+        repeat(6) {
+            compose.mainClock.advanceTimeBy(48)
+            assertEquals(before, search.fetchSemanticsNode().boundsInRoot to filter.fetchSemanticsNode().boundsInRoot)
+        }
+        compose.mainClock.advanceTimeBy(1000)
+        compose.onNodeWithTag("library-category-context").assertIsDisplayed()
     }
 
     @Test
@@ -1661,6 +1673,34 @@ class KgsNotesScreenTest {
     }
 
     @Test
+    fun newNoteComposesItsToolbarOnlyAfterTheMorphAndKeepsItsSpaceReserved() {
+        val selected = mutableStateOf<Note?>(null)
+        compose.mainClock.autoAdvance = false
+        compose.setContent {
+            KgsNotesTheme {
+                KgsNotesScreen(
+                    state = NotesUiState(selectedNote = selected.value, editorMode = com.kgs.notes.editor.EditorMode.SOURCE),
+                    actions = NotesActions(onCreate = { selected.value = sampleNote() }),
+                )
+            }
+        }
+        compose.mainClock.advanceTimeBy(1000)
+
+        compose.onNodeWithContentDescription("New note").performClick()
+        compose.mainClock.advanceTimeBy(120)
+
+        compose.onNodeWithTag("editor-toolbar").assertDoesNotExist()
+        val reserved = compose.onNodeWithTag("editor-toolbar-space", useUnmergedTree = true)
+            .fetchSemanticsNode().size.height
+
+        compose.mainClock.advanceTimeBy(1200)
+
+        compose.onNodeWithTag("editor-toolbar-space", useUnmergedTree = true).assertDoesNotExist()
+        val toolbar = compose.onNodeWithTag("editor-toolbar").fetchSemanticsNode()
+        assertEquals("The note body must not move when the toolbar arrives", toolbar.size.height, reserved)
+    }
+
+    @Test
     fun newNoteMorphKeepsItsStartingBoundsOnFirstOpenAndAfterAnExistingNote() {
         val selected = mutableStateOf<Note?>(null)
         val existing = sampleSummary(LocalSourceId, NoteSyncState.LOCAL_SOURCE)
@@ -1739,7 +1779,7 @@ class KgsNotesScreenTest {
     }
 
     @Test
-    fun libraryUsesTheSameBlueCanvasAsKgsCalendar() {
+    fun libraryUsesTheBlueCanvasBehindItsWhiteNotes() {
         compose.setContent {
             KgsNotesTheme(theme = NotesTheme.BLUE) {
                 KgsNotesScreen(state = NotesUiState(), actions = NotesActions())
@@ -1748,7 +1788,7 @@ class KgsNotesScreenTest {
 
         val image = compose.onNodeWithTag("library-pane").captureToImage().toPixelMap()
 
-        assertEquals(Color(0xFFEDF6FF), image[2, image.height / 2])
+        assertEquals(Color(0xFFDFEBF7), image[2, image.height / 2])
     }
 
     @Test
@@ -1767,7 +1807,7 @@ class KgsNotesScreenTest {
         val search = compose.onNodeWithTag("category-search").captureToImage().toPixelMap()
 
         assertEquals(Color.White, popup[2, popup.height / 2])
-        assertEquals(Color(0xFFEDF6FF), search[search.width - 20, search.height / 2])
+        assertEquals(Color(0xFFDFEBF7), search[search.width - 20, search.height / 2])
     }
 
     @Test
@@ -2103,6 +2143,8 @@ class KgsNotesScreenTest {
         compose.onNodeWithTag("dropdown-leading-Last created", useUnmergedTree = true).assertExists()
         compose.onNodeWithTag("dropdown-leading-Alphabetical", useUnmergedTree = true).assertExists()
         compose.onNodeWithContentDescription("Selected: Last edited").assertIsDisplayed()
+        compose.onNodeWithTag("dropdown-item-Last edited").performClick()
+        compose.waitForIdle()
 
         compose.onNodeWithContentDescription("Open menu").performClick()
         compose.onNodeWithText("Sources").assertIsDisplayed()

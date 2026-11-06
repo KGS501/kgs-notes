@@ -100,6 +100,8 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.ScrollAxisRange
@@ -135,6 +137,7 @@ import org.json.JSONTokener
 import java.io.InputStream
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
 import kotlin.math.roundToInt
@@ -203,6 +206,8 @@ fun KgsMarkdownEditor(
     onPositionChange: (EditorPosition) -> Unit = {},
     /** A tapped link's raw destination; the editor itself never navigates. */
     onOpenLink: (String) -> Unit = {},
+    /** Lets an opening transition finish before the WebView and toolbar are built; [richLoadingContent] shows until then. */
+    openingTransitionMillis: Long = 0,
 ) {
     val strings = androidx.compose.ui.platform.LocalResources.current
 
@@ -240,6 +245,14 @@ fun KgsMarkdownEditor(
         }
     }
 
+    var openingFinished by remember { mutableStateOf(openingTransitionMillis <= 0) }
+    LaunchedEffect(Unit) {
+        // Building the WebView and every toolbar button blocks the main thread, which would stall the transition.
+        delay(openingTransitionMillis)
+        openingFinished = true
+    }
+    val toolbarOpacity by animateFloatAsState(if (openingFinished) 1f else 0f, tween(120), label = "Editor toolbar arrival")
+
     LaunchedEffect(effectiveMode) {
         if (effectiveMode == EditorMode.SOURCE) activeCommands = emptySet()
         richEditorReady = false
@@ -261,7 +274,7 @@ fun KgsMarkdownEditor(
                 EditorMode.RICH -> {
                     // The real editor measures at the final body size from the
                     // first transition frame; a different text layout never replaces it.
-                    RichMarkdownEditor(
+                    if (openingFinished) RichMarkdownEditor(
                         markdown = markdown,
                         onMarkdownChange = onMarkdownChange,
                         onActiveCommandsChange = { activeCommands = it },
@@ -312,6 +325,14 @@ fun KgsMarkdownEditor(
         if (readOnly) {
             // Read-only previews still provide a safe edge for their Source chooser sheet.
             Spacer(Modifier.fillMaxWidth().height(1.dp).kgsSheetDock(LocalKgsSheetDock.current))
+        } else if (!openingFinished) {
+            Spacer(
+                Modifier
+                    .fillMaxWidth()
+                    .height(EditorToolbarHeight)
+                    .kgsSheetDock(LocalKgsSheetDock.current)
+                    .testTag("editor-toolbar-space"),
+            )
         } else EditorToolbar(
             mode = effectiveMode,
             activeCommands = activeCommands,
@@ -343,6 +364,7 @@ fun KgsMarkdownEditor(
             onCommand = commands::dispatch,
             onAddImage = onAddImage,
             canAddImage = canAddImage,
+            modifier = Modifier.graphicsLayer { alpha = toolbarOpacity },
         )
     }
 }
@@ -516,6 +538,17 @@ private fun SourceMarkdownEditor(
     Box(
         modifier = modifier
             .background(MaterialTheme.colorScheme.surface)
+            .pointerInput(readOnly) {
+                // The text field handles its own line/word hit testing. Unconsumed
+                // taps in the surrounding paper margins place the caret at the end.
+                detectTapGestures {
+                    if (!readOnly) {
+                        field.edit { selection = TextRange(length) }
+                        focusRequester.requestFocus()
+                        keyboard?.show()
+                    }
+                }
+            }
             .padding(horizontal = 20.dp, vertical = 16.dp),
     ) {
         BasicTextField(
@@ -757,6 +790,12 @@ private fun RichMarkdownEditor(
                                 JSONObject(message.data ?: return@addWebMessageListener)
                             }.getOrNull() ?: return@addWebMessageListener
                             when (payload.optString("type")) {
+                                "requestKeyboard" -> if (connectedWebView === view && !latestReadOnly) {
+                                    view.requestFocus()
+                                    val input = context.getSystemService(android.content.Context.INPUT_METHOD_SERVICE)
+                                        as android.view.inputmethod.InputMethodManager
+                                    view.post { input.showSoftInput(view, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT) }
+                                }
                                 "fallback" -> if (connectedWebView === view) latestOnFallback()
                                 "viewport" -> if (connectedWebView === view && reportsViewport) {
                                     runCatching { EditorViewport.from(payload.getJSONObject("viewport")) }.getOrNull()
@@ -911,6 +950,8 @@ private class EditorCommandDispatcher {
     }
 }
 
+private val EditorToolbarHeight = 46.dp
+
 @Composable
 private fun EditorToolbar(
     mode: EditorMode,
@@ -919,6 +960,7 @@ private fun EditorToolbar(
     onCommand: (MarkdownCommand) -> Unit,
     onAddImage: () -> Unit,
     canAddImage: Boolean,
+    modifier: Modifier = Modifier,
 ) {
     val strings = androidx.compose.ui.platform.LocalResources.current
 
@@ -939,7 +981,7 @@ private fun EditorToolbar(
     Surface(
         color = MaterialTheme.colorScheme.surface,
         tonalElevation = 0.dp,
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .kgsSheetDock(LocalKgsSheetDock.current)
             .testTag("editor-toolbar"),
@@ -947,7 +989,7 @@ private fun EditorToolbar(
         Column {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.height(46.dp),
+                modifier = Modifier.height(EditorToolbarHeight),
             ) {
                 Spacer(Modifier.width(9.dp))
                 ToolbarButton(
@@ -1222,6 +1264,7 @@ private fun ToolbarGlyph(type: ToolbarGlyphType, color: Color) {
         modifier = Modifier.size(21.dp),
     )
 }
+
 
 private fun WebView.loadMarkdown(markdown: String, onLoaded: (() -> Unit)? = null) {
     evaluateJavascript(

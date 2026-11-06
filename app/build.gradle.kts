@@ -11,8 +11,8 @@ android {
         applicationId = "com.kgs501.kgsnotes"
         minSdk = 26
         targetSdk = 37
-        versionCode = 37
-        versionName = "V.0.0.37"
+        versionCode = 38
+        versionName = "V.0.0.38"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

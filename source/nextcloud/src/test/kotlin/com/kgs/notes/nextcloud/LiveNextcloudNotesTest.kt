@@ -266,6 +266,42 @@ class LiveNextcloudNotesTest {
     }
 
     @Test
+    fun `a lost update response followed by more edits recovers after restart without a false conflict`() = runBlocking {
+        withServer { server ->
+            val loseUpdate = AtomicBoolean(false)
+            val http = server.http.newBuilder().addInterceptor { chain ->
+                val response = chain.proceed(chain.request())
+                if (chain.request().method == "PUT" &&
+                    chain.request().url.encodedPath.contains("/api/v1/notes/") &&
+                    loseUpdate.compareAndSet(true, false)
+                ) {
+                    response.close()
+                    throw IOException("Controlled lost update response")
+                }
+                response
+            }.build()
+            val source = server.source(http)
+            val first = server.engine(source)
+            val id = first.createDraft(sourceId = source.descriptor.id)
+            first.updateContent(id, "New Note first paragraph")
+            first.close(id)
+            first.synchronize(id)
+            first.updateContent(id, "New Note with more detail")
+            loseUpdate.set(true)
+            first.synchronize(id)
+            assertEquals(NoteSyncState.SAVED_LOCALLY, assertNotNull(first.note(id)).syncState)
+            first.updateContent(id, "New Note with more detail and the final sentence")
+
+            val reopened = server.engine(server.source())
+            reopened.synchronize(id)
+            assertEquals(NoteSyncState.SYNCED, assertNotNull(reopened.note(id)).syncState)
+            assertEquals("New Note with more detail and the final sentence", server.api.notes().single().markdown)
+            reopened.refreshSources()
+            assertEquals(listOf(id), reopened.library.value.active.map { it.id })
+        }
+    }
+
+    @Test
     fun `offline changes survive reopening and converge when the server returns`() = runBlocking {
         withServer { server ->
             server.api.create(draft("Offline fixture", "Before outage"))

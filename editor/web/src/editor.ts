@@ -231,26 +231,39 @@ const editor = new Editor({
 // Preserve focus on pointer down, then move the caret only for a real tap;
 // vertical drags still belong to the browser's normal scrolling gesture.
 const paper = document.querySelector('.paper') as HTMLElement
+const main = document.querySelector('main')
 let blankTap: { id: number; x: number; y: number } | null = null
-paper.addEventListener('pointerdown', event => {
+// WebView can hit-test unused viewport space to HTML rather than .paper,
+// especially while its native height changes. Cover the whole document surface.
+document.addEventListener('pointerdown', event => {
+  if (!editor.isEditable) return
   const target = event.target as HTMLElement
   const paragraph = target.closest('p')
   const emptyParagraph = paragraph?.textContent === '' && !paragraph.querySelector('img, input, video')
-  if (target !== paper && target !== editor.view.dom && target !== editor.options.element && !emptyParagraph) return
+  const background = target === document.documentElement || target === document.body || target === main || target === paper
+  if (!background && target !== editor.view.dom && target !== editor.options.element && !emptyParagraph) return
   blankTap = { id: event.pointerId, x: event.clientX, y: event.clientY }
   event.preventDefault()
 })
-paper.addEventListener('pointerup', event => {
+document.addEventListener('pointerup', event => {
   const tap = blankTap
   blankTap = null
   if (!tap || tap.id !== event.pointerId || Math.hypot(event.clientX - tap.x, event.clientY - tap.y) > 8) return
-  const position = editor.view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos ?? 'end'
-  editor.commands.focus(position, { scrollIntoView: false })
+  if (!editor.isEditable) return
+  const lastBlock = editor.view.dom.lastElementChild?.getBoundingClientRect()
+  const belowText = lastBlock != null && event.clientY > lastBlock.bottom
+  const hit = belowText ? null : editor.view.posAtCoords({ left: event.clientX, top: event.clientY })
+  const position = hit?.pos ?? editor.state.doc.content.size - 1
+  editor.commands.setTextSelection(position)
+  // Keep focus inside the user gesture. The queued Tiptap focus command can
+  // miss Android's keyboard activation after a blank-area pointer event.
+  editor.view.focus()
+  post({ type: 'requestKeyboard' })
 })
-paper.addEventListener('pointermove', event => {
+document.addEventListener('pointermove', event => {
   if (blankTap && Math.hypot(event.clientX - blankTap.x, event.clientY - blankTap.y) > 8) blankTap = null
 })
-paper.addEventListener('pointercancel', () => { blankTap = null })
+document.addEventListener('pointercancel', () => { blankTap = null })
 
 // The app shrinks the WebView above the keyboard instead of letting Android pan
 // it, so Chromium sees an ordinary resize and leaves the caret where it was.
