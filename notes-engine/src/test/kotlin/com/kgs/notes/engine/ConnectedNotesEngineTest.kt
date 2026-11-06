@@ -754,6 +754,30 @@ class ConnectedNotesEngineTest {
     }
 
     @Test
+    fun `retrying a lost update with newer edits after restart keeps its confirmed identity`() = runBlocking {
+        val sourceId = SourceId("nextcloud-home")
+        val source = ControlledSource(sourceId, emptyList())
+        val first = ConnectedNotesEngine.open(root.resolve("local"), root.resolve("working"))
+        first.attachSource(source)
+        val id = first.createDraft(sourceId = sourceId)
+        first.updateContent(id, "First paragraph")
+        first.close(id)
+        first.synchronize(id)
+        first.updateContent(id, "First paragraph plus detail")
+        source.loseNextResponse = true
+        first.synchronize(id)
+        first.updateContent(id, "First paragraph plus detail and final sentence")
+
+        val reopened = ConnectedNotesEngine.open(root.resolve("local"), root.resolve("working"))
+        reopened.attachSource(source)
+        reopened.synchronize(id)
+
+        assertEquals(NoteSyncState.SYNCED, assertNotNull(reopened.note(id)).syncState)
+        assertEquals(listOf("First paragraph plus detail and final sentence"), source.notes.value.map(SourceNote::markdown))
+        assertEquals(listOf(id), reopened.library.value.active.map(NoteSummary::id))
+    }
+
+    @Test
     fun `a lost update followed by more edits is not reported as a conflict on refresh`() = runBlocking {
         val sourceId = SourceId("nextcloud-home")
         val source = ControlledSource(sourceId, listOf(remoteNote("12", "Groceries", "- milk")))

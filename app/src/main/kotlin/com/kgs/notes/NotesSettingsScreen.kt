@@ -130,6 +130,7 @@ private enum class SettingsPage(val titleRes: Int) {
     ABOUT(UiR.ui_about), OPEN_SOURCE(UiR.ui_open_source_licenses), LICENSE(UiR.ui_license),
     CATEGORIES(UiR.ui_categories),
     LANGUAGE(UiR.ui_language),
+    DEFAULT_VIEW(UiR.ui_default_view),
 }
 
 /** The top-level page a nested settings page belongs to. */
@@ -139,11 +140,12 @@ private val SettingsPage.parent: SettingsPage?
         SettingsPage.SOURCE_DETAILS -> SettingsPage.SOURCES
         SettingsPage.OPEN_SOURCE -> SettingsPage.ABOUT
         SettingsPage.LICENSE -> SettingsPage.ABOUT
+        SettingsPage.DEFAULT_VIEW -> SettingsPage.APPEARANCE
         else -> SettingsPage.HOME
     }
 
 /** Wide windows show settings as a list and its open page side by side, like Android's own Settings. */
-internal val SettingsTwoPaneMinWidth = 720.dp
+internal val SettingsTwoPaneMinWidth = 600.dp
 
 /** Settings navigation belongs to the UI; preferences and Source operations retain their existing owners. */
 @Composable
@@ -166,6 +168,7 @@ internal fun NotesSettingsScreen(state: NotesUiState, actions: NotesActions, mod
     fun backLabelOf(current: SettingsPage) = when (parentOf(current)) {
         null -> strings.getString(UiR.ui_back_to_notes)
         SettingsPage.SOURCES -> strings.getString(UiR.ui_back_to_sources)
+        SettingsPage.APPEARANCE -> strings.getString(UiR.ui_back_to_appearance)
         SettingsPage.ABOUT -> strings.getString(UiR.ui_back_to_about)
         SettingsPage.OPEN_SOURCE -> strings.getString(UiR.ui_back_to_open_source_licenses)
         else -> strings.getString(UiR.ui_back_to_settings)
@@ -206,7 +209,8 @@ internal fun NotesSettingsScreen(state: NotesUiState, actions: NotesActions, mod
                     } else sourceDetails(strings, detailsSource, state.defaultSourceId == detailsSource.id, actions,
                         onRename = { renameOpen = true }, onRemove = { removeOpen = true })
                     SettingsPage.NOTES -> notesAndEditor(strings, state, actions)
-                    SettingsPage.APPEARANCE -> appearance(strings, state, actions)
+                    SettingsPage.APPEARANCE -> appearance(strings, state, actions) { navigate(SettingsPage.DEFAULT_VIEW, true) }
+                    SettingsPage.DEFAULT_VIEW -> defaultView(strings, state, actions)
                     SettingsPage.PRIVACY -> privacy(strings, state, actions)
                     SettingsPage.ABOUT -> about(strings, actions,
                         onOpenLicense = { licenseId = NotesLicenseId; navigate(SettingsPage.LICENSE, true) },
@@ -245,7 +249,7 @@ internal fun NotesSettingsScreen(state: NotesUiState, actions: NotesActions, mod
         if (twoPane) {
             val topLevel = generateSequence(detail) { parentOf(it)?.takeUnless { parent -> parent == SettingsPage.HOME } }.last()
             Row(Modifier.fillMaxSize().testTag("settings-two-pane"), horizontalArrangement = Arrangement.spacedBy(24.dp)) {
-                Column(Modifier.width((width * .38f).coerceIn(280.dp, 400.dp)).fillMaxHeight()) {
+                Column(Modifier.width((width * .38f).coerceIn(240.dp, 360.dp)).fillMaxHeight()) {
                     SettingsHeader(strings.getString(UiR.ui_settings), strings.getString(UiR.ui_back_to_notes), forward,
                         onBack = { actions.onDestinationChange(LibraryDestination.NOTES) })
                     LazyColumn(
@@ -603,7 +607,37 @@ private fun LazyListScope.notesAndEditor(strings: android.content.res.Resources,
     }
 }
 
-private fun LazyListScope.appearance(strings: android.content.res.Resources, state: NotesUiState, actions: NotesActions) {
+private fun libraryFilterLabel(strings: android.content.res.Resources, filter: LibraryFilter): String = strings.getString(when (filter) {
+    LibraryFilter.ALL -> UiR.ui_all_notes
+    LibraryFilter.FAVORITES -> UiR.ui_favorite_notes
+    LibraryFilter.LOCAL -> UiR.ui_local_notes
+    LibraryFilter.SERVER -> UiR.ui_server_notes
+})
+
+private fun libraryHomeLabel(strings: android.content.res.Resources, home: LibraryHome): String = when (home.category) {
+    null -> libraryFilterLabel(strings, home.filter)
+    "" -> strings.getString(UiR.ui_no_category)
+    else -> home.category
+}
+
+private fun LazyListScope.defaultView(strings: android.content.res.Resources, state: NotesUiState, actions: NotesActions) {
+    group("views", strings.getString(UiR.ui_library), footer = strings.getString(UiR.ui_kgs_notes_opens_here_and_back_returns_here)) {
+        LibraryFilter.entries.forEach { filter -> row(filter.name) {
+            val home = LibraryHome(filter)
+            KgsSettingsRadioItem(libraryFilterLabel(strings, filter), selected = state.libraryHome == home,
+                onClick = { actions.onLibraryHomeChange(home) }, position = it, modifier = Modifier.testTag("default-view-${filter.name}"))
+        } }
+    }
+    group("categories", strings.getString(UiR.ui_categories)) {
+        (listOf("") + state.categories.sortedBy(String::lowercase)).forEach { category -> row("category-$category") {
+            val home = LibraryHome(category = category)
+            KgsSettingsRadioItem(libraryHomeLabel(strings, home), selected = state.libraryHome == home,
+                onClick = { actions.onLibraryHomeChange(home) }, position = it, modifier = Modifier.testTag("default-view-category-$category"))
+        } }
+    }
+}
+
+private fun LazyListScope.appearance(strings: android.content.res.Resources, state: NotesUiState, actions: NotesActions, onOpenDefaultView: () -> Unit) {
     group("theme", strings.getString(UiR.ui_theme)) {
         row("mode") {
             KgsSettingsSegmented(DarkModePreference.entries, state.darkMode, actions.onDarkModeChange, label = { mode -> strings.getString(mode.labelRes) },
@@ -615,6 +649,10 @@ private fun LazyListScope.appearance(strings: android.content.res.Resources, sta
         }
     }
     group("library", strings.getString(UiR.ui_library)) {
+        row("default-view") {
+            NavigationRow(strings.getString(UiR.ui_default_view), libraryHomeLabel(strings, state.libraryHome), "settings-default-view", it,
+                onClick = onOpenDefaultView) { KgsSettingsIcon(MaterialTheme.colorScheme.secondary) { CategoryIcon(false, MaterialTheme.colorScheme.secondary) } }
+        }
         row("layout") {
             KgsSettingsTiles(LibraryView.entries, state.libraryView, { view -> if (state.libraryView != view) actions.onToggleLibraryView() },
                 label = { layoutLabel(strings, it) }, position = it, tileModifier = { view -> Modifier.testTag("layout-choice-${view.name}") }) { view -> LayoutPreview(view) }

@@ -16,6 +16,7 @@ private val headingPattern = Regex("^#{1,6}\\s+")
 private val quotePattern = Regex("^>\\s?")
 private val checkboxPattern = Regex("^[-*+] \\[([ xX])] ")
 private val bulletPattern = Regex("^[-*+]\\s+")
+private val nonbreakingSpaceEntities = listOf("&nbsp;", "&#160;", "&#xA0;")
 
 /** A bounded display projection of canonical Markdown; it is never saved as Note content. */
 internal fun noteCardPreview(
@@ -54,6 +55,16 @@ private fun AnnotatedString.Builder.appendMarkdownInline(markdown: String, linkC
     var index = 0
     while (index < markdown.length) {
         val remaining = markdown.substring(index)
+        // Rich Mode serializes empty paragraphs with a nonbreaking-space entity.
+        // Decode display whitespace without changing canonical Markdown or Source Mode.
+        val spaceEntity = if (markdown[index] == '&') nonbreakingSpaceEntities.firstOrNull {
+            remaining.startsWith(it, ignoreCase = true)
+        } else null
+        if (spaceEntity != null) {
+            append('\u00a0')
+            index += spaceEntity.length
+            continue
+        }
         val image = imagePattern.find(remaining)?.takeIf { it.range.first == 0 }
         if (image != null) {
             append("▧ ")
@@ -88,7 +99,9 @@ private fun AnnotatedString.Builder.appendMarkdownInline(markdown: String, linkC
                     "`" -> SpanStyle(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
                     else -> SpanStyle(fontStyle = FontStyle.Italic)
                 }
-                withStyle(style) { appendMarkdownInline(inner, linkColor, imageLabel) }
+                withStyle(style) {
+                    if (delimiter == "`") append(inner) else appendMarkdownInline(inner, linkColor, imageLabel)
+                }
                 index = closing + delimiter.length
                 continue
             }

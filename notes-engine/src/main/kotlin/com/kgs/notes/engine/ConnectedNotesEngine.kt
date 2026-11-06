@@ -192,7 +192,7 @@ class ConnectedNotesEngine private constructor(
     }
 
     private suspend fun synchronizeRemote(id: NoteId) {
-        if (!adoptUncertainCreate(id)) return
+        if (!reconcileUncertainWrite(id)) return
         val request = mutex.withLock {
             val current = workingCopies[id] ?: return
             val source = attachedSources[current.sourceId] ?: return
@@ -309,14 +309,15 @@ class ConnectedNotesEngine private constructor(
         }
 
     /**
-     * Looks for the Source copy of a create whose response never arrived. Returns
-     * false when the Source cannot be reached, so the create is not issued blindly.
+     * Confirm a previous write before replacing its durable fingerprint. Otherwise
+     * a retry containing newer edits can mistake our own lost update for a Conflict.
+     * Returns false when the Source cannot be reached; never retry a create blindly.
      * Callers hold this Source's operation lock.
      */
-    private suspend fun adoptUncertainCreate(id: NoteId): Boolean {
+    private suspend fun reconcileUncertainWrite(id: NoteId): Boolean {
         val source = mutex.withLock {
             val current = workingCopies[id] ?: return true
-            if (current.remoteId.isNotBlank() || current.uncertainWrite == null) return true
+            if (current.uncertainWrite == null) return true
             attachedSources[current.sourceId] ?: return true
         }
         try {

@@ -98,11 +98,17 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.ScrollAxisRange
+import androidx.compose.ui.semantics.verticalScrollAxisRange
+import androidx.compose.ui.semantics.scrollBy
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.layout.onSizeChanged
@@ -129,6 +135,7 @@ import org.json.JSONTokener
 import java.io.InputStream
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
 import kotlin.math.roundToInt
@@ -179,6 +186,8 @@ fun KgsMarkdownEditor(
     readOnly: Boolean = false,
     allowRemoteResources: Boolean = true,
     onSnapshotReaderReady: (suspend () -> String?) -> Unit = {},
+    /** Lets an opening transition finish before the WebView and toolbar are built; [richLoadingContent] shows until then. */
+    openingTransitionMillis: Long = 0,
 ) {
     val strings = androidx.compose.ui.platform.LocalResources.current
 
@@ -215,6 +224,14 @@ fun KgsMarkdownEditor(
         }
     }
 
+    var openingFinished by remember { mutableStateOf(openingTransitionMillis <= 0) }
+    LaunchedEffect(Unit) {
+        // Building the WebView and every toolbar button blocks the main thread, which would stall the transition.
+        delay(openingTransitionMillis)
+        openingFinished = true
+    }
+    val toolbarOpacity by animateFloatAsState(if (openingFinished) 1f else 0f, tween(120), label = "Editor toolbar arrival")
+
     LaunchedEffect(effectiveMode) {
         if (effectiveMode == EditorMode.SOURCE) activeCommands = emptySet()
         richEditorReady = false
@@ -236,7 +253,7 @@ fun KgsMarkdownEditor(
                 EditorMode.RICH -> {
                     // The real editor measures at the final body size from the
                     // first transition frame; a different text layout never replaces it.
-                    RichMarkdownEditor(
+                    if (openingFinished) RichMarkdownEditor(
                         markdown = markdown,
                         onMarkdownChange = onMarkdownChange,
                         onActiveCommandsChange = { activeCommands = it },
@@ -283,6 +300,14 @@ fun KgsMarkdownEditor(
         if (readOnly) {
             // Read-only previews still provide a safe edge for their Source chooser sheet.
             Spacer(Modifier.fillMaxWidth().height(1.dp).kgsSheetDock(LocalKgsSheetDock.current))
+        } else if (!openingFinished) {
+            Spacer(
+                Modifier
+                    .fillMaxWidth()
+                    .height(EditorToolbarHeight)
+                    .kgsSheetDock(LocalKgsSheetDock.current)
+                    .testTag("editor-toolbar-space"),
+            )
         } else EditorToolbar(
             mode = effectiveMode,
             activeCommands = activeCommands,
@@ -314,6 +339,7 @@ fun KgsMarkdownEditor(
             onCommand = commands::dispatch,
             onAddImage = onAddImage,
             canAddImage = canAddImage,
+            modifier = Modifier.graphicsLayer { alpha = toolbarOpacity },
         )
     }
 }
@@ -364,6 +390,7 @@ private fun SourceMarkdownEditor(
         TextRange(it.selectionStart.coerceIn(0, markdown.length), it.selectionEnd.coerceIn(0, markdown.length))
     } ?: TextRange.Zero)
     val scroll = rememberScrollState()
+    val scrollScope = rememberCoroutineScope()
     val density = LocalDensity.current.density
     var textLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
     var viewportSize by remember { mutableStateOf(IntSize.Zero) }
@@ -478,6 +505,17 @@ private fun SourceMarkdownEditor(
     Box(
         modifier = modifier
             .background(MaterialTheme.colorScheme.surface)
+            .pointerInput(readOnly) {
+                // The text field handles its own line/word hit testing. Unconsumed
+                // taps in the surrounding paper margins place the caret at the end.
+                detectTapGestures {
+                    if (!readOnly) {
+                        field.edit { selection = TextRange(length) }
+                        focusRequester.requestFocus()
+                        keyboard?.show()
+                    }
+                }
+            }
             .padding(horizontal = 20.dp, vertical = 16.dp),
     ) {
         BasicTextField(
@@ -495,6 +533,12 @@ private fun SourceMarkdownEditor(
                 .graphicsLayer { alpha = opacity }
                 .onSizeChanged { viewportSize = it }
                 .focusRequester(focusRequester)
+                .semantics {
+                    verticalScrollAxisRange = ScrollAxisRange(
+                        value = { scroll.value.toFloat() }, maxValue = { scroll.maxValue.toFloat() },
+                    )
+                    scrollBy { _, y -> scrollScope.launch { scroll.scrollBy(y) }; true }
+                }
                 .testTag("source-editor"),
         )
     }
@@ -665,17 +709,21 @@ private fun RichMarkdownEditor(
                                 JSONObject(message.data ?: return@addWebMessageListener)
                             }.getOrNull() ?: return@addWebMessageListener
                             when (payload.optString("type")) {
+                                "requestKeyboard" -> if (connectedWebView === view && !latestReadOnly) {
+                                    view.requestFocus()
+                                    val input = context.getSystemService(android.content.Context.INPUT_METHOD_SERVICE)
+                                        as android.view.inputmethod.InputMethodManager
+                                    view.post { input.showSoftInput(view, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT) }
+                                }
                                 "fallback" -> if (connectedWebView === view) latestOnFallback()
                                 "viewportRestored" -> if (connectedWebView === view) {
                                     val restored = runCatching { EditorViewport.from(payload.getJSONObject("viewport")) }.getOrNull()
-                                    view.postVisualStateCallback(0L, object : WebView.VisualStateCallback() {
-                                        override fun onComplete(requestId: Long) {
-                                            if (connectedWebView === view) {
-                                                restored?.let(latestOnViewportRestored)
-                                                latestOnReady()
-                                            }
+                                    view.afterNextFrame {
+                                        if (connectedWebView === view) {
+                                            restored?.let(latestOnViewportRestored)
+                                            latestOnReady()
                                         }
-                                    })
+                                    }
                                 }
                                 "ready" -> {
                                     view.setEditorLabels(latestLabels, latestLanguage)
@@ -687,19 +735,17 @@ private fun RichMarkdownEditor(
                                         // JavaScript readiness precedes the rendered Note.
                                         // Reveal only a frame containing the loaded Markdown.
                                         view.setReadOnly(latestReadOnly, force = latestReadOnly) {
-                                            view.postVisualStateCallback(0L, object : WebView.VisualStateCallback() {
-                                                override fun onComplete(requestId: Long) {
-                                                    if (connectedWebView === view) {
-                                                        if (initialViewport == null) latestOnReady()
-                                                        else {
-                                                            val notify = "window.$BRIDGE_NAME.postMessage(JSON.stringify({type:'viewportRestored',viewport:window.kgsEditor.viewport()}))"
-                                                            view.evaluateJavascript(
-                                                                "window.kgsEditor.restoreViewport(${initialViewport.json()}).then(() => {$notify}).catch(() => window.$BRIDGE_NAME.postMessage(JSON.stringify({type:'fallback'})))", null,
-                                                            )
-                                                        }
+                                            view.afterNextFrame {
+                                                if (connectedWebView === view) {
+                                                    if (initialViewport == null) latestOnReady()
+                                                    else {
+                                                        val notify = "window.$BRIDGE_NAME.postMessage(JSON.stringify({type:'viewportRestored',viewport:window.kgsEditor.viewport()}))"
+                                                        view.evaluateJavascript(
+                                                            "window.kgsEditor.restoreViewport(${initialViewport.json()}).then(() => {$notify}).catch(() => window.$BRIDGE_NAME.postMessage(JSON.stringify({type:'fallback'})))", null,
+                                                        )
                                                     }
                                                 }
-                                            })
+                                            }
                                         }
                                     }
                                     commands.connect(view, reader = {
@@ -823,6 +869,8 @@ private class EditorCommandDispatcher {
     }
 }
 
+private val EditorToolbarHeight = 46.dp
+
 @Composable
 private fun EditorToolbar(
     mode: EditorMode,
@@ -831,6 +879,7 @@ private fun EditorToolbar(
     onCommand: (MarkdownCommand) -> Unit,
     onAddImage: () -> Unit,
     canAddImage: Boolean,
+    modifier: Modifier = Modifier,
 ) {
     val strings = androidx.compose.ui.platform.LocalResources.current
 
@@ -851,7 +900,7 @@ private fun EditorToolbar(
     Surface(
         color = MaterialTheme.colorScheme.surface,
         tonalElevation = 0.dp,
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .kgsSheetDock(LocalKgsSheetDock.current)
             .testTag("editor-toolbar"),
@@ -859,7 +908,7 @@ private fun EditorToolbar(
         Column {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.height(46.dp),
+                modifier = Modifier.height(EditorToolbarHeight),
             ) {
                 Spacer(Modifier.width(9.dp))
                 ToolbarButton(
@@ -1133,6 +1182,17 @@ private fun ToolbarGlyph(type: ToolbarGlyphType, color: Color) {
         tint = color,
         modifier = Modifier.size(21.dp),
     )
+}
+
+/** Leaving a Note can destroy its WebView mid-load, and a destroyed WebView rejects this call. */
+private fun WebView.afterNextFrame(action: () -> Unit) {
+    try {
+        postVisualStateCallback(0L, object : WebView.VisualStateCallback() {
+            override fun onComplete(requestId: Long) = action()
+        })
+    } catch (_: IllegalStateException) {
+        // Nobody is left to show the frame to.
+    }
 }
 
 private fun WebView.loadMarkdown(markdown: String, onLoaded: (() -> Unit)? = null) {

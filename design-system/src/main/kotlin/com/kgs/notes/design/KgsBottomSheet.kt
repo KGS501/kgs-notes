@@ -60,7 +60,11 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.FrameRateCategory
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.preferredFrameRate
+import androidx.compose.ui.semantics.hideFromAccessibility
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.graphics.Color
@@ -197,12 +201,15 @@ fun KgsExpandableSheetPanel(state: KgsSheetExpansion, content: @Composable () ->
 }
 
 /** Observe empty-space taps while keeping the library fully interactive. */
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 internal fun KgsSheetHost(content: @Composable () -> Unit) {
     val registry = remember { SheetRegistry() }
     val density = LocalDensity.current
     CompositionLocalProvider(LocalSheets provides registry) {
-        Box(Modifier.fillMaxSize()) {
+        // Android 15+ runs ordinary view animations at a lower rate unless asked. The vote
+        // only counts while something draws, so a still screen keeps its power savings.
+        Box(Modifier.fillMaxSize().preferredFrameRate(FrameRateCategory.High)) {
             Box(Modifier.fillMaxSize().graphicsLayer {
                 val blur = registry.confirmations.maxOfOrNull { it.progress() } ?: 0f
                 renderEffect = if (android.os.Build.VERSION.SDK_INT >= 31 && blur > .001f) {
@@ -210,7 +217,8 @@ internal fun KgsSheetHost(content: @Composable () -> Unit) {
                     BlurEffect(radius, radius, TileMode.Clamp)
                 } else null
             }) {
-                Box(Modifier.fillMaxSize().pointerInput(registry) {
+                val covered = registry.entries.any { it.modal && !it.docked }
+                Box(Modifier.fillMaxSize().semantics { if (covered) hideFromAccessibility() }.pointerInput(registry) {
                     // Observe only unhandled taps. Note clicks and scroll gestures
                     // continue to work behind the modeless Note selection sheet.
                     awaitEachGesture {
@@ -316,15 +324,17 @@ fun KgsBottomSheet(
     val parentKeyboard = with(density) { WindowInsets.ime.getBottom(density).toDp() }
     val velocityThreshold = with(density) { 900.dp.toPx() }
     val collapseThreshold = with(density) { 28.dp.toPx() }
-    val dockHeight = with(density) { (dock?.top ?: 0f).toDp() }
-    val controlsHeight = with(density) { (dock?.controlsBottom ?: 0f).toDp() }
+    // A pane sliding out of the window reports positions above its top edge.
+    val dockHeight = with(density) { (dock?.top ?: 0f).toDp() }.coerceAtLeast(0.dp)
+    val controlsHeight = with(density) { (dock?.controlsBottom ?: 0f).toDp() }.coerceAtLeast(0.dp)
     val body: @Composable () -> Unit = {
         val focus = LocalFocusManager.current
         val keyboard = LocalSoftwareKeyboardController.current
         LaunchedEffect(expanded) {
-            if (!expanded && modal && focusable && dock == null) {
+            // A Dialog window used to take focus and the keyboard from what lies behind it.
+            if (modal && focusable && dock == null) {
                 focus.clearFocus()
-                keyboard?.hide()
+                if (!expanded) keyboard?.hide()
             }
         }
         val sideRegion = region?.takeIf { it.known }
@@ -368,16 +378,18 @@ fun KgsBottomSheet(
                     // The sheet slides out of its own pane, never across the other one.
                     .clipToBounds()
             } else Modifier.align(Alignment.BottomCenter).fillMaxWidth()) {
+            // The shadow is a sibling so that fading it leaves the sheet itself opaque.
+            Box(Modifier.align(Alignment.BottomCenter).widthIn(max = 640.dp).fillMaxWidth()
+                .heightIn(max = availableHeight)
+                .graphicsLayer {
+                    translationY = (1f - progress.value) * sheetHeight + drag
+                }) {
+            Box(Modifier.matchParentSize().kgsSheetShadow(sheetShape) { entry.progress() })
             Surface(
                 color = containerColor,
                 shape = sheetShape,
                 shadowElevation = 0.dp,
-                modifier = Modifier.align(Alignment.BottomCenter).widthIn(max = 640.dp).fillMaxWidth()
-                    .heightIn(max = availableHeight)
-                    .graphicsLayer {
-                        translationY = (1f - progress.value) * sheetHeight + drag
-                    }
-                    .kgsSheetShadow(sheetShape) { entry.progress() }
+                modifier = Modifier.fillMaxWidth()
                     .onSizeChanged { sheetHeight = it.height }
                     .then(modifier)
                     .consumeSurfaceTaps()
@@ -439,10 +451,13 @@ fun KgsBottomSheet(
                 }
             }
             }
+            }
         }
     }
     val latestBody by rememberUpdatedState(body)
-    if (registry != null && (dock != null || !modal)) {
+    // Every sheet shares the app's window: creating a separate Dialog window as the
+    // animation starts costs its first frames and moves it to another render target.
+    if (registry != null) {
         DisposableEffect(entry) {
             entry.overlay = { latestBody() }
             onDispose { entry.overlay = null }

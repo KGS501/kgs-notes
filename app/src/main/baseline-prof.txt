@@ -1,0 +1,4 @@
+# Compile KGS Notes ahead of time. Sheets and the New Note morph run too rarely for
+# the JIT to warm them up, so without this their first frames are interpreted.
+HSPLcom/kgs/notes/**->**(**)**
+Lcom/kgs/notes/**;

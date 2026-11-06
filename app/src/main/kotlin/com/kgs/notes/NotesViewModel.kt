@@ -52,6 +52,19 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.withContext
 
+/** Where the library opens and returns to: a filter, or a Category (an empty path means no Category). */
+data class LibraryHome(val filter: LibraryFilter = LibraryFilter.ALL, val category: String? = null) {
+    val encoded: String get() = category?.let { "category:$it" } ?: "filter:${filter.name}"
+
+    companion object {
+        fun decode(value: String?): LibraryHome = when {
+            value == null -> LibraryHome()
+            value.startsWith("category:") -> LibraryHome(category = value.removePrefix("category:"))
+            else -> LibraryHome(LibraryFilter.entries.firstOrNull { it.name == value.removePrefix("filter:") } ?: LibraryFilter.ALL)
+        }
+    }
+}
+
 enum class LibraryFilter {
     ALL,
     FAVORITES,
@@ -170,6 +183,7 @@ data class NotesUiState(
     val destination: LibraryDestination = LibraryDestination.NOTES,
     /** null shows every Category; an empty path shows Notes without a Category. */
     val libraryCategory: String? = null,
+    val libraryHome: LibraryHome = LibraryHome(),
     val pendingSyncCount: Int = 0,
     val syncingSources: Boolean = false,
     val editorMode: EditorMode = EditorMode.RICH,
@@ -219,8 +233,12 @@ class NotesViewModel internal constructor(
     private val slot: EditorSlot get() = slotFor(activePane.value)
     private fun slotFor(pane: NotePane) = if (pane == NotePane.PRIMARY) primarySlot else secondarySlot
     private val selected: MutableStateFlow<Note?> get() = slot.note
+    private val initialHome = LibraryHome.decode(preferences.getString(LIBRARY_HOME_KEY, null))
     private val controls = MutableStateFlow(
         UiControls(
+            filter = initialHome.filter,
+            libraryCategory = initialHome.category,
+            libraryHome = initialHome,
             groupByDate = preferences.getBoolean(GROUP_BY_DATE_KEY, false),
             theme = preferences.getString(THEME_KEY, null)
                 ?.let { stored -> NotesTheme.entries.firstOrNull { it.name == stored } }
@@ -345,6 +363,7 @@ class NotesViewModel internal constructor(
             ascending = controls.ascending,
             destination = controls.destination,
             libraryCategory = controls.libraryCategory,
+            libraryHome = controls.libraryHome,
             pendingSyncCount = library.active.count { note -> visible(note) && note.needsSyncNotice },
             syncingSources = controls.syncingSources,
             editorMode = controls.editorMode,
@@ -413,9 +432,13 @@ class NotesViewModel internal constructor(
             val sourceId = controls.value.defaultSourceId.takeIf { preferred ->
                 engine.sources.value.any { it.id == preferred }
             } ?: LocalSourceId
-            val id = engine.createDraft(category = controls.value.libraryCategory.orEmpty(), sourceId = sourceId)
-            s.note.value = engine.openEditingSession(id)
+            // Draft files are written off the main thread so the New Note morph starts on time.
+            val opened = withContext(Dispatchers.IO) {
+                engine.openEditingSession(engine.createDraft(category = controls.value.libraryCategory.orEmpty(), sourceId = sourceId))
+            }
+            // The mode goes first so whoever sees the Note also sees its mode.
             setSlotEditorMode(s, controls.value.defaultEditorMode)
+            s.note.value = opened
         }
     }
 
@@ -430,8 +453,9 @@ class NotesViewModel internal constructor(
         viewModelScope.launch {
             flushSelectedContent(s)
             s.note.value?.id?.takeIf { it != id }?.let { engine.close(it) }
-            s.note.value = engine.openEditingSession(id)
+            val opened = engine.openEditingSession(id)
             setSlotEditorMode(s, previewModeFor(id))
+            s.note.value = opened
         }
     }
 
@@ -966,6 +990,10 @@ class NotesViewModel internal constructor(
             ids.forEach { id ->
                 runCatching {
                     val note = engine.note(id) ?: return@runCatching
+                    // A Note leaving the library also leaves any page showing it, edits saved first.
+                    val closing = listOf(primarySlot, secondarySlot).firstOrNull { it.note.value?.id == id }
+                        ?.takeIf { operation == NoteSelectionOperation.TRASH || operation == NoteSelectionOperation.DELETE }
+                    closing?.let { flushSelectedContent(it) }
                     when (operation) {
                         NoteSelectionOperation.FAVORITE -> {
                             val desiredFavorite = value != "remove"
@@ -983,6 +1011,7 @@ class NotesViewModel internal constructor(
                             preferences.edit().remove(previewModeKey(id)).apply()
                         }
                     }
+                    closing?.note?.value = null
                     if (operation in setOf(
                             NoteSelectionOperation.FAVORITE,
                             NoteSelectionOperation.CATEGORY,
@@ -1064,7 +1093,7 @@ class NotesViewModel internal constructor(
 
     fun openDestination(destination: LibraryDestination) {
         controls.update { it.copy(destination = destination,
-            libraryCategory = if (destination == LibraryDestination.NOTES) null else it.libraryCategory) }
+            libraryCategory = if (destination == LibraryDestination.NOTES) it.libraryHome.category else it.libraryCategory) }
     }
 
     fun createCategory(sourceId: SourceId, name: String) {
@@ -1097,6 +1126,11 @@ class NotesViewModel internal constructor(
                         if (target == null) "" else target + path.removePrefix(category)
                     } else path)
                 }
+                // A default view on a removed Category falls back to All Notes; a rename follows it.
+                val home = controls.value.libraryHome.category
+                if (home != null && (home == category || home.startsWith("$category/"))) {
+                    setLibraryHome(if (target == null) LibraryHome() else LibraryHome(category = target + home.removePrefix(category)))
+                }
             } catch (cancelled: CancellationException) { throw cancelled
             } catch (_: Exception) {
                 controls.update { it.copy(userMessage = strings.getString(UiR.ui_some_category_changes_couldn_t_be_completed_your_notes_were_kept_you_can_retry)) }
@@ -1125,7 +1159,15 @@ class NotesViewModel internal constructor(
     fun refreshLocale(locale: java.util.Locale) { controls.update { it.copy(localeTag = locale.toLanguageTag()) } }
 
     fun openCategory(category: String?) {
-        controls.update { it.copy(destination = LibraryDestination.NOTES, libraryCategory = category, filter = LibraryFilter.ALL, query = "") }
+        controls.update {
+            it.copy(destination = LibraryDestination.NOTES, libraryCategory = category, query = "",
+                filter = if (category == it.libraryHome.category) it.libraryHome.filter else LibraryFilter.ALL)
+        }
+    }
+
+    fun setLibraryHome(home: LibraryHome) {
+        preferences.edit().putString(LIBRARY_HOME_KEY, home.encoded).apply()
+        controls.update { it.copy(libraryHome = home) }
     }
 
     fun flushPendingContent() {
@@ -1381,6 +1423,7 @@ class NotesViewModel internal constructor(
         const val GROUP_BY_DATE_KEY = "group_by_date"
         const val THEME_KEY = "app_theme"
         const val DARK_MODE_KEY = "dark_mode"
+        const val LIBRARY_HOME_KEY = "library_home"
         const val DEFAULT_EDITOR_MODE_KEY = "default_editor_mode"
         const val EDITOR_LAYOUT_KEY = "editor_layout"
         const val SPLIT_FRACTION_KEY = "split_fraction"
@@ -1400,6 +1443,7 @@ class NotesViewModel internal constructor(
         val ascending: Boolean = false,
         val destination: LibraryDestination = LibraryDestination.NOTES,
         val libraryCategory: String? = null,
+        val libraryHome: LibraryHome = LibraryHome(),
         val hiddenSourceIds: Set<SourceId> = emptySet(),
         val editorMode: EditorMode = EditorMode.RICH,
         val attachmentMetadataPreference: AttachmentMetadataPreference = AttachmentMetadataPreference.ASK_EVERY_TIME,

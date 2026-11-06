@@ -368,4 +368,7 @@
     <string name="ui_resize_panes">"Resize panes"</string>
     <string name="ui_view_options">"View options"</string>
     <string name="ui_layout">"Layout"</string>
+    <string name="ui_default_view">"Default view"</string>
+    <string name="ui_back_to_appearance">"Back to Appearance"</string>
+    <string name="ui_kgs_notes_opens_here_and_back_returns_here">"KGS Notes opens here, and Back returns here."</string>
 </resources>

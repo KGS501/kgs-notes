@@ -72,6 +72,7 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 internal val NoteCardFooterHeight = 42.dp
+internal val NoteCardTitleGap = 8.dp
 
 /** One keyed, virtualized collection for both layouts; content never enters a fullscreen overlay. */
 @Composable
@@ -116,6 +117,20 @@ internal fun NoteCollection(
     val textMeasurer = rememberTextMeasurer(cacheSize = 128)
     val typography = MaterialTheme.typography
     val linkColor = MaterialTheme.colorScheme.primary
+    val imageLabel = strings.getString(UiR.ui_image)
+    // Parse Markdown once per content change, independently of pane width.
+    val previewCache = remember { mutableMapOf<NoteId, Pair<List<Any>, androidx.compose.ui.text.AnnotatedString>>() }
+    val previews = remember(notes, previewModes, linkColor, imageLabel) {
+        previewCache.keys.retainAll(notes.mapTo(hashSetOf()) { it.id })
+        notes.associate { note ->
+            val markdown = note.previewMarkdown.ifBlank { note.snippet }
+            val mode = previewModes[note.id] ?: EditorMode.RICH
+            val key = listOf(markdown, mode, linkColor, imageLabel)
+            val preview = previewCache[note.id]?.takeIf { it.first == key }?.second
+                ?: noteCardPreview(markdown, mode, linkColor, imageLabel).also { previewCache[note.id] = key to it }
+            note.id to preview
+        }
+    }
     val scope = rememberCoroutineScope()
     val progress = animateFloatAsState(
         if (view == LibraryView.CARDS) 1f else 0f,
@@ -134,14 +149,14 @@ internal fun NoteCollection(
         val cache = remember(width, density, typography, linkColor) {
             mutableMapOf<NoteId, Pair<List<Any>, Pair<Int, Int>>>()
         }
-        val heights = remember(notes, previewModes, width, density, typography, linkColor) {
+        val heights = remember(notes, previewModes, previews, width, density, typography, linkColor) {
             cache.keys.retainAll(notes.map { it.id }.toSet())
             notes.map { note ->
                 val pending = note.needsSyncNotice
                 val mode = previewModes[note.id] ?: EditorMode.RICH
-                val key = listOf(note.title, note.previewMarkdown, note.snippet, mode, pending)
+                val key = listOf(note.title, note.previewMarkdown, note.snippet, mode, pending, imageLabel)
                 cache[note.id]?.takeIf { it.first == key }?.let { return@map it.second }
-                val preview = noteCardPreview(note.previewMarkdown.ifBlank { note.snippet }, mode, linkColor, strings.getString(UiR.ui_image))
+                val preview = previews.getValue(note.id)
                 fun height(itemWidth: Int, cards: Boolean): Int {
                     val contentWidth = (itemWidth - padding).coerceAtLeast(1)
                     val title = textMeasurer.measure(note.title, typography.titleMedium,
@@ -150,7 +165,7 @@ internal fun NoteCollection(
                     val body = if (preview.isEmpty()) 0 else textMeasurer.measure(preview, typography.bodyMedium,
                         maxLines = if (cards) 14 else 2, constraints = Constraints(maxWidth = contentWidth)).size.height
                     val chrome = with(density) {
-                        17.dp.roundToPx() + title.size.height + NoteCardFooterHeight.roundToPx()
+                        13.dp.roundToPx() + NoteCardTitleGap.roundToPx() + title.size.height + NoteCardFooterHeight.roundToPx()
                     }
                     return if (cards) min(chrome + body, max((itemWidth * 1.85f).roundToInt(), chrome)) else chrome + body
                 }
@@ -259,7 +274,10 @@ internal fun NoteCollection(
         if (motion.maximum != maximum) {
             motion.maximum = maximum
         }
+        val previousWidth = remember { intArrayOf(width) }
         LaunchedEffect(targets, maximum) {
+            val resizing = previousWidth[0] != width
+            previousWidth[0] = width
             val previousOffset = scrollOffset.floatValue
             val nextOffset = previousOffset.coerceIn(0f, maximum)
             if (nextOffset != previousOffset) {
@@ -280,7 +298,10 @@ internal fun NoteCollection(
                 card.depart(previousProgress, previousOpacity)
             }
             initialized[0] = true
-            val moving = items.values.any { it.fromList != it.target.list || it.fromCards != it.target.cards }
+            // A pane resize already supplies continuous geometry. Restarting a
+            // 220 ms reflow for every pointer sample makes cards chase the divider.
+            if (resizing) items.values.filterNot { it.removing }.forEach { it.settle() }
+            val moving = !resizing && items.values.any { it.fromList != it.target.list || it.fromCards != it.target.cards }
             val fading = items.values.any { it.fromAlpha != it.targetAlpha }
             reflowProgress.floatValue = if (moving) 0f else 1f
             opacityProgress.floatValue = if (fading) 0f else 1f

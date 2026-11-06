@@ -243,7 +243,6 @@ internal fun AdaptiveNotesPanes(
     var origin by remember { mutableStateOf(Offset.Zero) }
     var dragging by remember { mutableStateOf(false) }
     var dragFraction by remember { mutableFloatStateOf(state.splitFraction) }
-    if (!dragging) dragFraction = state.splitFraction
     BoxWithConstraints(Modifier.fillMaxSize().clipToBounds().onGloballyPositioned { origin = it.positionInWindow() }) {
         val width = constraints.maxWidth.toFloat()
         val height = constraints.maxHeight.toFloat()
@@ -253,7 +252,7 @@ internal fun AdaptiveNotesPanes(
                 bounds.right - origin.x + margin, bounds.bottom - origin.y + margin)
         }
         val targets = paneTargets(width, height, fold, state.fold?.horizontal == true, state.paneNote(NotePane.PRIMARY) != null,
-            state.editorLayout == EditorLayoutPreference.FULL_SCREEN, dragFraction, density.density)
+            state.editorLayout == EditorLayoutPreference.FULL_SCREEN, state.splitFraction, density.density)
         val dualPages = targets.posture == NotesPosture.BOOK && targets.libraryVisible && targets.editorVisible
         val besideEditor = targets.libraryVisible && targets.editorVisible
         LaunchedEffect(besideEditor) { onLibraryBesideEditor(besideEditor) }
@@ -303,17 +302,23 @@ internal fun AdaptiveNotesPanes(
                 }
                 targets.handle?.let {
                     PaneDivider(
-                        fraction = dragFraction,
+                        fraction = { if (dragging) dragFraction else state.splitFraction },
                         modifier = Modifier.layoutId(PaneSlot.HANDLE),
                         onDrag = { delta ->
+                            if (!dragging) dragFraction = state.splitFraction
                             dragging = true
-                            dragFraction = ((dragFraction * width + delta) / width).coerceIn(.2f, .8f)
+                            val requested = (dragFraction * width + delta) / width
+                            // Clamp the pointer itself at the pane limits: reversing direction
+                            // must respond immediately, without an invisible overscroll zone.
+                            dragFraction = paneTargets(width, height, fold, false, true, false,
+                                requested, density.density).library.width / width
                         },
                         onDragStopped = {
                             val settled = paneTargets(width, height, fold, false, true, false, dragFraction, density.density)
-                            dragFraction = settled.library.width / width
+                            libraryBounds.snapTo(settled.library)
+                            editorBounds.snapTo(settled.editor)
+                            onSplitFractionChange(settled.library.width / width)
                             dragging = false
-                            onSplitFractionChange(dragFraction)
                         },
                         onReset = { onSplitFractionChange(DefaultSplitFraction) },
                         onAdjust = { fraction -> onSplitFractionChange(fraction.coerceIn(.2f, .8f)) },
@@ -321,22 +326,39 @@ internal fun AdaptiveNotesPanes(
                 }
             },
         ) { measurables, constraints ->
+            // Read pointer movement during measurement, not composition. Both panes
+            // receive the same live geometry in this frame without launching effects.
+            val live = if (dragging) paneTargets(width, height, fold, false, true, false,
+                dragFraction, density.density) else null
             val placeables = measurables.map { measurable ->
                 val bounds = when (measurable.layoutId) {
-                    PaneSlot.LIBRARY -> libraryBounds.value
-                    PaneSlot.EDITOR -> editorBounds.value
+                    PaneSlot.LIBRARY -> live?.library ?: libraryBounds.value
+                    PaneSlot.EDITOR -> live?.editor ?: editorBounds.value
                     else -> targets.handle?.let { handle ->
-                        val library = libraryBounds.value
+                        val library = live?.library ?: libraryBounds.value
                         PaneRect(library.right, 0f, library.right + handle.width, handle.height)
                     } ?: PaneRect.Zero
                 }
+                // Relocation measures the destination once. Animate its layer rather
+                // than reflowing a WebView and every Note preview on every spring frame.
+                // A finger-driven resize still lays out at the actual live width.
+                val measured = if (live != null) bounds else when (measurable.layoutId) {
+                    PaneSlot.LIBRARY -> targets.library
+                    PaneSlot.EDITOR -> targets.editor
+                    else -> bounds
+                }
                 measurable.layoutId to (bounds to measurable.measure(Constraints.fixed(
-                    bounds.width.toInt().coerceAtLeast(0), bounds.height.toInt().coerceAtLeast(0))))
+                    measured.width.toInt().coerceAtLeast(1), measured.height.toInt().coerceAtLeast(1))))
             }
             layout(constraints.maxWidth, constraints.maxHeight) {
                 placeables.forEach { (_, placed) ->
                     val (bounds, placeable) = placed
-                    placeable.place(bounds.left.toInt(), bounds.top.toInt())
+                    placeable.placeWithLayer(bounds.left.toInt(), bounds.top.toInt()) {
+                        transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0f)
+                        scaleX = bounds.width.toInt().coerceAtLeast(1).toFloat() / placeable.width
+                        scaleY = bounds.height.toInt().coerceAtLeast(1).toFloat() / placeable.height
+                        clip = true
+                    }
                 }
             }
         }
@@ -364,10 +386,10 @@ private fun BookPage(noteOpen: Boolean, side: String, content: @Composable (Bool
 /** A quiet handle between the panes; drag to share the width, double-tap to restore it. */
 @Composable
 private fun PaneDivider(
-    fraction: Float,
+    fraction: () -> Float,
     modifier: Modifier,
     onDrag: (Float) -> Unit,
-    onDragStopped: () -> Unit,
+    onDragStopped: suspend () -> Unit,
     onReset: () -> Unit,
     onAdjust: (Float) -> Unit,
 ) {
@@ -395,7 +417,7 @@ private fun PaneDivider(
             .pointerInput(Unit) { detectTapGestures(onDoubleTap = { onReset() }) }
             .semantics {
                 contentDescription = label
-                progressBarRangeInfo = ProgressBarRangeInfo(fraction, .2f..0.8f, steps = 11)
+                progressBarRangeInfo = ProgressBarRangeInfo(fraction(), .2f..0.8f, steps = 11)
                 setProgress { value -> onAdjust(value); true }
             }
             .testTag("pane-divider"),
