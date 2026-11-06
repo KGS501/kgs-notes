@@ -8,6 +8,8 @@ import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.union
 import com.kgs.notes.design.R.string as UiR
+import java.util.Collections
+import java.util.WeakHashMap
 
 import com.kgs.notes.design.LocalKgsSheetDock
 import com.kgs.notes.design.kgsSheetDock
@@ -21,9 +23,9 @@ import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
+import android.view.ViewGroup
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.webkit.MimeTypeMap
 import com.kgs.notes.design.LocalKgsDarkTheme
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
@@ -99,16 +101,14 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.ScrollAxisRange
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.semantics.ScrollAxisRange
 import androidx.compose.ui.semantics.verticalScrollAxisRange
-import androidx.compose.ui.semantics.scrollBy
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.layout.onSizeChanged
@@ -129,7 +129,9 @@ import com.kgs.notes.design.fastSpatialSpec
 import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.collectLatest
 import org.json.JSONObject
 import org.json.JSONTokener
 import java.io.InputStream
@@ -145,7 +147,20 @@ enum class EditorMode {
     SOURCE,
 }
 
-private data class EditorViewport(
+/**
+ * Where a Note was being read: the content at the top of the editor and the selection.
+ * Hosts keep it across recreated editors (folds, rotation) and pass it back as
+ * `initialPosition`; a different window size re-anchors on the same content.
+ */
+class EditorPosition internal constructor(
+    internal val mode: EditorMode,
+    internal val viewport: EditorViewport,
+) {
+    /** Exact pixels only apply to the same editor at the same size; otherwise anchor on content. */
+    internal fun viewportFor(target: EditorMode) = if (target == mode) viewport else viewport.copy(scrollY = null)
+}
+
+internal data class EditorViewport(
     val sourceOffset: Int,
     val top: Float,
     val selectionStart: Int,
@@ -179,6 +194,7 @@ fun KgsMarkdownEditor(
     onAddImage: () -> Unit = {},
     canAddImage: Boolean = true,
     openManagedAttachment: (String) -> InputStream? = { null },
+    managedAttachmentType: (String) -> String? = { null },
     modifier: Modifier = Modifier,
     bodyModifier: Modifier = Modifier,
     richLoadingContent: @Composable () -> Unit = {},
@@ -186,6 +202,10 @@ fun KgsMarkdownEditor(
     readOnly: Boolean = false,
     allowRemoteResources: Boolean = true,
     onSnapshotReaderReady: (suspend () -> String?) -> Unit = {},
+    initialPosition: EditorPosition? = null,
+    onPositionChange: (EditorPosition) -> Unit = {},
+    /** A tapped link's raw destination; the editor itself never navigates. */
+    onOpenLink: (String) -> Unit = {},
     /** Lets an opening transition finish before the WebView and toolbar are built; [richLoadingContent] shows until then. */
     openingTransitionMillis: Long = 0,
 ) {
@@ -208,7 +228,8 @@ fun KgsMarkdownEditor(
 
     val commands = remember { EditorCommandDispatcher() }
     val modeSwitchScope = rememberCoroutineScope()
-    var viewport by remember { mutableStateOf<EditorViewport?>(null) }
+    var viewport by remember { mutableStateOf(initialPosition?.viewportFor(effectiveMode)) }
+    val latestOnPositionChange by rememberUpdatedState(onPositionChange)
     var switchingMode by remember { mutableStateOf(false) }
     val modeSnapshots = remember { mutableMapOf<EditorMode, Pair<String, EditorViewport>>() }
     var readingBaseline by remember { mutableStateOf<Pair<String, EditorViewport>?>(null) }
@@ -264,7 +285,10 @@ fun KgsMarkdownEditor(
                         commands = commands,
                         initialViewport = viewport,
                         onViewportRestored = { readingBaseline = currentMarkdown to it },
+                        onViewportChange = { latestOnPositionChange(EditorPosition(EditorMode.RICH, it)) },
+                        onOpenLink = onOpenLink,
                         openManagedAttachment = openManagedAttachment,
+                        managedAttachmentType = managedAttachmentType,
                         modifier = Modifier.fillMaxSize().graphicsLayer { alpha = richOpacity },
                         readOnly = readOnly,
                         allowRemoteResources = allowRemoteResources,
@@ -283,6 +307,7 @@ fun KgsMarkdownEditor(
                     editor = editor,
                     initialViewport = viewport,
                     onViewportRestored = { readingBaseline = currentMarkdown to it },
+                    onViewportChange = { latestOnPositionChange(EditorPosition(EditorMode.SOURCE, it)) },
                     restoreFocus = restoreKeyboardMode == EditorMode.SOURCE,
                     onFocusRestored = { restoreKeyboardMode = null },
                     modifier = Modifier.fillMaxSize(),
@@ -379,6 +404,7 @@ private fun SourceMarkdownEditor(
     editor: MarkdownEditor,
     initialViewport: EditorViewport?,
     onViewportRestored: (EditorViewport) -> Unit,
+    onViewportChange: (EditorViewport) -> Unit,
     restoreFocus: Boolean,
     onFocusRestored: () -> Unit,
     modifier: Modifier,
@@ -390,7 +416,6 @@ private fun SourceMarkdownEditor(
         TextRange(it.selectionStart.coerceIn(0, markdown.length), it.selectionEnd.coerceIn(0, markdown.length))
     } ?: TextRange.Zero)
     val scroll = rememberScrollState()
-    val scrollScope = rememberCoroutineScope()
     val density = LocalDensity.current.density
     var textLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
     var viewportSize by remember { mutableStateOf(IntSize.Zero) }
@@ -424,6 +449,14 @@ private fun SourceMarkdownEditor(
             withFrameNanos { }
             captureViewport()?.let(onViewportRestored)
             reportedViewport = true
+        }
+    }
+    val latestOnViewportChange by rememberUpdatedState(onViewportChange)
+    LaunchedEffect(Unit) {
+        snapshotFlow { listOf(scroll.value, field.selection, viewportSize, restoringViewport) }.collectLatest {
+            if (restoringViewport) return@collectLatest
+            delay(150)
+            captureViewport()?.let(latestOnViewportChange)
         }
     }
     val latestOnMarkdownChange by rememberUpdatedState(onMarkdownChange)
@@ -533,11 +566,14 @@ private fun SourceMarkdownEditor(
                 .graphicsLayer { alpha = opacity }
                 .onSizeChanged { viewportSize = it }
                 .focusRequester(focusRequester)
+                // BasicTextField offers ScrollBy for its internal scroll but reports no
+                // position. Publish it, like the library list does, so accessibility
+                // services (and tests) can tell where in a long Note the reader is.
                 .semantics {
                     verticalScrollAxisRange = ScrollAxisRange(
-                        value = { scroll.value.toFloat() }, maxValue = { scroll.maxValue.toFloat() },
+                        value = { scroll.value.toFloat() },
+                        maxValue = { scroll.maxValue.toFloat() },
                     )
-                    scrollBy { _, y -> scrollScope.launch { scroll.scrollBy(y) }; true }
                 }
                 .testTag("source-editor"),
         )
@@ -558,7 +594,10 @@ private fun RichMarkdownEditor(
     commands: EditorCommandDispatcher,
     initialViewport: EditorViewport?,
     onViewportRestored: (EditorViewport) -> Unit,
+    onViewportChange: (EditorViewport) -> Unit,
+    onOpenLink: (String) -> Unit,
     openManagedAttachment: (String) -> InputStream?,
+    managedAttachmentType: (String) -> String?,
     modifier: Modifier,
     readOnly: Boolean = false,
     allowRemoteResources: Boolean = true,
@@ -602,10 +641,13 @@ private fun RichMarkdownEditor(
     val latestOnActiveCommandsChange by rememberUpdatedState(onActiveCommandsChange)
     val latestOnReady by rememberUpdatedState(onReady)
     val latestOnViewportRestored by rememberUpdatedState(onViewportRestored)
+    val latestOnViewportChange by rememberUpdatedState(onViewportChange)
+    val latestOnOpenLink by rememberUpdatedState(onOpenLink)
     val latestOnFallback by rememberUpdatedState(onFallback)
     val latestRestoreFocus by rememberUpdatedState(restoreFocus)
     val latestOnFocusRestored by rememberUpdatedState(onFocusRestored)
     val latestOpenManagedAttachment by rememberUpdatedState(openManagedAttachment)
+    val latestManagedAttachmentType by rememberUpdatedState(managedAttachmentType)
     val latestReadOnly by rememberUpdatedState(readOnly)
     val latestAllowRemoteResources by rememberUpdatedState(allowRemoteResources)
     var rendererGeneration by remember { mutableIntStateOf(0) }
@@ -639,7 +681,18 @@ private fun RichMarkdownEditor(
                     .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(context))
                     .build()
                 WebView(context).apply {
+                    // AndroidView gives its view WRAP_CONTENT layout params. A WebView whose
+                    // height wraps its content resolves CSS vh units to 0, so the page would
+                    // only be as tall as the text and taps on the blank area below it would
+                    // land outside the editor's page and dismiss the keyboard. The view is
+                    // always sized by its Compose modifier, so declare it as filling.
+                    layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
                     setBackgroundColor(AndroidColor.TRANSPARENT)
+                    // The page never scrolls sideways; wide tables scroll inside their own box.
+                    isHorizontalScrollBarEnabled = false
+                    // Positions arrive only once the Note's own position was restored, so
+                    // the blank first frame can't overwrite where the person was reading.
+                    var reportsViewport = false
                     importantForAccessibility = WebView.IMPORTANT_FOR_ACCESSIBILITY_YES
                     settings.apply {
                         javaScriptEnabled = true
@@ -650,20 +703,30 @@ private fun RichMarkdownEditor(
                         allowUniversalAccessFromFileURLs = false
                         mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
                         cacheMode = WebSettings.LOAD_NO_CACHE
+                        setSupportMultipleWindows(false)
+                        javaScriptCanOpenWindowsAutomatically = false
                     }
                     webViewClient = object : WebViewClient() {
                         override fun shouldInterceptRequest(
                             view: WebView,
                             request: WebResourceRequest,
                         ): WebResourceResponse? {
-                            request.managedAttachmentRequest()?.let { attachmentRequest ->
+                            val url = request.url.toString()
+                            // Only the fixed editor document may become a page on the bridge origin.
+                            if (request.isForMainFrame) {
+                                if (!EditorWebPolicy.allowsMainFrameRequest(url)) return deniedResponse()
+                                val document = assetLoader.shouldInterceptRequest(request.url) ?: return deniedResponse()
+                                document.responseHeaders = (document.responseHeaders.orEmpty()) + EditorWebPolicy.editorDocumentHeaders()
+                                return document
+                            }
+                            EditorWebPolicy.attachmentRequest(url)?.let { attachmentRequest ->
                                 val content = latestOpenManagedAttachment(attachmentRequest.id)
-                                    ?: return WebResourceResponse(null, null, null)
-                                return WebResourceResponse(
-                                    attachmentRequest.mediaType,
-                                    null,
-                                    content,
-                                )
+                                    ?: return deniedResponse(404, "Not Found")
+                                val storedType = runCatching { latestManagedAttachmentType(attachmentRequest.id) }.getOrNull()
+                                val typed = EditorWebPolicy.typedAttachment(attachmentRequest, storedType, content)
+                                    ?: return deniedResponse()
+                                return WebResourceResponse(typed.mediaType, null, 200, "OK",
+                                    EditorWebPolicy.attachmentHeaders(), typed.data)
                             }
                             return assetLoader.shouldInterceptRequest(request.url)
                                 ?: if (!latestAllowRemoteResources) WebResourceResponse("text/plain", "UTF-8", java.io.ByteArrayInputStream(byteArrayOf())) else null
@@ -672,7 +735,23 @@ private fun RichMarkdownEditor(
                         override fun shouldOverrideUrlLoading(
                             view: WebView,
                             request: WebResourceRequest,
-                        ): Boolean = request.url.host != ASSET_HOST
+                        ): Boolean {
+                            val url = request.url.toString()
+                            if (EditorWebPolicy.allowsTopLevelNavigation(url)) return false
+                            // The page's own link handler normally reports taps; this catches the rest.
+                            EditorWebPolicy.externalLink(url)?.let { link -> if (connectedWebView === view) latestOnOpenLink(link) }
+                            return true
+                        }
+
+                        override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
+                            // Never leave the editor on another page without a way back:
+                            // rebuild it from the Note instead.
+                            if (!EditorWebPolicy.allowsTopLevelNavigation(url)) {
+                                view.stopLoading()
+                                view.destroyEditor()
+                                rendererGeneration += 1
+                            }
+                        }
 
                         override fun onReceivedSslError(
                             view: WebView,
@@ -684,7 +763,7 @@ private fun RichMarkdownEditor(
                             view: WebView,
                             detail: RenderProcessGoneDetail,
                         ): Boolean {
-                            view.destroy()
+                            view.destroyEditor()
                             rendererGeneration += 1
                             return true
                         }
@@ -702,7 +781,9 @@ private fun RichMarkdownEditor(
                             BRIDGE_NAME,
                             setOf(ASSET_ORIGIN),
                         ) { view, message, sourceOrigin, isMainFrame, _ ->
-                            if (!isMainFrame || sourceOrigin != Uri.parse(ASSET_ORIGIN)) {
+                            if (!isMainFrame || sourceOrigin != Uri.parse(ASSET_ORIGIN) ||
+                                !EditorWebPolicy.isEditorDocument(view.url)
+                            ) {
                                 return@addWebMessageListener
                             }
                             val payload = runCatching {
@@ -716,14 +797,24 @@ private fun RichMarkdownEditor(
                                     view.post { input.showSoftInput(view, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT) }
                                 }
                                 "fallback" -> if (connectedWebView === view) latestOnFallback()
+                                "viewport" -> if (connectedWebView === view && reportsViewport) {
+                                    runCatching { EditorViewport.from(payload.getJSONObject("viewport")) }.getOrNull()
+                                        ?.let(latestOnViewportChange)
+                                }
+                                "openLink" -> if (connectedWebView === view) {
+                                    payload.optString("href").trim().takeIf { it.isNotEmpty() }?.let(latestOnOpenLink)
+                                }
                                 "viewportRestored" -> if (connectedWebView === view) {
                                     val restored = runCatching { EditorViewport.from(payload.getJSONObject("viewport")) }.getOrNull()
-                                    view.afterNextFrame {
-                                        if (connectedWebView === view) {
-                                            restored?.let(latestOnViewportRestored)
-                                            latestOnReady()
+                                    view.postVisualStateCallbackIfAlive(0L, object : WebView.VisualStateCallback() {
+                                        override fun onComplete(requestId: Long) {
+                                            if (connectedWebView === view) {
+                                                restored?.let(latestOnViewportRestored)
+                                                reportsViewport = true
+                                                latestOnReady()
+                                            }
                                         }
-                                    }
+                                    })
                                 }
                                 "ready" -> {
                                     view.setEditorLabels(latestLabels, latestLanguage)
@@ -735,17 +826,22 @@ private fun RichMarkdownEditor(
                                         // JavaScript readiness precedes the rendered Note.
                                         // Reveal only a frame containing the loaded Markdown.
                                         view.setReadOnly(latestReadOnly, force = latestReadOnly) {
-                                            view.afterNextFrame {
-                                                if (connectedWebView === view) {
-                                                    if (initialViewport == null) latestOnReady()
-                                                    else {
-                                                        val notify = "window.$BRIDGE_NAME.postMessage(JSON.stringify({type:'viewportRestored',viewport:window.kgsEditor.viewport()}))"
-                                                        view.evaluateJavascript(
-                                                            "window.kgsEditor.restoreViewport(${initialViewport.json()}).then(() => {$notify}).catch(() => window.$BRIDGE_NAME.postMessage(JSON.stringify({type:'fallback'})))", null,
-                                                        )
+                                            view.postVisualStateCallbackIfAlive(0L, object : WebView.VisualStateCallback() {
+                                                override fun onComplete(requestId: Long) {
+                                                    if (connectedWebView === view) {
+                                                        if (initialViewport == null) {
+                                                            reportsViewport = true
+                                                            latestOnReady()
+                                                        }
+                                                        else {
+                                                            val notify = "window.$BRIDGE_NAME.postMessage(JSON.stringify({type:'viewportRestored',viewport:window.kgsEditor.viewport()}))"
+                                                            view.evaluateJavascript(
+                                                                "window.kgsEditor.restoreViewport(${initialViewport.json()}).then(() => {$notify}).catch(() => window.$BRIDGE_NAME.postMessage(JSON.stringify({type:'fallback'})))", null,
+                                                            )
+                                                        }
                                                     }
                                                 }
-                                            }
+                                            })
                                         }
                                     }
                                     commands.connect(view, reader = {
@@ -802,38 +898,23 @@ private fun RichMarkdownEditor(
                             }
                         }
                     }
-                    loadUrl("$ASSET_ORIGIN/assets/kgs-editor/index.html")
+                    loadUrl(EditorWebPolicy.EDITOR_URL)
                 }
             },
             update = {},
             onRelease = { webView ->
                 commands.disconnect(webView)
                 if (connectedWebView === webView) connectedWebView = null
-                webView.destroy()
+                webView.destroyEditor()
             },
             modifier = modifier,
         )
     }
 }
 
-private data class ManagedAttachmentRequest(
-    val id: String,
-    val mediaType: String,
+private fun deniedResponse(status: Int = 403, reason: String = "Forbidden") = WebResourceResponse(
+    "text/plain", "UTF-8", status, reason, EditorWebPolicy.deniedHeaders(), java.io.ByteArrayInputStream(byteArrayOf()),
 )
-
-private fun WebResourceRequest.managedAttachmentRequest(): ManagedAttachmentRequest? {
-    if (url.host != ASSET_HOST) return null
-    val vaultIndex = url.pathSegments.indexOf(".kgs-notes-attachments")
-    if (vaultIndex < 0 || vaultIndex + 2 >= url.pathSegments.size) return null
-    val storageName = url.pathSegments[vaultIndex + 2]
-    val id = storageName.substringBefore('.')
-    if (!id.matches(Regex("[a-f0-9-]{36}"))) return null
-    val extension = storageName.substringAfterLast('.', "").lowercase()
-    val mediaType = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
-        ?.takeIf { it.startsWith("image/") }
-        ?: return null
-    return ManagedAttachmentRequest(id, mediaType)
-}
 
 private class EditorCommandDispatcher {
     private var owner: Any? = null
@@ -1184,16 +1265,6 @@ private fun ToolbarGlyph(type: ToolbarGlyphType, color: Color) {
     )
 }
 
-/** Leaving a Note can destroy its WebView mid-load, and a destroyed WebView rejects this call. */
-private fun WebView.afterNextFrame(action: () -> Unit) {
-    try {
-        postVisualStateCallback(0L, object : WebView.VisualStateCallback() {
-            override fun onComplete(requestId: Long) = action()
-        })
-    } catch (_: IllegalStateException) {
-        // Nobody is left to show the frame to.
-    }
-}
 
 private fun WebView.loadMarkdown(markdown: String, onLoaded: (() -> Unit)? = null) {
     evaluateJavascript(
@@ -1211,6 +1282,19 @@ private fun WebView.setThemeColors(colors: Map<String, String>) {
         "Object.entries($properties).forEach(([name, value]) => document.documentElement.style.setProperty('--kgs-' + name, value))",
         null,
     )
+}
+
+// Asynchronous JavaScript callbacks can arrive after the editor left composition or its renderer died.
+// WebView.postVisualStateCallback throws on a destroyed WebView, so such late callbacks are dropped.
+private val destroyedEditorWebViews: MutableSet<WebView> = Collections.newSetFromMap(WeakHashMap())
+
+private fun WebView.destroyEditor() {
+    destroyedEditorWebViews += this
+    destroy()
+}
+
+private fun WebView.postVisualStateCallbackIfAlive(requestId: Long, callback: WebView.VisualStateCallback) {
+    if (this !in destroyedEditorWebViews) postVisualStateCallback(requestId, callback)
 }
 
 private fun WebView.setDarkMode(enabled: Boolean) {
@@ -1266,8 +1350,7 @@ private fun WebView.runCommand(
     evaluateJavascript("window.kgsEditor?.run(${JSONObject.quote(name)})", null)
 }
 
-private const val ASSET_HOST = "appassets.androidplatform.net"
-private const val ASSET_ORIGIN = "https://$ASSET_HOST"
+private const val ASSET_ORIGIN = EditorWebPolicy.ASSET_ORIGIN
 private const val BRIDGE_NAME = "KgsNotesEditor"
 
 /**

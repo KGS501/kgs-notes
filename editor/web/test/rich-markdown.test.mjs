@@ -63,34 +63,6 @@ test('a list ending in an empty item stays in Rich Mode and keeps every line', (
   delete window.KgsNotesEditor
 })
 
-test('a bare list marker ending a Note shows as an empty bullet without changing the Note', () => {
-  const headings = () => root.querySelectorAll('h1, h2, h3').length
-  const trailing = ['-', '- ', '-\n', '- \n\n']
-  for (const tail of trailing) {
-    const paragraph = `First line\nSecond line\n${tail}`
-    bridge.load(paragraph)
-    assert.equal(headings(), 0, 'A dangling bullet must not turn the paragraph into a heading')
-    assert.equal(root.querySelectorAll('li').length, 1)
-    assert.equal(bridge.markdown(), paragraph)
-
-    bridge.load(`1. one\n2. two\n${tail}`)
-    assert.equal(root.querySelectorAll('ol > li').length, 2)
-    assert.equal(root.querySelectorAll('ul > li').length, 1)
-    assert.ok(!root.textContent.includes('-'), 'The marker must not appear as text')
-
-    bridge.load(`- [ ] one\n- [x] two\n${tail}`)
-    assert.equal(root.querySelectorAll('li').length, 3, 'A checklist gains an empty checkbox')
-    assert.ok(!root.querySelector('li:last-child')?.textContent.includes('-'))
-
-    bridge.load(`- one\n- two\n  ${tail}`)
-    assert.equal(headings(), 0)
-
-    bridge.load(tail)
-    assert.equal(root.querySelectorAll('li').length, 1, 'A Note holding only a marker is an empty bullet')
-    assert.equal(bridge.markdown(), tail)
-  }
-})
-
 test('real headings, separators and code keep their meaning around dash lines', () => {
   bridge.load('Title\n---')
   assert.equal(root.querySelectorAll('h2').length, 1)

@@ -34,7 +34,8 @@ internal suspend fun NotesEngine.replaceCategoryAssignments(sourceId: SourceId, 
     require(source.capabilities.categories && source.capabilities.writable) { "This Source cannot change Categories" }
     val snapshot = library.value
     val targets = (snapshot.active + snapshot.trash).filter {
-        it.sourceId == sourceId && (it.category == from || it.category.startsWith("$from/"))
+        // Read-only Notes cannot change Category; they keep their assignment.
+        it.sourceId == sourceId && !it.readOnly && (it.category == from || it.category.startsWith("$from/"))
     }
     val changed = linkedSetOf<NoteId>()
     for (note in targets) {

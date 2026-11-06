@@ -63,7 +63,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
-import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -111,6 +110,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.CircularProgressIndicator
@@ -168,7 +168,14 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onInterceptKeyBeforeSoftKeyboard
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.AwaitPointerEventScope
 import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInParent
 import androidx.compose.ui.layout.boundsInRoot
@@ -205,6 +212,7 @@ import com.kgs.notes.design.fastSpatialSpec
 import com.kgs.notes.design.rememberKgsHapticClick
 import com.kgs.notes.design.collectIsVisuallyPressedAsState
 import com.kgs.notes.editor.EditorMode
+import com.kgs.notes.editor.EditorPosition
 import androidx.compose.foundation.isSystemInDarkTheme
 import com.kgs.notes.editor.KgsMarkdownEditor
 import com.kgs.notes.engine.Note
@@ -270,6 +278,19 @@ data class NotesActions(
     val onRefreshSources: () -> Unit = {},
     val onEditSourceConnection: (SourceId) -> Unit = {},
     val onOpenProjectLink: (String) -> Unit = {},
+    /** A link tapped in [Note]: another Note opens here, anything else outside the app. */
+    val onOpenLink: (Note, String) -> Unit = { _, _ -> },
+    /** Where each Note was last read, kept while the app runs so recreated editors return there. */
+    val editorPosition: (NoteId) -> EditorPosition? = { null },
+    val onEditorPositionChange: (NoteId, EditorPosition) -> Unit = { _, _ -> },
+    /** Copies the open Note, with any unsaved draft, into a new Local Note; works offline. */
+    val onCopyToLocal: () -> Unit = {},
+    val onExport: () -> Unit = {},
+    val onRetrySave: () -> Unit = {},
+    val onDiscardUnsavedChanges: () -> Unit = {},
+    val onCopyPendingNotesToLocal: (SourceId) -> Unit = {},
+    val onRescueUnreadableRecord: (String) -> Unit = {},
+    val onDiscardUnreadableRecord: (String) -> Unit = {},
 )
 
 @Composable
@@ -298,6 +319,23 @@ fun KgsNotesApp(viewModel: NotesViewModel, onExternalPreviewClosed: () -> Unit =
         }
         val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
             uri?.let { viewModel.importImage(it, removePrivateMetadata) }
+        }
+        val exportRequest = state.exportRequest
+        val latestExport by rememberUpdatedState(exportRequest)
+        val exportResult: (Uri?) -> Unit = { uri ->
+            val request = latestExport
+            if (uri != null && request != null) viewModel.exportNote(request, uri) else viewModel.cancelExport()
+        }
+        val markdownExport = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/markdown"), exportResult)
+        val archiveExport = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip"), exportResult)
+        LaunchedEffect(exportRequest) {
+            val request = exportRequest ?: return@LaunchedEffect
+            runCatching {
+                (if (request.file.archive) archiveExport else markdownExport).launch(request.file.fileName)
+            }.onFailure {
+                viewModel.cancelExport()
+                android.widget.Toast.makeText(context, strings.getString(UiR.ui_no_file_picker_is_available), android.widget.Toast.LENGTH_SHORT).show()
+            }
         }
         val externalFile = state.externalFile
         if (externalFile != null) {
@@ -392,6 +430,21 @@ fun KgsNotesApp(viewModel: NotesViewModel, onExternalPreviewClosed: () -> Unit =
                 onRemoveSource = viewModel::removeSource,
                 onRefreshSources = viewModel::refreshSources,
                 onEditSourceConnection = viewModel::editSourceConnection,
+                onCopyToLocal = viewModel::copyNoteToLocal,
+                onExport = viewModel::requestExport,
+                onRetrySave = viewModel::retrySave,
+                onDiscardUnsavedChanges = viewModel::discardUnsavedChanges,
+                onCopyPendingNotesToLocal = viewModel::copyPendingNotesToLocal,
+                onRescueUnreadableRecord = viewModel::rescueUnreadableRecord,
+                onDiscardUnreadableRecord = viewModel::discardUnreadableRecord,
+                onOpenLink = { note, href ->
+                    when (val target = viewModel.resolveLink(note, href)) {
+                        is NoteLinkTarget.Note -> viewModel.selectNote(target.id)
+                        else -> context.openLinkTarget(target)
+                    }
+                },
+                editorPosition = viewModel::editorPosition,
+                onEditorPositionChange = viewModel::rememberEditorPosition,
                 onOpenProjectLink = { url ->
                     runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
                         .onFailure { android.widget.Toast.makeText(context, strings.getString(UiR.ui_no_browser_is_available), android.widget.Toast.LENGTH_SHORT).show() }
@@ -1002,6 +1055,11 @@ private fun NotesActions.forPane(pane: NotePane): NotesActions {
         onDeletePermanently = focused(onDeletePermanently),
         onEditorModeChange = focused(onEditorModeChange),
         onAddImage = focused(onAddImage),
+        onCopyToLocal = focused(onCopyToLocal),
+        onExport = focused(onExport),
+        onRetrySave = focused(onRetrySave),
+        onDiscardUnsavedChanges = focused(onDiscardUnsavedChanges),
+        onOpenLink = { note, href -> onActivatePane(pane); onOpenLink(note, href) },
     )
 }
 
@@ -1393,9 +1451,9 @@ private fun LibraryCollection(
                         requireUnconsumed = false,
                         pass = PointerEventPass.Final,
                     )
-                    val up = waitForUpOrCancellation(pass = PointerEventPass.Final)
+                    val tapped = awaitTapReleaseEvenIfConsumed(PointerEventPass.Final)
                     val bounds = searchBounds
-                    if (up != null && searchFocused && bounds != null && !bounds.contains(down.position + collectionOrigin)) {
+                    if (tapped && searchFocused && bounds != null && !bounds.contains(down.position + collectionOrigin)) {
                         focusManager.clearFocus()
                     }
                 }
@@ -1421,6 +1479,14 @@ private fun LibraryCollection(
                     interactionSource = searchInteractions,
                     modifier = Modifier.weight(1f)
                         .onGloballyPositioned { searchBounds = it.boundsInRoot() }
+                        // Back while the keyboard is still appearing reaches the IME, which
+                        // hides it before its insets were ever reported, so the IME-dismissal
+                        // effect above never fires. Handle Back here first: it leaves search.
+                        .onInterceptKeyBeforeSoftKeyboard { event ->
+                            if (event.key != Key.Back || !searchFocused) return@onInterceptKeyBeforeSoftKeyboard false
+                            if (event.type == KeyEventType.KeyUp) focusManager.clearFocus()
+                            true
+                        }
                         .testTag("notes-search"),
                 )
             }
@@ -1733,7 +1799,7 @@ private fun LibraryHeader(
             .pointerInput(Unit) {
                 awaitEachGesture {
                     awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Final)
-                    if (waitForUpOrCancellation(pass = PointerEventPass.Final) != null) {
+                    if (awaitTapReleaseEvenIfConsumed(PointerEventPass.Final)) {
                         focusManager.clearFocus()
                     }
                 }
@@ -3142,17 +3208,25 @@ private fun EditorPane(
             .testTag("note-editor"),
     ) {
         EditorHeader(state, note, actions, showBack, noteMorph)
+        if (state.saveFailed) SaveFailureBanner(actions)
+        if (note.readOnly && note.state != NoteState.TRASHED) ReadOnlyBanner(actions)
         if (note.state == NoteState.TRASHED) {
             TrashedNote(note, actions, Modifier.fillMaxSize())
         } else {
+            key(note.id) {
             KgsMarkdownEditor(
                 markdown = note.markdown,
                 requestedMode = state.editorMode,
+                initialPosition = remember { actions.editorPosition(note.id) },
+                onPositionChange = { actions.onEditorPositionChange(note.id, it) },
+                onOpenLink = { actions.onOpenLink(note, it) },
                 onMarkdownChange = actions.onContentChange,
                 onModeChange = actions.onEditorModeChange,
                 onAddImage = actions.onAddImage,
-                canAddImage = state.sources.firstOrNull { it.id == note.sourceId }?.supportsAttachments
-                    ?: (note.sourceId == LocalSourceId),
+                canAddImage = !note.readOnly && (state.sources.firstOrNull { it.id == note.sourceId }?.supportsAttachments
+                    ?: (note.sourceId == LocalSourceId)),
+                // The Source only accepts Favorite changes for a shared read-only Note.
+                readOnly = note.readOnly,
                 openManagedAttachment = actions.openManagedAttachment,
                 modifier = Modifier.fillMaxSize(),
                 openingTransitionMillis = openingTransitionMillis,
@@ -3170,6 +3244,7 @@ private fun EditorPane(
                     }
                 },
             )
+            }
         }
     }
     }
@@ -3215,6 +3290,7 @@ private fun EditorHeader(
             KgsNoteTitleField(
                 value = note.title,
                 onValueChange = actions.onRename,
+                readOnly = note.readOnly,
                 textStyle = noteMorphTitleStyle(noteMorph, editor = true),
                 height = 40.dp,
                 modifier = Modifier
@@ -3241,7 +3317,7 @@ private fun EditorHeader(
                 onClick = { toggleSheet(sourceDialogOpen) { sourceDialogOpen = it } },
             )
             if (note.state != NoteState.TRASHED) {
-                KgsTooltip(strings.getString(UiR.ui_category)) {
+                if (!note.readOnly) KgsTooltip(strings.getString(UiR.ui_category)) {
                     KgsExpressiveSurface(
                         onClick = { toggleSheet(categoryDialogOpen) { categoryDialogOpen = it } },
                         restingCorners = KgsCornerRadii(12.dp),
@@ -3299,7 +3375,27 @@ private fun EditorHeader(
                                 },
                             )
                         }
-                        KgsTooltip(strings.getString(UiR.ui_delete)) {
+                        if (note.sourceId != LocalSourceId) KgsTooltip(strings.getString(UiR.ui_copy_to_local_source)) {
+                            KgsDropdownMenuItem(
+                                text = strings.getString(UiR.ui_copy_to_local_source),
+                                icon = { LocalNotesGlyph(MaterialTheme.colorScheme.onSurfaceVariant) },
+                                onClick = {
+                                    actionsMenuOpen = false
+                                    actions.onCopyToLocal()
+                                },
+                            )
+                        }
+                        KgsTooltip(strings.getString(UiR.ui_export_note)) {
+                            KgsDropdownMenuItem(
+                                text = strings.getString(UiR.ui_export_note),
+                                icon = { Icon(Icons.Default.Share, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+                                onClick = {
+                                    actionsMenuOpen = false
+                                    actions.onExport()
+                                },
+                            )
+                        }
+                        if (!note.readOnly) KgsTooltip(strings.getString(UiR.ui_delete)) {
                             KgsDropdownMenuItem(
                                 text = strings.getString(UiR.ui_delete),
                                 contentColor = DestructiveRed,
@@ -3704,6 +3800,58 @@ internal fun CategoryIcon(filled: Boolean, color: Color) {
     }
 }
 
+/** A failed save keeps the draft; leaving the Note waits until it is saved, copied, or discarded. */
+@Composable
+private fun SaveFailureBanner(actions: NotesActions) {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+    Surface(
+        color = MaterialTheme.colorScheme.errorContainer,
+        contentColor = MaterialTheme.colorScheme.onErrorContainer,
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp).testTag("save-failure-banner"),
+    ) {
+        Column(Modifier.padding(start = 16.dp, end = 8.dp, top = 10.dp, bottom = 4.dp)) {
+            Text(strings.getString(UiR.ui_your_latest_changes_couldn_t_be_saved_they_are_kept_on_screen), style = MaterialTheme.typography.bodyMedium)
+            Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
+                TextButton(onClick = actions.onDiscardUnsavedChanges, modifier = Modifier.testTag("discard-unsaved-changes")) {
+                    Text(strings.getString(UiR.ui_discard_unsaved_changes))
+                }
+                TextButton(onClick = actions.onCopyToLocal, modifier = Modifier.testTag("save-failure-copy")) {
+                    Text(strings.getString(UiR.ui_copy_to_local_source))
+                }
+                TextButton(onClick = actions.onRetrySave, modifier = Modifier.testTag("retry-save")) {
+                    Text(strings.getString(UiR.ui_retry_saving))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReadOnlyBanner(actions: NotesActions) {
+    val strings = androidx.compose.ui.platform.LocalResources.current
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp).testTag("read-only-banner"),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(start = 16.dp, end = 8.dp, top = 4.dp, bottom = 4.dp),
+        ) {
+            Text(
+                strings.getString(UiR.ui_shared_read_only_you_can_favourite_this_note_but_not_change_it),
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = actions.onCopyToLocal, modifier = Modifier.testTag("read-only-copy")) {
+                Text(strings.getString(UiR.ui_copy_to_local_source))
+            }
+        }
+    }
+}
+
 @Composable
 private fun TrashedNote(note: Note, actions: NotesActions, modifier: Modifier) {
     val strings = androidx.compose.ui.platform.LocalResources.current
@@ -3828,4 +3976,19 @@ private fun Modifier.editorTitleBackOverlap(overlap: androidx.compose.ui.unit.Dp
         minHeight = constraints.minHeight, maxHeight = constraints.maxHeight,
     ))
     layout(placeable.width - extra, placeable.height) { placeable.placeRelative(-extra, 0) }
+}
+
+/**
+ * Waits for the end of a gesture observed outside the focused control. Returns true for a
+ * tap, including taps whose release a child button already consumed, and false when a
+ * child consumed movement (scrolling or dragging) before the release.
+ * `waitForUpOrCancellation` treats a consumed release as cancelled, so a tap on a button
+ * such as a library filter would otherwise leave the search field focused.
+ */
+private suspend fun AwaitPointerEventScope.awaitTapReleaseEvenIfConsumed(pass: PointerEventPass): Boolean {
+    while (true) {
+        val event = awaitPointerEvent(pass)
+        if (event.changes.all { !it.pressed }) return true
+        if (event.changes.any { it.isConsumed && it.positionChanged() }) return false
+    }
 }

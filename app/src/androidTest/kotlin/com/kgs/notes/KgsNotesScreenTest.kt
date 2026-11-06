@@ -152,13 +152,28 @@ class KgsNotesScreenTest {
                 }
             }
         }
+        val restingCardHeight = compose.onNodeWithTag("note-card-${note.id.value}").fetchSemanticsNode().size.height
         compose.onNodeWithTag("note-card-${note.id.value}").performClick()
+        // Let the opening transition finish before freezing the clock; otherwise the
+        // editor (and its Back button) is never composed.
+        compose.onNodeWithTag("note-editor").assertIsDisplayed()
         compose.mainClock.autoAdvance = false
         compose.onNodeWithContentDescription("Back to Notes").performClick()
         val maxInkRows = 42 * ApplicationProvider.getApplicationContext<Application>().resources.displayMetrics.density
+        // The preview is a plain child of the clickable card, so it only exists in the unmerged
+        // tree, and the returning card places it a couple of frames into the morph. Sample the
+        // morph from the first frame it is drawn rather than at a fixed offset.
+        val preview = compose.onNodeWithTag("note-preview-${note.id.value}", useUnmergedTree = true)
+        fun previewHeight() = compose.onAllNodesWithTag("note-preview-${note.id.value}", useUnmergedTree = true)
+            .fetchSemanticsNodes().firstOrNull()?.boundsInRoot?.takeIf { it.width > 0f }?.height ?: 0f
+        repeat(30) { if (previewHeight() < 1f) compose.mainClock.advanceTimeByFrame() }
+        assertTrue("The returning card must draw its preview during the morph", previewHeight() >= 1f)
+        assertTrue("Sampling must start while the card is still morphing",
+            compose.onNodeWithTag("note-card-${note.id.value}").fetchSemanticsNode().size.height > restingCardHeight + 1)
+        var inkSeen = false
         for (frame in 1..4) {
-            compose.mainClock.advanceTimeBy(64)
-            val pixels = compose.onNodeWithTag("note-preview-${note.id.value}").captureToImage().toPixelMap()
+            if (frame > 1) compose.mainClock.advanceTimeBy(64)
+            val pixels = preview.captureToImage().toPixelMap()
             val inkRows = (0 until pixels.height).count { y ->
                 (0 until pixels.width / 2).any { x ->
                     val pixel = pixels[x, y]
@@ -166,7 +181,9 @@ class KgsNotesScreenTest {
                 }
             }
             assertTrue("One line must not stretch to the editor height on frame $frame", inkRows < maxInkRows)
+            inkSeen = inkSeen || inkRows > 0
         }
+        assertTrue("The preview line must be visible while the card morphs", inkSeen)
     }
 
     @Test
@@ -906,13 +923,21 @@ class KgsNotesScreenTest {
         val firstTop = compose.onNodeWithTag("note-card-${notes[0].id.value}").fetchSemanticsNode().boundsInRoot.top
         val survivor = compose.onNodeWithTag("note-card-${notes[2].id.value}")
         compose.runOnIdle { state.value = state.value.copy(notes = notes.drop(1)) }
-        compose.mainClock.advanceTimeBy(80)
+        compose.mainClock.advanceTimeBy(64)
+        val previousFrame = survivor.fetchSemanticsNode().boundsInRoot
+        compose.mainClock.advanceTimeByFrame()
         val moving = survivor.fetchSemanticsNode().boundsInRoot
         compose.runOnIdle { state.value = state.value.copy(notes = notes.drop(2)) }
         compose.mainClock.advanceTimeByFrame()
         val retargeted = survivor.fetchSemanticsNode().boundsInRoot
-        assertTrue("A second removal must continue from the visible position, without a jump",
-            kotlin.math.abs(retargeted.top - moving.top) < moving.height / 10f)
+        // The frame that picks up the second removal may still carry the first reflow's
+        // motion, so compare with the speed the card already had rather than demanding a
+        // stationary frame. A jump (to either target or back to the start) moves a card height.
+        val speed = kotlin.math.abs(moving.top - previousFrame.top)
+        val step = moving.top - retargeted.top
+        assertTrue("A second removal must continue from the visible position, without a jump " +
+            "(${previousFrame.top} -> ${moving.top} -> ${retargeted.top})",
+            step >= -1f && step <= 2f * speed + moving.height / 10f && retargeted.top > firstTop)
         compose.mainClock.advanceTimeBy(1000)
         assertEquals(firstTop, survivor.fetchSemanticsNode().boundsInRoot.top, 1f)
         compose.onNodeWithTag("note-card-${notes[0].id.value}").assertDoesNotExist()
@@ -942,15 +967,24 @@ class KgsNotesScreenTest {
         compose.onNodeWithContentDescription("Back to Notes").performClick()
         compose.mainClock.advanceTimeBy(48)
         val list = compose.onNodeWithTag("notes-list")
-        fun scrollBy(delta: Float) {
+        fun scrolled() = list.fetchSemanticsNode().config[androidx.compose.ui.semantics.SemanticsProperties.VerticalScrollAxisRange].value()
+        // The ScrollBy accessibility action animates the scroll, so compare the card with the
+        // list's actual offset on each frame instead of assuming the full delta landed at once.
+        fun scrollBy(delta: Float, expectedTotal: Float) {
+            val start = scrolled()
             list.performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.ScrollBy) { it(0f, delta) }
             compose.mainClock.advanceTimeBy(32)
             compose.onRoot().captureToImage()
+            val offset = scrolled()
+            assertTrue("The list must already be scrolling", kotlin.math.abs(offset - start) > 1f)
+            assertEquals("The returning card must follow the scroll immediately", resting.top - offset,
+                card.fetchSemanticsNode().boundsInRoot.top, 2f)
+            repeat(60) { if (kotlin.math.abs(scrolled() - expectedTotal) > .5f) compose.mainClock.advanceTimeByFrame() }
+            assertEquals(expectedTotal, scrolled(), .5f)
+            assertEquals(resting.top - expectedTotal, card.fetchSemanticsNode().boundsInRoot.top, 2f)
         }
-        scrollBy(80f)
-        assertEquals("The returning card must follow the scroll immediately", resting.top - 80f,
-            card.fetchSemanticsNode().boundsInRoot.top, 2f)
-        scrollBy(-30f)
+        scrollBy(80f, 80f)
+        scrollBy(-30f, 50f)
         val afterScroll = card.fetchSemanticsNode().boundsInRoot
         assertEquals(resting.top - 50f, afterScroll.top, 2f)
         compose.mainClock.advanceTimeBy(1000)
@@ -1722,9 +1756,16 @@ class KgsNotesScreenTest {
         }
 
         val favorite = compose.onNodeWithContentDescription("Favorite notes")
+        // Hold the press for less than the long-press timeout. With the clock running,
+        // waiting for idle while the finger is down lets the tooltip's long press elapse.
+        compose.mainClock.autoAdvance = false
         favorite.performTouchInput { down(center) }
-        compose.runOnIdle { assertTrue(feedback.isEmpty()) }
+        compose.mainClock.advanceTimeBy(100)
+        compose.runOnIdle { assertTrue("Pressing an app button must stay silent: $feedback", feedback.isEmpty()) }
         favorite.performTouchInput { up() }
+        compose.mainClock.advanceTimeBy(100)
+        compose.runOnIdle { assertTrue("Releasing an app button must stay silent: $feedback", feedback.isEmpty()) }
+        compose.mainClock.autoAdvance = true
         compose.runOnIdle { feedback.clear() }
         favorite.performClick()
         compose.runOnIdle { assertTrue(feedback.isEmpty()) }
@@ -1933,7 +1974,9 @@ class KgsNotesScreenTest {
 
     @Test
     fun sourceFallbackDeletesAMultiLineSelectionAsOneEdit() {
-        val original = "Before\n<table>\nAfter"
+        // Raw HTML such as <table> is preserved by Rich Mode since lossless block source
+        // preservation, so use content that still requires Source Mode: a NUL character.
+        val original = "Before\nraw \u0000 x\nAfter"
         var changed = original
         compose.setContent {
             KgsNotesTheme(theme = NotesTheme.BLUE) {
@@ -2288,6 +2331,8 @@ class KgsNotesScreenTest {
             }
         }
         compose.onNodeWithContentDescription("Open menu").performClick()
+        // The drawer must be open before the clock is frozen, or its rows never compose.
+        compose.onNodeWithTag("modal-choice-Trash").assertIsDisplayed()
         compose.mainClock.autoAdvance = false
         compose.onNodeWithTag("modal-choice-Trash").performClick()
         compose.mainClock.advanceTimeBy(80)
@@ -2639,13 +2684,21 @@ class KgsNotesScreenTest {
         compose.mainClock.advanceTimeBy(80)
         compose.onNodeWithContentDescription("Rename").assertIsDisplayed()
         val during = compose.onNodeWithContentDescription("Favourite").fetchSemanticsNode().boundsInRoot.center.x
-        compose.mainClock.advanceTimeBy(160)
-        val nearlyDone = compose.onNodeWithContentDescription("Favourite").fetchSemanticsNode().boundsInRoot.center.x
-        compose.mainClock.advanceTimeBy(500)
+        // Follow the reflow frame by frame instead of sampling at a fixed time, so the
+        // check does not depend on which frame the 260 ms fade happened to start on.
+        val positions = mutableListOf(during)
+        repeat(60) {
+            compose.mainClock.advanceTimeByFrame()
+            positions += compose.onNodeWithContentDescription("Favourite").fetchSemanticsNode().boundsInRoot.center.x
+        }
         compose.onNodeWithContentDescription("Rename").assertDoesNotExist()
-        val after = compose.onNodeWithContentDescription("Favourite").fetchSemanticsNode().boundsInRoot.center.x
+        val after = positions.last()
         assertTrue("Neighboring actions must move continuously while Rename disappears", during < before && during > after)
-        assertEquals("Removing the last invisible slot must not cause a final position jump", nearlyDone, after, 2f)
+        val steps = positions.zipWithNext { previous, next -> previous - next }
+        assertTrue("Actions must only move towards their final slots: $positions", steps.all { it >= -.5f })
+        val lastMove = steps.indexOfLast { kotlin.math.abs(it) > .01f }
+        assertTrue("Removing the last invisible slot must not cause a final position jump: $positions",
+            lastMove < 0 || steps[lastMove] < 2f)
     }
 
     @Test
@@ -2787,7 +2840,9 @@ class KgsNotesScreenTest {
         compose.mainClock.autoAdvance = false
         compose.runOnIdle { selected.value = null }
         compose.mainClock.advanceTimeBy(176)
-        val shadow = compose.onNodeWithTag("new-note-shadow").fetchSemanticsNode().boundsInRoot
+        // The shadow layer is a plain child of the New note button's tooltip anchor, whose
+        // semantics merge their descendants, so its tag lives in the unmerged tree.
+        val shadow = compose.onNodeWithTag("new-note-shadow", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
         val pixels = compose.onRoot().captureToImage().toPixelMap()
         val y = shadow.center.y.toInt().coerceIn(0, pixels.height - 1)
         val near = pixels[(shadow.left - 4f * density).toInt().coerceIn(0, pixels.width - 1), y]

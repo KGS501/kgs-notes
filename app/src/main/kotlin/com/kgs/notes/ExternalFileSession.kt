@@ -57,6 +57,11 @@ internal class ExternalFileSession(private val application: Application, private
     private var copyText: String? = null
     private var copyTitle: String? = null
     private var saveGeneration = 0
+    /**
+     * Writes that failed after the provider may have truncated. Until a later write is confirmed,
+     * the provider is not a safe copy, even when the editor text equals the original again.
+     */
+    private var interruptedWrites: List<ByteArray> = emptyList()
     private var unreadableRecoveryPending = false
     private var sessionKey = UUID.randomUUID().toString()
 
@@ -129,7 +134,7 @@ internal class ExternalFileSession(private val application: Application, private
         val current = mutableState.value ?: return
         if (current.sessionKey != expectedSessionKey) return
         if (!current.writable || current.loading || current.copying || current.closing || current.text == text) return
-        mutableState.value = current.copy(text = text, dirty = text != baselineText)
+        mutableState.value = current.copy(text = text, dirty = isDirty(text))
         val generation = ++saveGeneration
         // Coalesce recovery checkpoints independently of the longer file-write debounce.
         scope.launch {
@@ -162,7 +167,7 @@ internal class ExternalFileSession(private val application: Application, private
         if (current.copying || current.loading) return@withLock
         try {
             val opened = withContext(Dispatchers.IO) { files.open(next) }
-            if (!opened.bytes.contentEquals(baseline)) {
+            if (!providerHoldsOwnContents(opened.bytes, baseline, interruptedWrites)) {
                 throw ExternalFileProblem(UiR.ui_choose_the_original_file_with_the_same_contents_your_preview_was_kept_unchanged)
             }
             if (!opened.writable) throw ExternalFileProblem(UiR.ui_this_location_only_allows_reading_you_can_save_a_copy_to_kgs_notes_instead)
@@ -227,20 +232,28 @@ internal class ExternalFileSession(private val application: Application, private
             val bytes = withContext(Dispatchers.IO) { codec.encode(current.text) }
             if (bytes.size > MAX_EXTERNAL_FILE_BYTES) throw ExternalFileProblem(UiR.ui_the_edited_file_is_too_large_to_save_safely_your_text_is_kept_here_save_a_copy_to_kgs)
             // Do not cancel in the middle of replacing a provider's contents.
-            withContext(NonCancellable + Dispatchers.IO) { files.write(target.uri, baseline, bytes) }
+            val interrupted = interruptedWrites
+            withContext(NonCancellable + Dispatchers.IO) { files.write(target.uri, baseline, bytes, interrupted) }
             baseline = bytes
             baselineText = current.text
-            mutableState.update { latest -> latest?.copy(dirty = latest.text != current.text, saving = false, error = null) }
+            interruptedWrites = emptyList()
+            mutableState.update { latest -> latest?.copy(dirty = isDirty(latest.text), saving = false, error = null) }
             persistLocked()
             true
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (problem: Exception) {
-            mutableState.update { it?.copy(saving = false, error = problem.safeMessage(opening = false)) }
+            if (problem is UncertainExternalWrite) {
+                // Two attempts cover a retry that failed before reading back what the first one left.
+                interruptedWrites = (interruptedWrites + problem.attempted).takeLast(2)
+            }
+            mutableState.update { latest -> latest?.let { it.copy(saving = false, dirty = isDirty(it.text), error = problem.safeMessage(opening = false)) } }
             persistSafelyLocked()
             false
         }
     }
+
+    private fun isDirty(text: String) = text != baselineText || interruptedWrites.isNotEmpty()
 
     private suspend fun flushLocked(): Boolean {
         while (mutableState.value?.dirty == true) if (!saveLocked()) return false
@@ -265,6 +278,7 @@ internal class ExternalFileSession(private val application: Application, private
         val savedCopyId = copyId
         val savedCopyText = copyText
         val savedCopyTitle = copyTitle
+        val savedInterrupted = interruptedWrites
         val ownedGrants = files.ownedGrantFlags(target.uri)
         withContext(NonCancellable + Dispatchers.IO) {
             val value = JSONObject()
@@ -276,6 +290,7 @@ internal class ExternalFileSession(private val application: Application, private
                 .put("copyText", savedCopyText ?: JSONObject.NULL)
                 .put("copyTitle", savedCopyTitle ?: JSONObject.NULL)
                 .put("ownedGrants", ownedGrants)
+                .put("interruptedWrites", org.json.JSONArray(savedInterrupted.map { Base64.encodeToString(it, Base64.NO_WRAP) }))
             val stream = checkpoint.startWrite()
             try {
                 stream.write(value.toString().toByteArray(Charsets.UTF_8))
@@ -312,19 +327,28 @@ internal class ExternalFileSession(private val application: Application, private
         copyId = saved.optString("copyId").takeIf { it.isNotBlank() && it != "null" }?.let(::NoteId)
         copyText = if (saved.isNull("copyText")) null else saved.getString("copyText")
         copyTitle = if (saved.isNull("copyTitle")) null else saved.getString("copyTitle")
+        interruptedWrites = saved.optJSONArray("interruptedWrites")?.let { array ->
+            List(array.length()) { Base64.decode(array.getString(it), Base64.NO_WRAP) }
+        }.orEmpty()
         val reopened = withContext(Dispatchers.IO) { runCatching { files.open(request!!) }.getOrNull() }
         // Unsaved text wins over reloading; a revision check precedes any subsequent write.
-        if (text == original && reopened != null) {
+        // A provider damaged by an interrupted write is never adopted as the new original.
+        val reloadable = text == original && reopened != null && interruptedWrites.isEmpty()
+        if (reloadable) {
             baseline = reopened.bytes
             baselineText = reopened.text
             format = reopened.format
         }
         mutableState.value = ExternalFileUiState(
             sessionKey = sessionKey,
-            name = saved.getString("name"), text = if (text == original && reopened != null) reopened.text else text,
+            name = saved.getString("name"), text = if (reloadable) reopened.text else text,
             mode = EditorMode.entries.firstOrNull { it.name == saved.optString("mode") } ?: EditorMode.SOURCE,
-            writable = reopened?.writable == true, dirty = text != original,
-            error = if (reopened == null) strings.getString(UiR.ui_the_original_file_is_unavailable_your_preview_is_kept_here_save_a_copy_to_kgs_notes) else null,
+            writable = reopened?.writable == true, dirty = !reloadable && isDirty(text),
+            error = when {
+                reopened == null -> strings.getString(UiR.ui_the_original_file_is_unavailable_your_preview_is_kept_here_save_a_copy_to_kgs_notes)
+                interruptedWrites.isNotEmpty() -> strings.getString(UiR.ui_the_file_app_may_have_kept_only_part_of_this_file_your_full_text_is_kept_here)
+                else -> null
+            },
         )
     }
 
@@ -370,6 +394,7 @@ internal class ExternalFileSession(private val application: Application, private
         baseline = byteArrayOf()
         baselineText = ""
         format = null
+        interruptedWrites = emptyList()
         copyId = null
         copyText = null
         copyTitle = null

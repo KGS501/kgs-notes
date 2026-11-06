@@ -200,6 +200,100 @@ class ExternalFileFlowTest {
     }
 
     @Test
+    fun truncatedFailedWriteKeepsRecoveryAfterUndoCloseReopenAndRecreation() {
+        val fixture = openFile("Original".toByteArray())
+        fixture.provider.truncateThenFail = true
+        val key = fixture.viewModel.state.value.externalFile!!.sessionKey
+        compose.onNodeWithTag("source-editor").performClick().performTextReplacement("Edited text")
+        compose.waitUntil(5_000) { fixture.viewModel.state.value.externalFile?.error != null }
+        assertEquals("", fixture.provider.file.readText())
+        // Returning to the original text must not mark the damaged provider copy as safe.
+        compose.onNodeWithTag("source-editor").performTextReplacement("Original")
+        compose.waitForIdle()
+        assertEquals(true, fixture.viewModel.state.value.externalFile!!.dirty)
+        compose.onNodeWithContentDescription("Close file").performClick()
+        compose.onNodeWithText("Keep editing", useUnmergedTree = true).assertExists()
+        compose.onNodeWithText("Keep editing", useUnmergedTree = true).performClick()
+        assertEquals(key, fixture.viewModel.state.value.externalFile!!.sessionKey)
+        // Reopening the same document keeps the full text instead of adopting the empty provider copy.
+        compose.runOnIdle {
+            fixture.viewModel.openExternalFile(ExternalFileRequest.from(Intent(Intent.ACTION_VIEW)
+                .setDataAndType(fixture.provider.uri, "text/plain")
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION))!!)
+        }
+        compose.waitForIdle()
+        assertEquals("Original", fixture.viewModel.state.value.externalFile!!.text)
+        assertEquals(true, fixture.viewModel.state.value.externalFile!!.dirty)
+        // Recreation restores the checkpoint as still unsafe.
+        val oldJob = fixture.viewModel.viewModelScope.coroutineContext[Job]!!
+        compose.runOnIdle { viewModels.clear() }
+        runBlocking { oldJob.join() }
+        compose.runOnIdle {
+            fixture.shown.value = NotesViewModel(fixture.application, fixture.engine, fixture.preferences)
+            viewModels.put("recovered-uncertain", fixture.shown.value)
+        }
+        compose.waitUntil(5_000) { fixture.viewModel.state.value.externalFile?.name == "Fixture.txt" }
+        assertEquals("Original", fixture.viewModel.state.value.externalFile!!.text)
+        assertEquals(true, fixture.viewModel.state.value.externalFile!!.dirty)
+        assertEquals("", fixture.provider.file.readText())
+        // Once the provider works again, the retry repairs the damaged document.
+        fixture.provider.truncateThenFail = false
+        compose.runOnIdle { fixture.viewModel.retryExternalSave(fixture.viewModel.state.value.externalFile!!.sessionKey) }
+        compose.waitUntil(5_000) { fixture.viewModel.state.value.externalFile?.dirty == false }
+        assertEquals("Original", fixture.provider.file.readText())
+        compose.onNodeWithContentDescription("Close file").performClick()
+        compose.waitUntil(5_000) { fixture.viewModel.state.value.externalFile == null }
+        assertEquals("Original", fixture.provider.file.readText())
+        assertTrue(fixture.engine.library.value.active.isEmpty())
+    }
+
+    @Test
+    fun partialProviderWriteStaysUnsafeUntilAConfirmedRetry() {
+        val fixture = openFile("Original".toByteArray())
+        fixture.provider.partialWriteBytes = 3
+        compose.onNodeWithTag("source-editor").performClick().performTextReplacement("A much longer replacement")
+        compose.waitUntil(5_000) { fixture.viewModel.state.value.externalFile?.error != null }
+        compose.waitUntil(5_000) { fixture.provider.file.readText() == "A m" }
+        compose.onNodeWithTag("source-editor").performTextReplacement("Original")
+        compose.waitForIdle()
+        assertEquals(true, fixture.viewModel.state.value.externalFile!!.dirty)
+        fixture.provider.partialWriteBytes = null
+        compose.onNodeWithContentDescription("Close file").performClick()
+        compose.waitUntil(5_000) { fixture.viewModel.state.value.externalFile == null }
+        assertEquals("Original", fixture.provider.file.readText())
+    }
+
+    @Test
+    fun failureBeforeTruncationLetsUndoReturnToACleanSession() {
+        val fixture = openFile("Original".toByteArray())
+        fixture.provider.failWrites = true
+        compose.onNodeWithTag("source-editor").performClick().performTextReplacement("Edited")
+        compose.waitUntil(5_000) { fixture.viewModel.state.value.externalFile?.error != null }
+        assertEquals("Original", fixture.provider.file.readText())
+        compose.onNodeWithTag("source-editor").performTextReplacement("Original")
+        compose.waitForIdle()
+        assertEquals(false, fixture.viewModel.state.value.externalFile!!.dirty)
+        compose.onNodeWithContentDescription("Close file").performClick()
+        compose.waitUntil(5_000) { fixture.viewModel.state.value.externalFile == null }
+        assertEquals("Original", fixture.provider.file.readText())
+    }
+
+    @Test
+    fun changedElsewhereAfterAnInterruptedWriteIsStillNotOverwritten() {
+        val fixture = openFile("Original".toByteArray())
+        fixture.provider.truncateThenFail = true
+        compose.onNodeWithTag("source-editor").performClick().performTextReplacement("Edited")
+        compose.waitUntil(5_000) { fixture.viewModel.state.value.externalFile?.error != null }
+        fixture.provider.truncateThenFail = false
+        fixture.provider.file.writeText("Another app")
+        compose.runOnIdle { fixture.viewModel.retryExternalSave(fixture.viewModel.state.value.externalFile!!.sessionKey) }
+        compose.waitForIdle()
+        Thread.sleep(500)
+        assertEquals("Another app", fixture.provider.file.readText())
+        assertEquals(true, fixture.viewModel.state.value.externalFile!!.dirty)
+    }
+
+    @Test
     fun repeatedSaveTapsCreateOnlyOneIndependentNote() {
         val fixture = openFile("Original".toByteArray())
         compose.onNodeWithContentDescription("Save to KGS Notes").performClick()
@@ -249,14 +343,19 @@ class ExternalFileFlowTest {
         }
         val uri = fixture.provider.addFile(second)
         val previousKey = fixture.viewModel.state.value.externalFile!!.sessionKey
+        // Hold composition on the first file's frame: its buttons stay attached, so their
+        // captured actions can still be delivered after the session already switched.
+        // Compose refuses to run actions of detached modifier nodes, which no real tap can reach.
+        compose.mainClock.autoAdvance = false
         compose.runOnIdle {
             fixture.viewModel.openExternalFile(ExternalFileRequest.from(
                 Intent(Intent.ACTION_VIEW).setDataAndType(uri, "text/plain"))!!)
         }
         compose.waitUntil(5_000) { fixture.viewModel.state.value.externalFile?.let { it.sessionKey != previousKey && it.text == "Second file" } == true }
-        compose.onNodeWithTag("source-dialog").assertDoesNotExist()
         compose.runOnIdle { oldSave(); oldClose() }
+        compose.mainClock.autoAdvance = true
         compose.waitForIdle()
+        compose.onNodeWithTag("source-dialog").assertDoesNotExist()
         compose.onNodeWithTag("source-editor").assertTextContains("Second file")
         assertTrue(fixture.engine.library.value.active.isEmpty())
         assertEquals(0, fixture.previewCloses.get())
@@ -278,7 +377,12 @@ class ExternalFileFlowTest {
             fixture.viewModel.openExternalFile(ExternalFileRequest.from(
                 Intent(Intent.ACTION_VIEW).setDataAndType(secondUri, "text/plain"))!!)
         }
-        compose.waitUntil(5_000) { fixture.viewModel.state.value.externalFile?.sessionKey?.let { it != previousKey } == true }
+        // Wait for the second file to finish loading: its own permission probe must run before
+        // the fixture starts granting write access, or it legitimately reports a writable file.
+        compose.waitUntil(5_000) {
+            fixture.viewModel.state.value.externalFile?.let { it.sessionKey != previousKey && !it.loading && it.text == "Same contents" } == true
+        }
+        assertEquals(false, fixture.viewModel.state.value.externalFile!!.writable)
         fixture.application.writable = true
         compose.runOnIdle { fixture.picker.dispatchResult(firstPicker, Activity.RESULT_OK, Intent().setData(fixture.provider.uri)) }
         compose.waitForIdle()
@@ -369,6 +473,10 @@ class ExternalFileFlowTest {
         private val files = java.util.concurrent.ConcurrentHashMap<Uri, File>().apply { put(uri, file) }
         val writes = AtomicInteger()
         @Volatile var failWrites = false
+        /** Truncates the document, then fails, like a provider losing its connection mid-write. */
+        @Volatile var truncateThenFail = false
+        /** Accepts only this many bytes of a write, then breaks the stream. */
+        @Volatile var partialWriteBytes: Int? = null
         override fun onCreate() = true
         fun addFile(file: File): Uri = Uri.parse("content://external-test/${files.size + 42}").also { files[it] = file }
         override fun getType(uri: Uri) = if (files.getValue(uri).name.endsWith(".md")) "text/markdown" else "text/plain"
@@ -378,6 +486,20 @@ class ExternalFileFlowTest {
         override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor {
             if ('w' in mode) {
                 if (failWrites) throw FileNotFoundException("Controlled provider write failure")
+                if (truncateThenFail) {
+                    files.getValue(uri).writeBytes(ByteArray(0))
+                    throw FileNotFoundException("Controlled failure after truncation")
+                }
+                partialWriteBytes?.let { limit ->
+                    val target = files.getValue(uri).apply { writeBytes(ByteArray(0)) }
+                    val (read, write) = ParcelFileDescriptor.createPipe()
+                    Thread {
+                        ParcelFileDescriptor.AutoCloseInputStream(read).use { input ->
+                            target.writeBytes(input.readNBytesCompat(limit))
+                        }
+                    }.start()
+                    return write
+                }
                 writes.incrementAndGet()
             }
             return ParcelFileDescriptor.open(files.getValue(uri), ParcelFileDescriptor.parseMode(mode))
@@ -407,4 +529,15 @@ class ExternalFileFlowTest {
         override suspend fun updateNote(remoteId: String, expectedRevision: String, note: SourceNoteDraft): SourceNote = createNote(note)
         override suspend fun deleteNote(remoteId: String, expectedRevision: String) { notes.value = emptyList() }
     }
+}
+
+private fun java.io.InputStream.readNBytesCompat(limit: Int): ByteArray {
+    val buffer = ByteArray(limit)
+    var count = 0
+    while (count < limit) {
+        val read = read(buffer, count, limit - count)
+        if (read < 0) break
+        count += read
+    }
+    return buffer.copyOf(count)
 }

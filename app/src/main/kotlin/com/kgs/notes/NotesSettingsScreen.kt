@@ -131,6 +131,7 @@ private enum class SettingsPage(val titleRes: Int) {
     CATEGORIES(UiR.ui_categories),
     LANGUAGE(UiR.ui_language),
     DEFAULT_VIEW(UiR.ui_default_view),
+    RECOVERY(UiR.ui_recovery),
 }
 
 /** The top-level page a nested settings page belongs to. */
@@ -187,6 +188,7 @@ internal fun NotesSettingsScreen(state: NotesUiState, actions: NotesActions, mod
             var categorySource by rememberSaveable { mutableStateOf("") }
             var categoryRemoving by rememberSaveable { mutableStateOf(false) }
             var creatingCategory by rememberSaveable { mutableStateOf(false) }
+            var discardingRecord by rememberSaveable { mutableStateOf<String?>(null) }
             val detailsSource = state.sources.firstOrNull { it.id.value == sourceId }
             val license = if (destination == SettingsPage.LICENSE) {
                 licenseFor(licenseId).let { it to rememberLicenseParagraphs(it.asset) }
@@ -203,6 +205,7 @@ internal fun NotesSettingsScreen(state: NotesUiState, actions: NotesActions, mod
                         onRename = { categoryPath = it.path; categorySource = it.sourceId.value; categoryRemoving = false },
                         onRemove = { categoryPath = it.path; categorySource = it.sourceId.value; categoryRemoving = true })
                     SettingsPage.LANGUAGE -> languageSettings(strings)
+                    SettingsPage.RECOVERY -> recovery(strings, state, actions, onDiscard = { discardingRecord = it })
                     SettingsPage.SOURCES -> sources(strings, state, actions) { sourceId = it; navigate(SettingsPage.SOURCE_DETAILS) }
                     SettingsPage.SOURCE_DETAILS -> if (detailsSource == null) {
                         item { KgsSettingsFooter(strings.getString(UiR.ui_this_source_is_no_longer_available)) }
@@ -224,6 +227,23 @@ internal fun NotesSettingsScreen(state: NotesUiState, actions: NotesActions, mod
                 CategoryDialogs(state, actions, creatingCategory, { creatingCategory = it },
                     renaming = category?.takeUnless { categoryRemoving }, removing = category?.takeIf { categoryRemoving },
                     onDismiss = { categoryPath = "" })
+            }
+            if (destination == SettingsPage.RECOVERY) {
+                val record = state.unreadableRecords.firstOrNull { it.id == discardingRecord }
+                KgsSheetDialog(
+                    expanded = record != null,
+                    onDismissRequest = { discardingRecord = null },
+                    icon = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) },
+                    title = { Text(strings.getString(UiR.ui_remove_preserved_files)) },
+                    text = { Text(strings.getString(UiR.ui_the_preserved_files_of_this_record_will_be_deleted_from_this_device)) },
+                    confirmButton = {
+                        TextButton(modifier = Modifier.testTag("recovery-discard-confirm"), onClick = {
+                            record?.let { actions.onDiscardUnreadableRecord(it.id) }
+                            discardingRecord = null
+                        }) { Text(strings.getString(UiR.ui_remove_files), color = MaterialTheme.colorScheme.error) }
+                    },
+                    dismissButton = { TextButton(onClick = { discardingRecord = null }) { Text(strings.getString(UiR.ui_cancel)) } },
+                )
             }
             if (destination == SettingsPage.SOURCE_DETAILS && detailsSource != null) {
                 SourceDialogs(detailsSource, actions, renameOpen, { renameOpen = it }, removeOpen, { removeOpen = it },
@@ -347,6 +367,13 @@ private fun LazyListScope.group(key: String, header: String? = null, footer: Str
 
 private fun LazyListScope.home(strings: android.content.res.Resources, state: NotesUiState, actions: NotesActions, selected: SettingsPage?, navigate: (SettingsPage, Boolean) -> Unit) {
     group("notes", strings.getString(UiR.ui_your_notes)) {
+        // Records that could not be loaded stay discoverable until rescued or explicitly removed.
+        if (state.unreadableRecords.isNotEmpty()) row("recovery") {
+            NavigationRow(strings.getString(UiR.ui_recovery), strings.getString(UiR.ui_value_stored_records_couldn_t_be_read, state.unreadableRecords.size),
+                "settings-open-RECOVERY", it, selected = selected == SettingsPage.RECOVERY, onClick = { navigate(SettingsPage.RECOVERY, true) }) {
+                KgsSettingsIcon(MaterialTheme.colorScheme.error) { Icon(Icons.Default.Info, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(20.dp)) }
+            }
+        }
         row("sources") { NavigationRow(strings.getString(UiR.ui_sources), state.sources.joinToString { it.name }, "settings-open-SOURCES", it,
             selected = selected == SettingsPage.SOURCES, onClick = { navigate(SettingsPage.SOURCES, true) }) { KgsSettingsIcon(MaterialTheme.colorScheme.secondary) { CloudGlyph(MaterialTheme.colorScheme.secondary) } } }
         row("editor") { NavigationRow(strings.getString(UiR.ui_notes_editor), "${editorModeLabel(strings, state.defaultEditorMode)} · ${strings.getString(state.noteFormatPreference.labelRes)}", "settings-open-NOTES", it,
@@ -579,11 +606,51 @@ private fun LazyListScope.sourceDetails(strings: android.content.res.Resources, 
         }
     }
     if (!local) group("remove", footer = strings.getString(UiR.ui_notes_on_the_server_stay_there)) {
+        // An offline rescue that never changes or deletes the server copies.
+        row("copy-pending") {
+            KgsSettingsItem(strings.getString(UiR.ui_copy_unsynced_notes_to_local_source), it, summary = strings.getString(UiR.ui_works_offline_server_notes_stay_unchanged),
+                onClick = { actions.onCopyPendingNotesToLocal(source.id) }, modifier = Modifier.testTag("source-copy-pending"),
+                leading = { LocalNotesGlyph(MaterialTheme.colorScheme.onSurfaceVariant) })
+        }
         row("remove") {
             KgsSettingsItem(strings.getString(UiR.ui_remove_source), it, summary = strings.getString(UiR.ui_remove_from_this_device), onClick = onRemove, titleColor = MaterialTheme.colorScheme.error,
                 modifier = Modifier.testTag("source-remove"), leading = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) })
         }
     }
+}
+
+private fun LazyListScope.recovery(strings: android.content.res.Resources, state: NotesUiState, actions: NotesActions, onDiscard: (String) -> Unit) {
+    if (state.unreadableRecords.isEmpty()) {
+        item(key = "recovery-empty") { KgsSettingsFooter(strings.getString(UiR.ui_every_stored_note_could_be_read)) }
+        return
+    }
+    item(key = "recovery-explanation") { KgsSettingsFooter(strings.getString(UiR.ui_these_records_couldn_t_be_read_their_files_were_kept_unchanged)) }
+    state.unreadableRecords.forEach { record ->
+        group("record-${record.id}", record.title?.takeIf(String::isNotBlank) ?: strings.getString(UiR.ui_untitled_record)) {
+            row("reason") {
+                KgsSettingsItem(unreadableReasonLabel(strings, record.reason), it, summary = record.detail,
+                    modifier = Modifier.testTag("recovery-record-${record.id}"))
+            }
+            row("rescue") {
+                KgsSettingsItem(strings.getString(UiR.ui_save_a_copy_to_the_local_source), it,
+                    summary = strings.getString(UiR.ui_the_preserved_files_stay_unchanged), titleColor = MaterialTheme.colorScheme.primary,
+                    onClick = { actions.onRescueUnreadableRecord(record.id) }, modifier = Modifier.testTag("recovery-rescue-${record.id}"),
+                    leading = { LocalNotesGlyph(MaterialTheme.colorScheme.primary) })
+            }
+            row("discard") {
+                KgsSettingsItem(strings.getString(UiR.ui_remove_preserved_files), it, titleColor = MaterialTheme.colorScheme.error,
+                    onClick = { onDiscard(record.id) }, modifier = Modifier.testTag("recovery-discard-${record.id}"),
+                    leading = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) })
+            }
+        }
+    }
+}
+
+private fun unreadableReasonLabel(strings: android.content.res.Resources, reason: com.kgs.notes.engine.UnreadableReason): String = when (reason) {
+    com.kgs.notes.engine.UnreadableReason.UNSUPPORTED_VERSION -> strings.getString(UiR.ui_saved_by_a_newer_or_unknown_version)
+    com.kgs.notes.engine.UnreadableReason.MALFORMED_METADATA -> strings.getString(UiR.ui_its_details_are_damaged)
+    com.kgs.notes.engine.UnreadableReason.MISSING_CONTENT -> strings.getString(UiR.ui_its_text_file_is_missing)
+    com.kgs.notes.engine.UnreadableReason.INACCESSIBLE -> strings.getString(UiR.ui_its_files_couldn_t_be_opened)
 }
 
 private fun LazyListScope.notesAndEditor(strings: android.content.res.Resources, state: NotesUiState, actions: NotesActions) {
@@ -842,7 +909,7 @@ private fun SourceDialogs(source: SourceChoice, actions: NotesActions, renameOpe
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(strings.getString(UiR.ui_removes_this_source_and_its_working_copies_from_this_device_notes_on_the_server_stay))
-                Text(strings.getString(UiR.ui_sync_move_or_export_pending_edits_first), style = MaterialTheme.typography.bodySmall,
+                Text(strings.getString(UiR.ui_sync_pending_edits_first_or_copy_them_to_the_local_source), style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         },

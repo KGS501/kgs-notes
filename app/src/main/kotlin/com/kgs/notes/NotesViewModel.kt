@@ -9,6 +9,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.kgs.notes.editor.DefaultMarkdownEditor
 import com.kgs.notes.editor.EditorMode
+import com.kgs.notes.editor.EditorPosition
 import com.kgs.notes.editor.MarkdownAttachment
 import com.kgs.notes.editor.MarkdownSelection
 import com.kgs.notes.engine.AttachmentImport
@@ -25,6 +26,8 @@ import com.kgs.notes.engine.LocalSourceId
 import com.kgs.notes.engine.SourceId
 import com.kgs.notes.engine.SourceDescriptor
 import com.kgs.notes.engine.SourceConflictException
+import com.kgs.notes.engine.ReadOnlyNoteException
+import com.kgs.notes.engine.UnreadableRecord
 import com.kgs.notes.nextcloud.HttpNextcloudLoginFlow
 import com.kgs.notes.nextcloud.HttpNextcloudNotesApi
 import com.kgs.notes.nextcloud.NextcloudApiException
@@ -40,16 +43,22 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /** Where the library opens and returns to: a filter, or a Category (an empty path means no Category). */
@@ -128,11 +137,18 @@ enum class NotePane {
     val other: NotePane get() = if (this == PRIMARY) SECONDARY else PRIMARY
 }
 
-data class PaneNote(val note: Note, val editorMode: EditorMode)
+data class PaneNote(val note: Note, val editorMode: EditorMode, val saveFailed: Boolean = false)
+
+/** A Note the person chose to export, with the file type the export will produce. */
+data class NoteExportRequest(val noteId: NoteId, val file: NoteExportFile)
 
 /** One open Note with its own unsaved edits; book posture shows two pages at once. */
 private class EditorSlot {
     val note = MutableStateFlow<Note?>(null)
+    /** Serializes every write of this page's draft with operations that move or replace its Note. */
+    val persistence = Mutex()
+    /** The latest save failed; the draft stays on screen and navigation away waits for a retry or discard. */
+    var saveFailed = false
     var contentSave: Job? = null
     var metadataSave: Job? = null
     var pendingTitle: String? = null
@@ -204,6 +220,11 @@ data class NotesUiState(
     /** The mode for new Notes and for Notes whose mode was never switched. */
     val defaultEditorMode: EditorMode = EditorMode.RICH,
     val externalFile: ExternalFileUiState? = null,
+    /** The active page's latest save failed; its draft is kept until retried, copied, or discarded. */
+    val saveFailed: Boolean = false,
+    /** Stored records the engine could not load; their bytes are kept for rescue. */
+    val unreadableRecords: List<UnreadableRecord> = emptyList(),
+    val exportRequest: NoteExportRequest? = null,
 )
 
 class NotesViewModel internal constructor(
@@ -299,12 +320,16 @@ class NotesViewModel internal constructor(
         Triple(primary, secondary, active)
     }
 
+    /** Normalized full Markdown per Note, loaded off the main thread only while a search is active. */
+    private val searchIndex = MutableStateFlow<Map<NoteId, IndexedBody>>(emptyMap())
+
     private val libraryUi = combine(
         engine.library,
         engine.sources,
         openNotes,
         controls,
-    ) { library, sourceDescriptors, (primaryNote, secondaryNote, active), controls ->
+        searchIndex,
+    ) { library, sourceDescriptors, (primaryNote, secondaryNote, active), controls, indexedBodies ->
         val selectedNote = if (active == NotePane.PRIMARY) primaryNote else secondaryNote
         val otherNote = if (active == NotePane.PRIMARY) secondaryNote else primaryNote
         val descriptorsById = sourceDescriptors.associateBy(SourceDescriptor::id)
@@ -324,17 +349,31 @@ class NotesViewModel internal constructor(
         }
         val notes = candidates.filter(visible).filter { note ->
             controls.destination != LibraryDestination.NOTES || controls.libraryCategory == null || note.category == controls.libraryCategory
-        }.filter { note ->
-            controls.query.isBlank() || listOf(note.title, note.snippet, note.category)
-                .any { it.contains(controls.query, ignoreCase = true) }
+        }.let { filtered ->
+            val terms = searchTerms(controls.query)
+            if (terms.isEmpty()) return@let filtered
+            // An open page's draft is searchable before its debounced save reaches the engine.
+            val drafts = listOfNotNull(primaryNote, secondaryNote).associate { it.id to it.markdown }
+            filtered.filter { note ->
+                val body = drafts[note.id]?.let(::normalizeForSearch)
+                    ?: indexedBodies[note.id]?.text
+                    ?: normalizeForSearch(note.previewMarkdown)
+                matchesSearch(terms, listOf(normalizeForSearch(note.title), normalizeForSearch(note.category), body))
+            }
         }.sortedWith(controls.comparator())
         NotesUiState(
             notes = notes,
             selectedNote = selectedNote,
             activePane = active,
             otherPane = otherNote?.let { note ->
-                PaneNote(note, slotFor(active.other).editorMode ?: previewModeFor(note.id, controls.defaultEditorMode))
+                PaneNote(
+                    note,
+                    slotFor(active.other).editorMode ?: previewModeFor(note.id, controls.defaultEditorMode),
+                    saveFailed = active.other in controls.failedPanes,
+                )
             },
+            saveFailed = active in controls.failedPanes,
+            exportRequest = controls.exportRequest,
             categories = (library.active.map(NoteSummary::category) + library.categories.values.flatten() +
                 listOfNotNull(selectedNote?.category))
                 .filter(String::isNotBlank)
@@ -382,8 +421,8 @@ class NotesViewModel internal constructor(
     }
 
     // Typing in an External File does not rebuild or sort the entire Note library.
-    val state: StateFlow<NotesUiState> = combine(libraryUi, externalFiles.state) { library, file ->
-        library.copy(externalFile = file)
+    val state: StateFlow<NotesUiState> = combine(libraryUi, externalFiles.state, engine.unreadableRecords) { library, file, unreadable ->
+        library.copy(externalFile = file, unreadableRecords = unreadable)
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000),
@@ -405,10 +444,23 @@ class NotesViewModel internal constructor(
             engine.library.collect {
                 for (open in listOf(primarySlot, secondarySlot)) {
                     val id = open.note.value?.id ?: continue
-                    val current = engine.note(id) ?: continue
+                    val current = engine.note(id)
+                    if (current == null) {
+                        // Deleted elsewhere, e.g. from the adjacent library: a clean page must not keep
+                        // offering actions for a Note that no longer exists. Drafts and transfers stay.
+                        if (open.note.value?.id == id && !open.persistence.isLocked && !open.contentDirty && !open.metadataDirty) {
+                            clearSlot(open)
+                        }
+                        continue
+                    }
                     if (open.note.value?.id == id) open.note.value = current.withPendingDisplayMetadata(open)
                 }
             }
+        }
+        viewModelScope.launch {
+            combine(engine.library, controls.map { it.query.isNotBlank() }.distinctUntilChanged()) { library, searching ->
+                library.takeIf { searching }
+            }.collectLatest { library -> if (library != null) refreshSearchIndex(library) }
         }
         if (engine is ConnectedNotesEngine) {
             viewModelScope.launch {
@@ -427,7 +479,7 @@ class NotesViewModel internal constructor(
         val s = slot
         viewModelScope.launch {
             sourcesReady.await()
-            flushSelectedContent(s)
+            if (!flushSelectedContent(s)) return@launch
             s.note.value?.id?.let { engine.close(it) }
             val sourceId = controls.value.defaultSourceId.takeIf { preferred ->
                 engine.sources.value.any { it.id == preferred }
@@ -442,6 +494,17 @@ class NotesViewModel internal constructor(
         }
     }
 
+    private val editorPositions = mutableMapOf<NoteId, EditorPosition>()
+
+    fun editorPosition(id: NoteId): EditorPosition? = editorPositions[id]
+
+    fun rememberEditorPosition(id: NoteId, position: EditorPosition) {
+        editorPositions[id] = position
+    }
+
+    fun resolveLink(from: Note, href: String): NoteLinkTarget =
+        resolveNoteLink(href, from.sourceId, from.category, engine.library.value.active)
+
     fun selectNote(id: NoteId) {
         // One Editing Session per Note: a Note already open on the other page is focused there.
         val other = slotFor(activePane.value.other)
@@ -451,9 +514,11 @@ class NotesViewModel internal constructor(
         }
         val s = slot
         viewModelScope.launch {
-            flushSelectedContent(s)
+            // A draft that could not be saved keeps its page until it is retried, copied, or discarded.
+            if (!flushSelectedContent(s)) return@launch
             s.note.value?.id?.takeIf { it != id }?.let { engine.close(it) }
             val opened = engine.openEditingSession(id)
+            // The mode is published first, so the Note never appears in another editor for a frame.
             setSlotEditorMode(s, previewModeFor(id))
             s.note.value = opened
         }
@@ -480,17 +545,28 @@ class NotesViewModel internal constructor(
             return
         }
         viewModelScope.launch {
-            flushSelectedContent(secondarySlot)
-            val leftNote = secondarySlot.note.value ?: return@launch
-            if (primarySlot.note.value == null) {
-                primarySlot.note.value = leftNote
-                primarySlot.editorMode = if (activePane.value == NotePane.SECONDARY) controls.value.editorMode else secondarySlot.editorMode
-            } else {
-                engine.close(leftNote.id)
+            val saved = flushSelectedContent(secondarySlot)
+            // An unsaved page is only closed after its draft is safe; otherwise it moves with its draft.
+            if (!saved && primarySlot.note.value != null) return@launch
+            secondarySlot.persistence.withLock {
+                val leftNote = secondarySlot.note.value ?: return@launch
+                if (primarySlot.note.value == null) {
+                    primarySlot.persistence.withLock {
+                        primarySlot.note.value = leftNote
+                        primarySlot.editorMode = if (activePane.value == NotePane.SECONDARY) controls.value.editorMode else secondarySlot.editorMode
+                        primarySlot.contentDirty = secondarySlot.contentDirty
+                        primarySlot.metadataDirty = secondarySlot.metadataDirty
+                        primarySlot.pendingTitle = secondarySlot.pendingTitle
+                        primarySlot.pendingCategory = secondarySlot.pendingCategory
+                        primarySlot.saveFailed = secondarySlot.saveFailed
+                    }
+                } else {
+                    engine.close(leftNote.id)
+                }
+                resetSlot(secondarySlot)
             }
-            secondarySlot.note.value = null
-            secondarySlot.editorMode = null
             activatePane(NotePane.PRIMARY)
+            refreshSavingState()
         }
     }
 
@@ -504,7 +580,7 @@ class NotesViewModel internal constructor(
             try {
                 externalFiles.open(request, controls.value.defaultEditorMode) {
                     for (open in listOf(primarySlot, secondarySlot)) {
-                        flushSelectedContent(open)
+                        if (!flushSelectedContent(open)) throw ExternalFileProblem(UiR.ui_your_latest_changes_couldn_t_be_saved_they_are_kept_on_screen)
                         open.note.value?.id?.let { engine.close(it) }
                         open.note.value = null
                     }
@@ -541,7 +617,7 @@ class NotesViewModel internal constructor(
             externalFiles.copyIntoNotes(sessionKey) { existingId, previousText, previousTitle, title, text, mode, rememberId ->
                 if (sourceId != LocalSourceId) sourcesReady.await()
                 val s = slot
-                flushSelectedContent(s)
+                check(flushSelectedContent(s)) { "The open Note couldn't be saved" }
                 s.note.value?.id?.let { engine.close(it) }
                 s.note.value = null
                 val destination = engine.sources.value.firstOrNull { it.id == sourceId }
@@ -574,21 +650,24 @@ class NotesViewModel internal constructor(
 
     fun updateContent(markdown: String) {
         val current = selected.value ?: return
-        if (markdown == current.markdown) return
+        if (markdown == current.markdown || current.readOnly) return
         selected.value = current.copy(markdown = markdown)
         contentDirty = true
         showSaving()
-        val s = slot
+        scheduleContentSave(slot)
+    }
+
+    private fun scheduleContentSave(s: EditorSlot) {
         s.contentSave?.cancel()
         s.contentSave = viewModelScope.launch {
             delay(CONTENT_SAVE_DELAY_MILLIS)
-            saveCurrentContent(s)
+            persistSlot(s) { saveContentLocked(s) }
         }
     }
 
     fun rename(title: String) {
         val current = selected.value ?: return
-        if (title == current.title) return
+        if (title == current.title || current.readOnly) return
         selected.value = current.copy(title = title)
         pendingTitle = title
         metadataDirty = true
@@ -601,16 +680,24 @@ class NotesViewModel internal constructor(
         val s = slot
         showSaving()
         viewModelScope.launch {
-            engine.toggleFavorite(id)
-            if (s.note.value?.id == id) s.note.value = engine.note(id)?.withPendingDisplayMetadata(s)
-            refreshSavingState()
-            scheduleSynchronization(id)
+            try {
+                // Favorites stay available for read-only Notes; the Source accepts that one change.
+                engine.toggleFavorite(id)
+                if (s.note.value?.id == id) s.note.value = engine.note(id)?.withPendingDisplayMetadata(s)
+                scheduleSynchronization(id)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                showMessage(UiR.ui_kgs_notes_couldn_t_save_this_change_please_try_again)
+            } finally {
+                refreshSavingState()
+            }
         }
     }
 
     fun setCategory(category: String) {
         val current = selected.value ?: return
-        if (category == current.category) return
+        if (category == current.category || current.readOnly) return
         pendingCategory = category
         selected.value = current.copy(category = category)
         metadataDirty = true
@@ -619,12 +706,12 @@ class NotesViewModel internal constructor(
     }
 
     fun importImage(uri: Uri, removePrivateMetadata: Boolean) {
-        val requestedNoteId = selected.value?.id ?: return
-        val s = slot
+        val requested = selected.value ?: return
+        if (requested.readOnly) return
+        val requestedNoteId = requested.id
         showSaving()
         viewModelScope.launch {
             try {
-                flushSelectedContent(s)
                 val prepared = withContext(Dispatchers.IO) {
                     prepareImageImport(getApplication(), uri, removePrivateMetadata)
                 }
@@ -638,30 +725,17 @@ class NotesViewModel internal constructor(
                         ),
                     )
                 }
-                val current = s.note.value?.takeIf { it.id == requestedNoteId }
-                    ?: return@launch
-                val edit = markdownEditor.insertAttachment(
-                    markdown = current.markdown,
-                    selection = MarkdownSelection(current.markdown.length, current.markdown.length),
-                    attachment = MarkdownAttachment(
-                        displayName = attachment.displayName,
-                        target = attachment.markdownTarget,
-                        inlineImage = true,
-                    ),
-                )
-                withContext(Dispatchers.IO) {
-                    engine.updateContent(requestedNoteId, edit.markdown)
-                }
-                if (s.note.value?.id == requestedNoteId) s.note.value = engine.note(requestedNoteId)
+                insertAttachmentReference(requestedNoteId, attachment)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
                 controls.update {
                     it.copy(
-                        userMessage = if (failure.message?.contains(strings.getString(UiR.ui_keep_original)) == true) {
-                            strings.getString(UiR.ui_this_image_format_can_only_be_added_with_keep_original)
-                        } else {
-                            strings.getString(UiR.ui_kgs_notes_couldn_t_add_this_image)
+                        userMessage = when {
+                            failure is ImageImportProblem -> strings.getString(failure.messageRes)
+                            failure.message?.contains(strings.getString(UiR.ui_keep_original)) == true ->
+                                strings.getString(UiR.ui_this_image_format_can_only_be_added_with_keep_original)
+                            else -> strings.getString(UiR.ui_kgs_notes_couldn_t_add_this_image)
                         },
                     )
                 }
@@ -671,7 +745,191 @@ class NotesViewModel internal constructor(
         }
     }
 
+    /**
+     * Adds the reference to the requested Note's newest text. An open page receives it as an
+     * ordinary edit of its current draft, so typing during the import is never replaced; a Note
+     * closed meanwhile receives it in its saved Markdown.
+     */
+    private suspend fun insertAttachmentReference(noteId: NoteId, attachment: com.kgs.notes.engine.ManagedAttachment) {
+        // The Note may have moved to another Category while the image was being prepared.
+        val target = attachmentTargets(noteId)[attachment.id] ?: attachment.markdownTarget
+        fun withReference(markdown: String) = markdownEditor.insertAttachment(
+            markdown = markdown,
+            selection = MarkdownSelection(markdown.length, markdown.length),
+            attachment = MarkdownAttachment(displayName = attachment.displayName, target = target, inlineImage = true),
+        ).markdown
+        for (open in listOf(primarySlot, secondarySlot)) {
+            if (open.note.value?.id != noteId) continue
+            var inserted = false
+            val saved = persistSlot(open) {
+                val current = open.note.value?.takeIf { it.id == noteId } ?: return@persistSlot
+                open.note.value = current.copy(markdown = withReference(current.markdown))
+                open.contentDirty = true
+                inserted = true
+                saveContentLocked(open)
+            }
+            // A failed save keeps the reference in the dirty draft with the retry state shown.
+            if (inserted || !saved) return
+        }
+        val note = engine.note(noteId) ?: return
+        engine.updateContent(noteId, withReference(note.markdown))
+        scheduleSynchronization(noteId)
+    }
+
     fun openManagedAttachment(id: String) = engine.openManagedAttachment(AttachmentId(id))
+
+    /**
+     * Copies the open Note, including an unsaved draft, into a new independent Local Note.
+     * Works offline and never changes or deletes the original or its server copy.
+     */
+    fun copyNoteToLocal() {
+        val s = slot
+        val id = s.note.value?.id ?: return
+        viewModelScope.launch {
+            // A draft that cannot be saved (storage, read-only) is still what the person wants to keep.
+            flushSelectedContent(s)
+            val draft = s.note.value?.takeIf { it.id == id && s.contentDirty }?.markdown
+            try {
+                engine.copyToLocal(id, draft)
+                showMessage(UiR.ui_a_copy_was_saved_in_the_local_source)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                showMessage(UiR.ui_the_copy_couldn_t_be_saved_the_original_note_was_not_changed)
+            }
+        }
+    }
+
+    /** The removal guidance's rescue: copies every unsynced Note of a Source into the Local Source. */
+    fun copyPendingNotesToLocal(sourceId: SourceId) {
+        viewModelScope.launch {
+            listOf(primarySlot, secondarySlot).forEach { flushSelectedContent(it) }
+            val pending = engine.library.value.active.filter { it.sourceId == sourceId && it.syncState in pendingSyncStates }
+            var copied = 0
+            var failed = 0
+            for (summary in pending) {
+                val draft = listOf(primarySlot, secondarySlot)
+                    .firstOrNull { it.note.value?.id == summary.id && it.contentDirty }?.note?.value?.markdown
+                try {
+                    engine.copyToLocal(summary.id, draft)
+                    copied++
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    failed++
+                }
+            }
+            controls.update {
+                it.copy(userMessage = when {
+                    failed > 0 -> strings.getString(UiR.ui_some_notes_couldn_t_be_copied_the_originals_were_not_changed)
+                    copied == 0 -> strings.getString(UiR.ui_this_source_has_no_unsynced_notes)
+                    else -> strings.getString(UiR.ui_copied_value_notes_to_the_local_source, copied)
+                })
+            }
+        }
+    }
+
+    /** Asks for an export destination: Markdown alone, or an archive when attachments belong to it. */
+    fun requestExport() {
+        val note = selected.value ?: return
+        viewModelScope.launch {
+            val archive = attachmentTargets(note.id).isNotEmpty()
+            controls.update { it.copy(exportRequest = NoteExportRequest(note.id, noteExportFile(note.title, archive))) }
+        }
+    }
+
+    fun cancelExport() {
+        controls.update { it.copy(exportRequest = null) }
+    }
+
+    /**
+     * Writes the canonical Markdown, or the unsaved draft on screen, and its managed attachments to a
+     * document the person created. An incomplete write is reported as such and its partial file removed.
+     */
+    fun exportNote(request: NoteExportRequest, destination: Uri) {
+        controls.update { it.copy(exportRequest = null) }
+        viewModelScope.launch {
+            val resolver = getApplication<Application>().contentResolver
+            try {
+                listOf(primarySlot, secondarySlot).filter { it.note.value?.id == request.noteId }.forEach { flushSelectedContent(it) }
+                val note = engine.note(request.noteId) ?: throw IncompleteExportException("The Note no longer exists")
+                val draft = listOf(primarySlot, secondarySlot)
+                    .firstOrNull { it.note.value?.id == note.id && it.contentDirty }?.note?.value?.markdown
+                val attachments = engine.managedAttachments(note.id)
+                if (attachments.isNotEmpty() != request.file.archive) {
+                    throw IncompleteExportException("Attachments changed while exporting")
+                }
+                val exported = ExportedNote(
+                    id = note.id.value,
+                    sourceId = note.sourceId.value,
+                    title = note.title,
+                    category = note.category,
+                    favorite = note.favorite,
+                    markdown = draft ?: note.markdown,
+                    createdAt = note.createdAt.toString(),
+                    updatedAt = note.updatedAt.toString(),
+                )
+                withContext(Dispatchers.IO) {
+                    val output = resolver.openOutputStream(destination, "wt")
+                        ?: throw IncompleteExportException("The destination couldn't be opened")
+                    output.use {
+                        if (request.file.archive) {
+                            writeNoteArchive(it, exported, attachments.map { attachment ->
+                                ExportedAttachment(
+                                    id = attachment.id.value,
+                                    displayName = attachment.displayName,
+                                    mediaType = attachment.mediaType,
+                                    target = attachment.markdownTarget,
+                                    open = { engine.openManagedAttachment(attachment.id) },
+                                )
+                            })
+                        } else {
+                            writeNoteMarkdown(it, exported)
+                        }
+                    }
+                }
+                showMessage(UiR.ui_the_note_was_exported)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                android.util.Log.w("KgsNotes", "Note export failed", failure)
+                val removed = withContext(NonCancellable + Dispatchers.IO) {
+                    runCatching { android.provider.DocumentsContract.deleteDocument(resolver, destination) }.getOrDefault(false)
+                }
+                showMessage(
+                    if (removed) UiR.ui_the_export_couldn_t_be_completed_your_note_was_not_changed
+                    else UiR.ui_the_export_is_incomplete_delete_the_exported_file_your_note_was_not_changed,
+                )
+            }
+        }
+    }
+
+    /** Saves the preserved bytes of an unreadable record as a new Local Note; the evidence stays. */
+    fun rescueUnreadableRecord(recordId: String) {
+        viewModelScope.launch {
+            try {
+                engine.rescueUnreadableRecord(recordId)
+                showMessage(UiR.ui_a_copy_was_saved_in_the_local_source)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                showMessage(UiR.ui_the_record_couldn_t_be_rescued_its_files_were_kept)
+            }
+        }
+    }
+
+    /** Deletes a record's preserved files after the person explicitly confirmed it. */
+    fun discardUnreadableRecord(recordId: String) {
+        viewModelScope.launch {
+            try {
+                engine.discardUnreadableRecord(recordId)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                showMessage(UiR.ui_the_record_couldn_t_be_removed_its_files_were_kept)
+            }
+        }
+    }
 
     fun clearUserMessage() {
         controls.update { it.copy(userMessage = null) }
@@ -891,14 +1149,9 @@ class NotesViewModel internal constructor(
         preferences.edit().putString(NOTE_FORMAT_PREFERENCE_KEY, preference.name).apply()
         controls.update { it.copy(noteFormatPreference = preference) }
         val suffix = preference.nextcloudSuffix ?: return
+        val sources = nextcloudSources.values.toList()
         viewModelScope.launch {
-            var failed = false
-            for (source in nextcloudSources.values) {
-                if (runCatching { source.setFileSuffix(suffix) }.isFailure) {
-                    failed = true
-                }
-            }
-            if (failed) {
+            if (!applyNoteFormatToSources(sources, suffix)) {
                 controls.update {
                     it.copy(userMessage = strings.getString(UiR.ui_some_sources_couldn_t_apply_the_new_note_format))
                 }
@@ -909,16 +1162,14 @@ class NotesViewModel internal constructor(
     fun changeSource(id: SourceId) {
         val current = selected.value ?: return
         if (current.sourceId == id || controls.value.movingNoteId != null) return
+        if (current.readOnly) {
+            showMessage(UiR.ui_this_shared_note_is_read_only_copy_it_to_the_local_source_to_edit_it)
+            return
+        }
         controls.update { it.copy(movingNoteId = current.id) }
-        val s = slot
         viewModelScope.launch {
             try {
-                flushSelectedContent(s)
-                val movedId = engine.moveToSource(current.id, id)
-                carryPreviewMode(current.id, movedId)
-                if (s.note.value?.id == current.id) {
-                    s.note.value = engine.openEditingSession(movedId)?.withPendingDisplayMetadata(s)
-                }
+                val movedId = moveNoteWithOpenPages(current.id, id)
                 if (id != LocalSourceId) scheduleSynchronization(movedId)
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -939,20 +1190,36 @@ class NotesViewModel internal constructor(
     fun closeEditor() {
         val s = slot
         viewModelScope.launch {
-            flushSelectedContent(s)
-            s.note.value?.id?.let { engine.close(it) }
-            s.note.value = null
+            if (!flushSelectedContent(s)) return@launch
+            s.persistence.withLock {
+                s.note.value?.id?.let { engine.close(it) }
+                resetSlot(s)
+            }
+            refreshSavingState()
         }
     }
 
     fun moveToTrash() {
-        val id = selected.value?.id ?: return
+        val current = selected.value ?: return
+        val id = current.id
+        if (current.readOnly) {
+            showMessage(UiR.ui_this_shared_note_is_read_only_copy_it_to_the_local_source_to_edit_it)
+            return
+        }
         val s = slot
         viewModelScope.launch {
-            flushSelectedContent(s)
-            engine.moveToTrash(id)
+            if (!flushSelectedContent(s)) return@launch
+            try {
+                engine.moveToTrash(id)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                showMessage(UiR.ui_some_note_actions_couldn_t_be_completed_your_notes_were_kept)
+                return@launch
+            }
             scheduleSynchronization(id)
-            if (s.note.value?.id == id) s.note.value = null
+            s.persistence.withLock { if (s.note.value?.id == id) resetSlot(s) }
+            refreshSavingState()
         }
     }
 
@@ -960,21 +1227,85 @@ class NotesViewModel internal constructor(
         val id = selected.value?.id ?: return
         val s = slot
         viewModelScope.launch {
-            engine.restore(id)
-            if (s.note.value?.id == id) s.note.value = engine.openEditingSession(id)
-            scheduleSynchronization(id)
+            try {
+                engine.restore(id)
+                if (s.note.value?.id == id) s.note.value = engine.openEditingSession(id)
+                scheduleSynchronization(id)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                showMessage(UiR.ui_some_note_actions_couldn_t_be_completed_your_notes_were_kept)
+            }
         }
     }
 
     fun deletePermanently() {
         val id = selected.value?.id ?: return
-        val s = slot
         viewModelScope.launch {
-            engine.deletePermanently(id)
+            try {
+                engine.deletePermanently(id)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // An unconfirmed remote deletion keeps the Note, retryable, in Trash.
+                showMessage(UiR.ui_the_note_couldn_t_be_deleted_permanently_it_stays_in_trash_try_again)
+                return@launch
+            }
             preferences.edit().remove(previewModeKey(id)).apply()
-            if (s.note.value?.id == id) s.note.value = null
+            closeDeletedNote(id)
         }
     }
+
+    /** No page may keep showing, or offer actions for, a permanently deleted Note. */
+    private suspend fun closeDeletedNote(id: NoteId) {
+        for (open in listOf(primarySlot, secondarySlot)) {
+            if (open.note.value?.id != id) continue
+            open.contentSave?.cancel()
+            open.metadataSave?.cancel()
+            open.persistence.withLock { if (open.note.value?.id == id) resetSlot(open) }
+        }
+        refreshSavingState()
+    }
+
+    /**
+     * Moves a Note while every page showing it is held, so a debounced save cannot write into
+     * the original during the transfer. Pages follow the returned identity with their newest
+     * draft, which is then saved to the destination copy.
+     */
+    private suspend fun moveNoteWithOpenPages(id: NoteId, destination: SourceId): NoteId {
+        val pages = listOf(primarySlot, secondarySlot).filter { it.note.value?.id == id }
+        return withSlotsLocked(pages) {
+            for (open in pages) if (open.note.value?.id == id) {
+                saveContentLocked(open)
+                saveMetadataLocked(open)
+            }
+            val movedId = engine.moveToSource(id, destination)
+            carryPreviewMode(id, movedId)
+            for (open in pages) {
+                val shown = open.note.value?.takeIf { it.id == id } ?: continue
+                if (movedId != id) engine.close(id)
+                val opened = engine.openEditingSession(movedId)
+                if (opened == null) {
+                    resetSlot(open)
+                    continue
+                }
+                open.note.value = opened.copy(
+                    markdown = if (open.contentDirty) shown.markdown else opened.markdown,
+                    title = open.pendingTitle ?: opened.title,
+                    category = open.pendingCategory ?: opened.category,
+                )
+            }
+            movedId
+        }.also {
+            for (open in pages) if (open.note.value?.id == it && (open.contentDirty || open.metadataDirty)) {
+                scheduleContentSave(open)
+                if (open.metadataDirty) scheduleMetadataSave(open, immediate = true)
+            }
+        }
+    }
+
+    private suspend fun <T> withSlotsLocked(slots: List<EditorSlot>, block: suspend () -> T): T =
+        if (slots.isEmpty()) block() else slots.first().persistence.withLock { withSlotsLocked(slots.drop(1), block) }
 
     fun renameNote(id: NoteId, title: String) {
         viewModelScope.launch {
@@ -987,28 +1318,35 @@ class NotesViewModel internal constructor(
     fun applyToNotes(ids: Set<NoteId>, operation: NoteSelectionOperation, value: String = "") {
         viewModelScope.launch {
             var failures = 0
+            var readOnlySkipped = 0
             ids.forEach { id ->
-                runCatching {
-                    val note = engine.note(id) ?: return@runCatching
-                    // A Note leaving the library also leaves any page showing it, edits saved first.
+                try {
+                    val note = engine.note(id) ?: return@forEach
+                    if (note.readOnly && operation in readOnlyBlockedOperations) {
+                        readOnlySkipped++
+                        return@forEach
+                    }
+                    // A Note moved to Trash also leaves any page showing it, edits saved first.
                     val closing = listOf(primarySlot, secondarySlot).firstOrNull { it.note.value?.id == id }
-                        ?.takeIf { operation == NoteSelectionOperation.TRASH || operation == NoteSelectionOperation.DELETE }
-                    closing?.let { flushSelectedContent(it) }
+                        ?.takeIf { operation == NoteSelectionOperation.TRASH }
                     when (operation) {
                         NoteSelectionOperation.FAVORITE -> {
                             val desiredFavorite = value != "remove"
                             if (note.favorite != desiredFavorite) engine.toggleFavorite(id)
                         }
-                        NoteSelectionOperation.CATEGORY -> engine.setCategory(id, value)
-                        NoteSelectionOperation.MOVE -> {
-                            val movedId = engine.moveToSource(id, SourceId(value))
-                            carryPreviewMode(id, movedId)
+                        NoteSelectionOperation.CATEGORY -> withOpenPagesSaved(id) {
+                            preservingDraftTargets(listOf(id)) { engine.setCategory(id, value) }
                         }
-                        NoteSelectionOperation.TRASH -> engine.moveToTrash(id)
+                        NoteSelectionOperation.MOVE -> {
+                            val movedId = moveNoteWithOpenPages(id, SourceId(value))
+                            if (SourceId(value) != LocalSourceId) scheduleSynchronization(movedId)
+                        }
+                        NoteSelectionOperation.TRASH -> withOpenPagesSaved(id) { engine.moveToTrash(id) }
                         NoteSelectionOperation.RESTORE -> engine.restore(id)
                         NoteSelectionOperation.DELETE -> {
                             engine.deletePermanently(id)
                             preferences.edit().remove(previewModeKey(id)).apply()
+                            closeDeletedNote(id)
                         }
                     }
                     closing?.note?.value = null
@@ -1019,12 +1357,56 @@ class NotesViewModel internal constructor(
                             NoteSelectionOperation.RESTORE,
                         ) && note.sourceId != LocalSourceId
                     ) scheduleSynchronization(id)
-                }.onFailure { failures++ }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    failures++
+                }
             }
-            if (failures > 0) controls.update {
-                it.copy(userMessage = strings.getString(UiR.ui_some_note_actions_couldn_t_be_completed_your_notes_were_kept))
+            when {
+                failures > 0 -> showMessage(UiR.ui_some_note_actions_couldn_t_be_completed_your_notes_were_kept)
+                readOnlySkipped > 0 -> showMessage(UiR.ui_read_only_notes_were_left_unchanged)
             }
         }
+    }
+
+    /** Saves any page showing [id] and holds it while [operation] changes that Note. */
+    private suspend fun withOpenPagesSaved(id: NoteId, operation: suspend () -> Unit) {
+        val pages = listOf(primarySlot, secondarySlot).filter { it.note.value?.id == id }
+        withSlotsLocked(pages) {
+            for (open in pages) if (open.note.value?.id == id) {
+                saveContentLocked(open)
+                saveMetadataLocked(open)
+            }
+            operation()
+        }
+    }
+
+    /**
+     * Category changes move a Note's file and rewrite its managed attachment targets on disk.
+     * Drafts typed meanwhile still hold the old targets; rebase them as part of the same change.
+     */
+    private suspend fun <T> preservingDraftTargets(ids: Collection<NoteId>, operation: suspend () -> T): T {
+        val before = ids.associateWith { attachmentTargets(it) }.filterValues { it.isNotEmpty() }
+        try {
+            return operation()
+        } finally {
+            for ((id, targets) in before) {
+                val after = attachmentTargets(id)
+                for (open in listOf(primarySlot, secondarySlot)) {
+                    val shown = open.note.value?.takeIf { it.id == id && open.contentDirty } ?: continue
+                    open.note.value = shown.copy(markdown = rebaseManagedTargets(shown.markdown, targets, after))
+                }
+            }
+        }
+    }
+
+    private suspend fun attachmentTargets(id: NoteId): Map<com.kgs.notes.engine.AttachmentId, String> = try {
+        engine.managedAttachments(id).associate { it.id to it.markdownTarget }
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: Exception) {
+        emptyMap()
     }
 
     fun setFilter(value: LibraryFilter) {
@@ -1115,11 +1497,18 @@ class NotesViewModel internal constructor(
         controls.update { it.copy(managingCategories = true) }
         viewModelScope.launch {
             try {
-                saveCurrentContent()
-                savePendingMetadata()
+                val pages = listOf(primarySlot, secondarySlot)
                 val target = replacement?.let { com.kgs.notes.engine.normalizedCategoryPath(it) }
-                if (target == null) engine.deleteCategory(sourceId, category)
-                else engine.renameCategory(sourceId, category, target)
+                withSlotsLocked(pages) {
+                    pages.forEach { open ->
+                        saveContentLocked(open)
+                        saveMetadataLocked(open)
+                    }
+                    preservingDraftTargets(pages.mapNotNull { it.note.value?.id }) {
+                        if (target == null) engine.deleteCategory(sourceId, category)
+                        else engine.renameCategory(sourceId, category, target)
+                    }
+                }
                 controls.update { current ->
                     val path = current.libraryCategory
                     current.copy(libraryCategory = if (path != null && (path == category || path.startsWith("$category/"))) {
@@ -1177,20 +1566,75 @@ class NotesViewModel internal constructor(
             open.contentSave?.cancel()
             open.metadataSave?.cancel()
             open.contentSave = viewModelScope.launch {
-                saveCurrentContent(open)
-                savePendingMetadata(open)
+                persistSlot(open) {
+                    saveContentLocked(open)
+                    saveMetadataLocked(open)
+                }
             }
         }
     }
 
-    private suspend fun flushSelectedContent(s: EditorSlot = slot) {
+    /** Saves the page's draft before it is left; false keeps the page, its draft and a retry state. */
+    private suspend fun flushSelectedContent(s: EditorSlot = slot): Boolean {
         s.contentSave?.cancel()
         s.metadataSave?.cancel()
-        saveCurrentContent(s)
-        savePendingMetadata(s)
+        return persistSlot(s) {
+            saveContentLocked(s)
+            saveMetadataLocked(s)
+        }
     }
 
-    private suspend fun saveCurrentContent(s: EditorSlot = slot) {
+    /**
+     * Runs one serialized write of a page. Storage failures never escape a coroutine: the draft
+     * stays dirty on screen and the page reports a retryable failure. A started write finishes
+     * even if the request that scheduled it is superseded.
+     */
+    private suspend fun persistSlot(s: EditorSlot, block: suspend () -> Unit): Boolean = try {
+        withContext(NonCancellable) { s.persistence.withLock { block() } }
+        if (s.saveFailed) {
+            s.saveFailed = false
+            refreshSavingState()
+        }
+        true
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (failure: Exception) {
+        s.saveFailed = true
+        controls.update {
+            it.copy(userMessage = strings.getString(
+                if (failure is ReadOnlyNoteException) UiR.ui_this_shared_note_is_read_only_your_changes_are_kept_here
+                else UiR.ui_your_latest_changes_couldn_t_be_saved_they_are_kept_on_screen,
+            ))
+        }
+        refreshSavingState()
+        false
+    }
+
+    fun retrySave() {
+        val s = slot
+        viewModelScope.launch { flushSelectedContent(s) }
+    }
+
+    /** Explicitly drops this page's unsaved draft and shows the Note as it is stored. */
+    fun discardUnsavedChanges() {
+        val s = slot
+        viewModelScope.launch {
+            s.contentSave?.cancel()
+            s.metadataSave?.cancel()
+            s.persistence.withLock {
+                val id = s.note.value?.id ?: return@withLock
+                s.contentDirty = false
+                s.metadataDirty = false
+                s.pendingTitle = null
+                s.pendingCategory = null
+                s.saveFailed = false
+                s.note.value = engine.note(id)
+            }
+            refreshSavingState()
+        }
+    }
+
+    private suspend fun saveContentLocked(s: EditorSlot) {
         if (!s.contentDirty) {
             refreshSavingState()
             return
@@ -1198,43 +1642,41 @@ class NotesViewModel internal constructor(
         val current = s.note.value ?: return
         engine.updateContent(current.id, current.markdown)
         val displayed = s.note.value
-        s.contentDirty = displayed?.id == current.id && displayed.markdown != current.markdown
+        if (displayed?.id != current.id) return
+        s.contentDirty = displayed.markdown != current.markdown
         s.note.value = engine.note(current.id)
-            ?.copy(markdown = if (s.contentDirty) displayed?.markdown.orEmpty() else current.markdown)
+            ?.copy(markdown = if (s.contentDirty) displayed.markdown else current.markdown)
             ?.withPendingDisplayMetadata(s)
         refreshSavingState()
         scheduleSynchronization(current.id)
     }
 
-    private fun scheduleMetadataSave(immediate: Boolean = false) {
-        val s = slot
+    private fun scheduleMetadataSave(s: EditorSlot = slot, immediate: Boolean = false) {
         s.metadataSave?.cancel()
         s.metadataSave = viewModelScope.launch {
             if (!immediate) delay(METADATA_SAVE_DELAY_MILLIS)
-            try {
-                savePendingMetadata(s)
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (_: Exception) {
-                controls.update { it.copy(userMessage = strings.getString(UiR.ui_kgs_notes_couldn_t_save_this_change_please_try_again)) }
-            }
+            persistSlot(s) { saveMetadataLocked(s) }
         }
     }
 
-    private suspend fun savePendingMetadata(s: EditorSlot = slot) {
+    private suspend fun saveMetadataLocked(s: EditorSlot) {
         if (!s.metadataDirty) {
             refreshSavingState()
             return
         }
         val id = s.note.value?.id ?: return
+        // A Category change moves the Note's file; the draft is written at its old location first.
+        saveContentLocked(s)
         val title = s.pendingTitle
         val category = s.pendingCategory
-        if (title != null) engine.rename(id, title)
-        if (category != null) engine.setCategory(id, category)
+        preservingDraftTargets(listOf(id)) {
+            if (title != null) engine.rename(id, title)
+            if (category != null) engine.setCategory(id, category)
+        }
         if (s.pendingTitle == title) s.pendingTitle = null
         if (s.pendingCategory == category) s.pendingCategory = null
         s.metadataDirty = s.pendingTitle != null || s.pendingCategory != null
-        s.note.value = engine.note(id)?.withPendingDisplayMetadata(s)
+        if (s.note.value?.id == id) s.note.value = engine.note(id)?.withPendingDisplayMetadata(s)
         refreshSavingState()
         scheduleSynchronization(id)
     }
@@ -1249,7 +1691,14 @@ class NotesViewModel internal constructor(
         return viewModelScope.launch {
             while (isActive) {
                 val before = engine.note(id) ?: break
-                engine.synchronize(id)
+                try {
+                    engine.synchronize(id)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    // The pending change stays saved locally; refresh retries it later.
+                    break
+                }
                 val after = engine.note(id) ?: break
                 for (open in listOf(primarySlot, secondarySlot)) {
                     if (open.note.value?.id == id) open.note.value = after.withPendingDisplayMetadata(open)
@@ -1288,7 +1737,7 @@ class NotesViewModel internal constructor(
         }
         if (accounts.isNotEmpty()) {
             refreshAndRetrySources()
-            applyPreferredNoteFormat(nextcloudSources.values)
+            applyPreferredNoteFormat(nextcloudSources.values.toList())
         }
     }
 
@@ -1374,13 +1823,7 @@ class NotesViewModel internal constructor(
 
     private suspend fun applyPreferredNoteFormat(sources: Collection<NextcloudNotesSource>) {
         val suffix = controls.value.noteFormatPreference.nextcloudSuffix ?: return
-        var failed = false
-        for (source in sources) {
-            if (runCatching { source.setFileSuffix(suffix) }.isFailure) {
-                failed = true
-            }
-        }
-        if (failed) {
+        if (!applyNoteFormatToSources(sources, suffix)) {
             controls.update {
                 it.copy(userMessage = strings.getString(UiR.ui_a_source_connected_but_its_note_format_couldn_t_be_changed))
             }
@@ -1392,7 +1835,49 @@ class NotesViewModel internal constructor(
     }
 
     private fun refreshSavingState() {
-        controls.update { it.copy(saving = contentDirty || metadataDirty) }
+        val failed = NotePane.entries.filter { slotFor(it).saveFailed }.toSet()
+        controls.update { it.copy(saving = contentDirty || metadataDirty, failedPanes = failed) }
+    }
+
+    private fun showMessage(res: Int) {
+        controls.update { it.copy(userMessage = strings.getString(res)) }
+    }
+
+    /** Forgets a page's Note and every unsaved change; callers hold its persistence lock or own it. */
+    private fun resetSlot(s: EditorSlot) {
+        s.contentSave?.cancel()
+        s.metadataSave?.cancel()
+        s.contentSave = null
+        s.metadataSave = null
+        s.pendingTitle = null
+        s.pendingCategory = null
+        s.contentDirty = false
+        s.metadataDirty = false
+        s.saveFailed = false
+        s.note.value = null
+        s.editorMode = null
+    }
+
+    private fun clearSlot(s: EditorSlot) {
+        resetSlot(s)
+        refreshSavingState()
+    }
+
+    private suspend fun refreshSearchIndex(library: LibrarySnapshot) {
+        val notes = library.active + library.trash
+        val indexed = withContext(Dispatchers.IO) {
+            val previous = searchIndex.value
+            notes.associate { summary ->
+                val cached = previous[summary.id]
+                summary.id to if (cached != null && cached.updatedAt == summary.updatedAt && cached.syncState == summary.syncState) {
+                    cached
+                } else {
+                    val body = try { engine.note(summary.id)?.markdown } catch (cancelled: CancellationException) { throw cancelled } catch (_: Exception) { null }
+                    IndexedBody(summary.updatedAt, summary.syncState, normalizeForSearch(body ?: summary.previewMarkdown))
+                }
+            }
+        }
+        searchIndex.value = indexed
     }
 
     private fun Note.withPendingDisplayMetadata(s: EditorSlot = slot): Note = copy(
@@ -1461,6 +1946,8 @@ class NotesViewModel internal constructor(
         val managingCategories: Boolean = false,
         val editorLayout: EditorLayoutPreference = EditorLayoutPreference.AUTOMATIC,
         val splitFraction: Float = DefaultSplitFraction,
+        val failedPanes: Set<NotePane> = emptySet(),
+        val exportRequest: NoteExportRequest? = null,
     ) {
         fun comparator(): Comparator<NoteSummary> {
             val base = when (sort) {
@@ -1471,6 +1958,15 @@ class NotesViewModel internal constructor(
             return if (ascending) base else base.reversed()
         }
     }
+
+    private data class IndexedBody(val updatedAt: java.time.Instant, val syncState: NoteSyncState, val text: String)
+
+    private val readOnlyBlockedOperations = setOf(
+        NoteSelectionOperation.CATEGORY,
+        NoteSelectionOperation.MOVE,
+        NoteSelectionOperation.TRASH,
+        NoteSelectionOperation.DELETE,
+    )
 
     private val pendingSyncStates = setOf(
         NoteSyncState.SAVED_LOCALLY,
@@ -1496,5 +1992,6 @@ internal fun NotesUiState.forPane(pane: NotePane): NotesUiState = if (pane == ac
     selectedNote = otherPane?.note,
     editorMode = otherPane?.editorMode ?: editorMode,
     saving = false,
+    saveFailed = otherPane?.saveFailed == true,
     changingSource = false,
 )

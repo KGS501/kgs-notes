@@ -7,7 +7,10 @@ import { Markdown } from '@tiptap/markdown'
 import StarterKit from '@tiptap/starter-kit'
 import { MarkdownAlert } from './markdown-alert'
 import { viewportBridge, type EditorViewport } from './editor-viewport'
-import { preservingMarked, SourceBlock, SourceFootnoteReference, SourceHtmlBlock, SourceHtmlInline } from './source-capsules'
+import { preservingMarked, SourceBlock, SourceDefinition, SourceFootnoteReference, SourceHtmlBlock, SourceHtmlInline, SourceLinkedImage } from './source-capsules'
+import { imageMarkdown, validateString, SafeCodeBlock, SafeHeading, SafeLink, SafeParagraph } from './markdown-serialization'
+import { SourcePreservation } from './source-preservation'
+import { EditorState } from '@tiptap/pm/state'
 import './style.css'
 import { editorLabel, setLabels as applyLabels } from './editor-labels'
 
@@ -30,6 +33,12 @@ declare global {
 const IMAGE_EXTENSIONS = /\.(avif|gif|jpe?g|png|svg|webp)(?:[?#].*)?$/i
 
 const attachmentImage = Image.extend({
+  addAttributes() {
+    const parent = this.parent?.() ?? {}
+    return Object.fromEntries(Object.entries(parent).map(([name, attribute]) =>
+      ['src', 'alt', 'title'].includes(name) ? [name, { ...attribute, validate: validateString }] : [name, attribute]))
+  },
+  renderMarkdown: node => imageMarkdown(node.attrs),
   addNodeView() {
     return ({ node, editor: currentEditor }) => {
       const source = String(node.attrs.src ?? '')
@@ -167,6 +176,7 @@ const attachmentImage = Image.extend({
   },
 })
 
+const preservation = new SourcePreservation()
 let originalMarkdown = ''
 let dirty = false
 let suppressUpdates = false
@@ -175,7 +185,12 @@ let loadedSuccessfully = true
 const editor = new Editor({
   element: document.querySelector('#editor') as HTMLElement,
   extensions: [
-    StarterKit,
+    StarterKit.configure({ paragraph: false, heading: false, codeBlock: false, link: false }),
+    SafeParagraph,
+    SafeHeading,
+    SafeCodeBlock,
+    // Links never navigate the editor document; the native client blocks every other page.
+    SafeLink.configure({ openOnClick: false }),
     TableKit.configure({ table: { resizable: false } }),
     TaskList,
     TaskItem.configure({ nested: true }),
@@ -185,6 +200,8 @@ const editor = new Editor({
     SourceHtmlInline,
     SourceBlock,
     SourceFootnoteReference,
+    SourceDefinition,
+    SourceLinkedImage,
     Markdown.configure({
       marked: preservingMarked(),
       markedOptions: { gfm: true, breaks: false, pedantic: false },
@@ -203,7 +220,7 @@ const editor = new Editor({
   onUpdate: () => {
     if (suppressUpdates) return
     dirty = true
-    post({ type: 'changed', markdown: editor.getMarkdown() })
+    post({ type: 'changed', markdown: preservation.serialize(editor) })
   },
   onTransaction: ({ editor: currentEditor }) => {
     if (currentEditor.isFocused) postActiveFormatting(currentEditor)
@@ -270,7 +287,7 @@ function post(payload: Record<string, unknown>) {
 }
 
 function exactMarkdown() {
-  return dirty ? editor.getMarkdown() : originalMarkdown
+  return dirty ? preservation.serialize(editor) : originalMarkdown
 }
 
 function postActiveFormatting(currentEditor: Editor = editor) {
@@ -291,32 +308,28 @@ function activeFormatting(currentEditor: Editor = editor) {
   ].filter(({ active }) => active).map(({ command }) => command)
 }
 
-/**
- * A lone marker on a Note's last line is a bullet still being written, but Markdown
- * reads it as a heading underline or literal text. Only the rendered copy changes:
- * the stored Markdown stays exact until the person edits the Note.
- */
-function renderableMarkdown(markdown: string) {
-  const lines = markdown.trimEnd().split(/\r?\n/)
-  const [indent, marker] = /^([ \t]*)([-*+])$/.exec(lines[lines.length - 1].trimEnd())?.slice(1) ?? []
-  if (!marker) return markdown
-  if (lines.filter(line => /^ {0,3}(```|~~~)/.test(line)).length % 2 === 1) return markdown
-  lines.pop()
-  const previous = lines[lines.length - 1] ?? ''
-  if (/^\s*[-*+] \[[ xX]\]/.test(previous)) return [...lines, `${indent}${marker} [ ] `].join('\n')
-  if (new RegExp(`^${indent}\\${marker}\\s`).test(previous)) return markdown
-  return [...lines, ...(previous.trim() ? [''] : []), `${indent}${marker}`].join('\n')
-}
-
 function load(markdown: string) {
   if (loadedSuccessfully && markdown === exactMarkdown()) return
   originalMarkdown = markdown
   dirty = false
   suppressUpdates = true
   try {
-    loadedSuccessfully = editor.commands.setContent(renderableMarkdown(markdown), { contentType: 'markdown', emitUpdate: false })
+    const parsed = preservation.parse(editor, markdown)
+    // A programmatic load is never an undoable edit: it replaces the document
+    // outside history, then starts a fresh history at the loaded Note.
+    loadedSuccessfully = editor.chain().setMeta('addToHistory', false)
+      .setContent(parsed.content, { emitUpdate: false }).run()
     if (!loadedSuccessfully) post({ type: 'fallback' })
-    else postActiveFormatting()
+    else {
+      resetHistory()
+      // Without exact block boundaries an edit could normalize unrelated
+      // source, so the Note stays in Source Mode instead.
+      if (parsed.apply(editor)) postActiveFormatting()
+      else {
+        loadedSuccessfully = false
+        post({ type: 'fallback' })
+      }
+    }
   } catch {
     loadedSuccessfully = false
     // Never forward parser exceptions or Note contents through diagnostic messages.
@@ -324,6 +337,11 @@ function load(markdown: string) {
   } finally {
     suppressUpdates = false
   }
+}
+
+function resetHistory() {
+  const { state } = editor
+  editor.view.updateState(EditorState.create({ schema: state.schema, doc: state.doc, selection: state.selection, plugins: state.plugins }))
 }
 
 function setLabels(labels: Record<string, string>, language: string) {
@@ -370,5 +388,45 @@ function focus() {
   editor.view.focus()
 }
 
-window.kgsEditor = { load, markdown: exactMarkdown, setDarkMode, setLabels, run, focus, ...viewportBridge(editor, exactMarkdown) }
+const viewportAccess = viewportBridge(editor, exactMarkdown)
+
+// The host remembers where each Note was read, so a recreated editor (a fold,
+// rotation or relaunch) can return to the same content.
+let viewportReport = 0
+function reportViewport() {
+  window.clearTimeout(viewportReport)
+  viewportReport = window.setTimeout(() => {
+    try { post({ type: 'viewport', viewport: viewportAccess.viewport() }) } catch { /* layout not ready */ }
+  }, 150)
+}
+window.addEventListener('scroll', reportViewport, { passive: true })
+editor.on('selectionUpdate', reportViewport)
+
+// Links never navigate the editor document: the host opens Notes in the app and
+// everything else outside it. A tap while typing still places the caret, so
+// linked text stays editable; a tap while reading opens the link.
+let linkTap: { id: number; x: number; y: number; href: string } | null = null
+paper.addEventListener('pointerdown', event => {
+  linkTap = null
+  const link = (event.target as Element | null)?.closest?.('a[href]')
+  if (!link || event.button !== 0 || (editor.isEditable && editor.isFocused)) return
+  linkTap = { id: event.pointerId, x: event.clientX, y: event.clientY, href: link.getAttribute('href') ?? '' }
+  // Keep the keyboard closed: the tap opens the link instead of focusing it.
+  event.preventDefault()
+}, true)
+paper.addEventListener('pointermove', event => {
+  if (linkTap && Math.hypot(event.clientX - linkTap.x, event.clientY - linkTap.y) > 8) linkTap = null
+}, true)
+paper.addEventListener('pointercancel', () => { linkTap = null }, true)
+paper.addEventListener('pointerup', event => {
+  const tap = linkTap
+  linkTap = null
+  if (!tap || tap.id !== event.pointerId || Math.hypot(event.clientX - tap.x, event.clientY - tap.y) > 8) return
+  if (tap.href.trim()) post({ type: 'openLink', href: tap.href })
+}, true)
+document.addEventListener('click', event => {
+  if ((event.target as Element | null)?.closest?.('a[href]')) event.preventDefault()
+}, true)
+
+window.kgsEditor = { load, markdown: exactMarkdown, setDarkMode, setLabels, run, focus, ...viewportAccess }
 post({ type: 'ready' })

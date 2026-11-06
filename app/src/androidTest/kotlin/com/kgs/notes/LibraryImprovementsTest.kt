@@ -7,6 +7,8 @@ import androidx.test.platform.app.InstrumentationRegistry
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.test.*
+import androidx.compose.ui.test.assertTextContains
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.text.intl.LocaleList
 import androidx.compose.ui.unit.DpSize
@@ -206,6 +208,13 @@ class LibraryImprovementsTest {
 
         compose.onNodeWithTag("manage-category-${LocalSourceId.value}-Work").performClick()
         compose.onNodeWithTag("rename-category-field").performTextReplacement("Office")
+        // Confirm is enabled only once the new name reached the field; slow emulators may lag a frame.
+        compose.waitUntil(5_000) {
+            runCatching {
+                compose.onNodeWithTag("rename-category-field").assertTextContains("Office")
+                compose.onNodeWithTag("category-rename-confirm").assertIsEnabled()
+            }.isSuccess
+        }
         compose.onNodeWithTag("category-rename-confirm").performClick()
         compose.runOnIdle { assertEquals(Triple(LocalSourceId, "Work", "Office"), renamed) }
 
@@ -339,9 +348,9 @@ class LibraryImprovementsTest {
         }
         compose.onNodeWithContentDescription("Sort notes").performClick()
         compose.waitForIdle()
-        val library = compose.onNodeWithTag("library-pane").fetchSemanticsNode().boundsInRoot
-        val sheet = compose.onNodeWithTag("sort-options-menu").fetchSemanticsNode().boundsInRoot
-        assertTrue("The sheet must stay within the library pane: $sheet in $library",
+        val library = compose.onNodeWithTag("library-pane").fetchSemanticsNode().screenBounds()
+        val sheet = compose.onNodeWithTag("sort-options-menu").fetchSemanticsNode().screenBounds()
+        assertTrue("The sheet must stay within the library pane on screen: $sheet in $library",
             sheet.left >= library.left - 1f && sheet.right <= library.right + 1f && sheet.bottom <= library.bottom + 1f)
     }
 
@@ -362,19 +371,26 @@ class LibraryImprovementsTest {
     }
 
     @Test fun sheetsStayContentSizedAndConstrainedOnLargeScreens() {
-        var pixelsPerDp = 1f
+        // Modal sheets render in their own window, which ForcedSize cannot resize and which
+        // provides its own density. Measure in that window's density: on the tablet runner
+        // the window is genuinely wide, and on phones the cap must still hold.
+        var pixelsPerDp = 0f
+        var windowWidth = 0f
         compose.setContent {
             DeviceConfigurationOverride(DeviceConfigurationOverride.ForcedSize(DpSize(1200.dp, 850.dp))) {
-                pixelsPerDp = LocalDensity.current.density
                 KgsNotesTheme {
                     com.kgs.notes.design.KgsBottomSheet(true, {}, modifier = androidx.compose.ui.Modifier.testTag("wide-sheet")) {
+                        pixelsPerDp = LocalDensity.current.density
+                        windowWidth = androidx.compose.ui.platform.LocalWindowInfo.current.containerSize.width.toFloat()
                         androidx.compose.material3.Text("Sheet content")
                     }
                 }
             }
         }
         val sheet = compose.onNodeWithTag("wide-sheet").fetchSemanticsNode().boundsInRoot
-        assertTrue(sheet.width <= 640f * pixelsPerDp + 1f)
+        assertTrue(pixelsPerDp > 0f)
+        assertTrue("Sheets must be capped at 640 dp: ${sheet.width}px at $pixelsPerDp", sheet.width <= 640f * pixelsPerDp + 1f)
+        assertTrue("Sheets fill narrower windows", sheet.width >= minOf(windowWidth, 640f * pixelsPerDp) - 1f)
         assertTrue(sheet.height < 400f * pixelsPerDp)
     }
 
@@ -385,3 +401,6 @@ class LibraryImprovementsTest {
         title = title, snippet = "Body", category = "", favorite = false,
         createdAt = Instant.EPOCH, updatedAt = Instant.EPOCH)
 }
+
+private fun androidx.compose.ui.semantics.SemanticsNode.screenBounds(): androidx.compose.ui.geometry.Rect =
+    androidx.compose.ui.geometry.Rect(positionOnScreen, androidx.compose.ui.geometry.Size(size.width.toFloat(), size.height.toFloat()))

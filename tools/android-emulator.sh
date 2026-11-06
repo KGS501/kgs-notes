@@ -21,16 +21,17 @@ GRADLEW="${KGS_NOTES_GRADLEW:-$PROJECT_ROOT/gradlew}"
 SETUP_TIMEOUT_SECONDS="${KGS_ANDROID_SETUP_TIMEOUT_SECONDS:-5}"
 
 usage() {
-    echo "Usage: tools/android-emulator.sh create|start|wait|status|serial|stop|install <apk>|launch|screenshot <png>|ui [xml]|logs|adb <args...>|connected-test [gradle args...]"
+    echo "Usage: tools/android-emulator.sh doctor|create|start|wait|status|serial|stop|install <apk>|launch|screenshot <png>|ui [xml]|logs|adb <args...>|connected-test [gradle args...]"
 }
 
 require_adb() {
-    test -x "$ADB" || { echo "adb not found at $ADB" >&2; exit 1; }
+    kgs_require_android_sdk || exit 1
+    test -x "$ADB" || { echo "adb not found at $ADB; install the SDK platform-tools package" >&2; exit 1; }
 }
 
 require_tooling() {
     require_adb
-    test -x "$EMULATOR" || { echo "emulator not found at $EMULATOR" >&2; exit 1; }
+    test -x "$EMULATOR" || { echo "emulator not found at $EMULATOR; install the SDK emulator package" >&2; exit 1; }
 }
 
 serial_for_avd() {
@@ -70,7 +71,7 @@ run_setup_adb() {
 
 create_avd() {
     require_tooling
-    test -x "$AVDMANAGER" || { echo "avdmanager not found at $AVDMANAGER" >&2; exit 1; }
+    test -x "$AVDMANAGER" || { echo "avdmanager not found at $AVDMANAGER; install the SDK cmdline-tools;latest package" >&2; exit 1; }
     if "$EMULATOR" -list-avds | grep -Fxq "$AVD_NAME"; then
         echo "AVD $AVD_NAME already exists"
         return
@@ -155,6 +156,7 @@ wait_for_device() {
 
 status() {
     local serial
+    require_adb
     systemctl --user is-active "$UNIT_NAME" || true
     "$ADB" devices -l
     if serial="$(ready_serial)"; then
@@ -249,6 +251,7 @@ run_connected_tests() {
 }
 
 case "${1:-}" in
+    doctor) _kgs_dev_env_report ;;
     create) create_avd ;;
     start) start_emulator ;;
     wait) wait_for_device ;;

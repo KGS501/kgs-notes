@@ -29,6 +29,8 @@ data class RemoteNote(
     val favorite: Boolean,
     val modifiedAt: Instant,
     val readOnly: Boolean,
+    /** The server reported `error=true`: it could not read this Note's file, so [markdown] holds no Note content. */
+    val contentUnavailable: Boolean = false,
 )
 
 interface NextcloudNotesApi {
@@ -43,6 +45,10 @@ interface NextcloudNotesApi {
     suspend fun update(id: Long, expectedEtag: String, note: RemoteNoteDraft): RemoteNote
 
     suspend fun delete(id: Long)
+
+    /** Sends only `favorite` (permitted on read-only Notes); content, title, Category and `modified` stay untouched. */
+    suspend fun updateFavorite(id: Long, favorite: Boolean): RemoteNote =
+        throw UnsupportedOperationException("Favorite-only updates are unavailable")
 
     suspend fun updateSettings(fileSuffix: String): NotesSettings
 }
@@ -147,11 +153,34 @@ class NextcloudNotesSource(
     override suspend fun deleteNote(remoteId: String, expectedRevision: String) {
         val id = remoteId.toLongOrNull()
             ?: throw IllegalArgumentException("Invalid Nextcloud Note identity")
-        val current = api.note(id)
-        if (current.etag != expectedRevision) throw SourceConflictException()
-        api.delete(id)
+        // An already absent Note (deleted elsewhere, or an accepted DELETE whose response was lost)
+        // is the requested outcome. Every other failure stays an unconfirmed deletion.
+        val current = try {
+            api.note(id)
+        } catch (failure: NextcloudApiException) {
+            if (failure.statusCode != 404) throw failure
+            null
+        }
+        if (current != null) {
+            if (current.etag != expectedRevision) throw SourceConflictException()
+            try {
+                api.delete(id)
+            } catch (failure: NextcloudApiException) {
+                if (failure.statusCode != 404) throw failure
+            }
+        }
         mutableRemoteNotes.value = mutableRemoteNotes.value.filterNot { it.id == id }
         mutableNotes.value = mutableNotes.value.filterNot { it.remoteId == remoteId }
+    }
+
+    override suspend fun updateFavorite(remoteId: String, favorite: Boolean): SourceNote {
+        val id = remoteId.toLongOrNull()
+            ?: throw IllegalArgumentException("Invalid Nextcloud Note identity")
+        val updated = api.updateFavorite(id, favorite)
+        mutableRemoteNotes.value = mutableRemoteNotes.value.filterNot { it.id == updated.id } + updated
+        val published = updated.toSourceNote()
+        mutableNotes.value = mutableNotes.value.filterNot { it.remoteId == published.remoteId } + published
+        return published
     }
 
     suspend fun setFileSuffix(fileSuffix: String): String {
@@ -168,6 +197,7 @@ class NextcloudNotesSource(
         favorite = favorite,
         modifiedAt = modifiedAt,
         readOnly = readOnly,
+        contentUnavailable = contentUnavailable,
     )
 
     private data class NotesApiVersion(
