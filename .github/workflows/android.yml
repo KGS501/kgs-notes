@@ -70,6 +70,7 @@ jobs:
         run: ./gradlew --console=plain :notes-engine:test :source:nextcloud:test :editor:testDebugUnitTest :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest
       - name: Upload reports
         if: failure()
+        continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: verify-reports
@@ -142,6 +143,8 @@ jobs:
           script: mkdir -p app/build/device-logs && (adb logcat -c || true) && (./gradlew --console=plain :app:connectedDebugAndroidTest $(tools/instrumentation-suites.sh ${{ matrix.suite }}); status=$?; adb logcat -d -v threadtime > app/build/device-logs/logcat.txt; exit $status)
       - name: Upload instrumentation results
         if: always()
+        # Reports are diagnostics; a GitHub storage hiccup must not fail passing tests.
+        continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: instrumentation-${{ matrix.name }}
