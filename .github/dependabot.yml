@@ -5,3 +5,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # One weekly pull request for all action bumps, so CI runs once instead of
+    # once per action.
+    groups:
+      github-actions:
+        patterns: ["*"]

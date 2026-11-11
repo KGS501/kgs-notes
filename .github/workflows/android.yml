@@ -1,9 +1,29 @@
 name: Android
 
+# Changes that cannot affect the build skip CI entirely. A pull request that also
+# touches code still runs everything.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "**.md"
+      - LICENSE
+      - index.html
+      - favicon.svg
+      - logo/**
+      - .gitignore
+      - .gitattributes
+      - .github/dependabot.yml
   pull_request:
+    paths-ignore:
+      - "**.md"
+      - LICENSE
+      - index.html
+      - favicon.svg
+      - logo/**
+      - .gitignore
+      - .gitattributes
+      - .github/dependabot.yml
   workflow_dispatch:
 
 permissions:
@@ -61,8 +81,12 @@ jobs:
 
   # Offline emulator integration. Live Nextcloud tests skip themselves unless the
   # KGS_TEST_NEXTCLOUD_* variables are set, and this job never provides them.
+  # Each pull request already ran this matrix on its merge with main, so a push to
+  # main only runs verify, which also refreshes the Gradle cache that pull requests
+  # read. Run the workflow by hand to emulator-test main itself.
   instrumentation:
     needs: verify
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.timeout }}
     strategy:
